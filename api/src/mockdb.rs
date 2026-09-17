@@ -28,6 +28,94 @@ impl Handler {
 }
 
 impl db::Handler for Handler {
+    // ── instance ──────────────────────────────────────────────────────────
+
+    async fn get_instances<T: AsRef<str> + Sync>(
+        &self,
+        _ids: &[T],
+    ) -> db::Result<Vec<Option<db::Instance>>> {
+        Self::unsupported()
+    }
+
+    async fn get_instance_id_by_slug(&self, _slug: &str) -> db::Result<Option<String>> {
+        Self::unsupported()
+    }
+
+    async fn create_instance(
+        &self,
+        _name: &str,
+        _slug: &str,
+        _from_name: &str,
+        _signature: &str,
+        _public_submission_enabled: bool,
+    ) -> db::Result<db::Instance> {
+        Self::unsupported()
+    }
+
+    async fn update_instance(
+        &self,
+        _id: &str,
+        _change: db::InstanceUpdateShape<'_>,
+    ) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    async fn list_instances(&self) -> db::Result<Vec<db::Instance>> {
+        Self::unsupported()
+    }
+
+    // ── inbound_address ──────────────────────────────────────────────────────
+
+    async fn create_inbound_address(
+        &self,
+        _address: &str,
+        _instance_id: &str,
+        _kind: db::AddressKind,
+    ) -> db::Result<db::InboundAddress> {
+        Self::unsupported()
+    }
+
+    async fn get_inbound_address(&self, _address: &str) -> db::Result<Option<db::InboundAddress>> {
+        Self::unsupported()
+    }
+
+    async fn delete_inbound_address(&self, _address: &str) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    async fn list_inbound_addresses_by_instance(
+        &self,
+        _instance_id: &str,
+    ) -> db::Result<Vec<db::InboundAddress>> {
+        Self::unsupported()
+    }
+
+    // ── membership ────────────────────────────────────────────────────────
+
+    async fn create_membership(
+        &self,
+        _user_id: &str,
+        _instance_id: &str,
+        _role: db::MembershipRole,
+    ) -> db::Result<db::Membership> {
+        Self::unsupported()
+    }
+
+    async fn delete_membership(&self, _id: &str) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    async fn list_memberships_by_user(&self, _user_id: &str) -> db::Result<Vec<db::Membership>> {
+        Self::unsupported()
+    }
+
+    async fn list_memberships_by_instance(
+        &self,
+        _instance_id: &str,
+    ) -> db::Result<Vec<db::Membership>> {
+        Self::unsupported()
+    }
+
     // ── user ──────────────────────────────────────────────────────────────
 
     async fn get_users<T: AsRef<str> + Sync>(
@@ -42,6 +130,10 @@ impl db::Handler for Handler {
     }
 
     async fn create_user(&self, _email: &str, _name: &str) -> db::Result<db::User> {
+        Self::unsupported()
+    }
+
+    async fn list_users(&self) -> db::Result<Vec<db::User>> {
         Self::unsupported()
     }
 

@@ -1,3 +1,65 @@
+"""
+`inbound_address.kind`, exposed over GraphQL.
+"""
+enum AddressKindType {
+	EXACT
+	WILDCARD
+}
+
+"""
+An `inbound_address` row, exposed over GraphQL. Only reachable through
+`Instance.inboundAddresses`, which is owner-guarded — see that field's doc
+comment.
+"""
+type InboundAddressInfo {
+	address: String!
+	kind: AddressKindType!
+	createdAt: Int!
+}
+
+type Instance {
+	id: ID!
+	name: String!
+	slug: String!
+	publicSubmissionEnabled: Boolean!
+	fromName: String!
+	signature: String!
+	createdAt: Int!
+	"""
+	Every inbound address mapped to this instance. Owner-only: per the
+	build plan, member invites are deferred to the CLI, and inbound
+	addressing is treated with the same "owner, not just any member"
+	sensitivity — an agent can work tickets without being able to
+	reconfigure where mail routes.
+	"""
+	inboundAddresses: [InboundAddressInfo!]!
+	"""
+	Every member of this instance and their role. Owner-only. There is
+	deliberately no way to *invite* a member over GraphQL yet — see
+	`bin/cli.rs`'s `member add`, which is how an owner bootstraps their
+	team today.
+	"""
+	members: [MemberInfo!]!
+}
+
+type MemberInfo {
+	user: User!
+	role: MembershipRoleType!
+}
+
+type MembershipInfo {
+	instance: Instance!
+	role: MembershipRoleType!
+}
+
+"""
+`membership.role`, exposed over GraphQL.
+"""
+enum MembershipRoleType {
+	OWNER
+	AGENT
+}
+
 type MutationRoot {
 	"""
 	Request an email login code. **Always returns `true`**, whether or not the
@@ -15,6 +77,44 @@ type MutationRoot {
 	which step failed.
 	"""
 	verifyAuthCode(email: String!, code: String!): String
+	"""
+	Request a public-submit-form email verification code for `(slug,
+	email)`. **Always returns `true`**, same anti-enumeration rationale as
+	[`Self::request_auth_code`] — a bad Turnstile token, an unresolvable
+	slug, and an instance with public submission disabled are all
+	indistinguishable from the outside. The code itself is stored in
+	`ephemeral_state` under `kind: "submit_code"` — never in `login_code`;
+	see `auth::SUBMIT_CODE_STATE_KIND`'s doc comment for why that
+	separation is load-bearing, not incidental.
+	"""
+	requestSubmitCode(slug: String!, email: String!, turnstileToken: String): Boolean!
+	"""
+	Verify a public-submit-form code and return a short-lived (15 minute)
+	capability token scoped to exactly `(email, instance_id)` on success —
+	authorised for `submitTicket` alone, never anything a real user
+	session can do. **Returns `null` on every failure path**, mirroring
+	[`Self::verify_auth_code`]. Reads and writes `ephemeral_state` under
+	`kind: "submit_code"` exclusively — never `login_code` — which is what
+	makes it structurally impossible for a code minted by
+	[`Self::request_auth_code`] to be accepted here, or vice versa; see
+	`tests/submit_code_dynamodb_local.rs` for the regression tests.
+	"""
+	verifySubmitCode(slug: String!, email: String!, code: String!): String
+	"""
+	Add an inbound address to an instance. Owner-only. `address` is
+	normalized and classified (exact vs. `*@domain` wildcard) by
+	`inbound::routing::classify_for_storage`, the same logic `bin/cli.rs`'s
+	`address add` uses, so the two can never disagree about what counts as
+	a valid address.
+	"""
+	addInboundAddress(instanceId: ID!, address: String!): InboundAddressInfo!
+	"""
+	Remove an inbound address from an instance. Owner-only. An address
+	that doesn't exist, or that belongs to a different instance, is
+	reported the same "not found" either way — so this can't be used to
+	probe another instance's addresses.
+	"""
+	removeInboundAddress(instanceId: ID!, address: String!): Boolean!
 	"""
 	Revoke the calling token, if there is one to revoke (a `Requester`
 	capability token, or an impersonated dev-auth session, has none — this is
@@ -73,6 +173,17 @@ type PasskeyInfo {
 	lastUsedAt: Int
 }
 
+"""
+One instance, exposed publicly and unauthenticated via `publicInstances` —
+**only** the name and slug, so nothing else about a tenant (its inbound
+addresses, its members, whether it even has any) leaks to an anonymous
+caller browsing `/submit`.
+"""
+type PublicInstance {
+	name: String!
+	slug: String!
+}
+
 type QueryRoot {
 	"""
 	API build version — the git commit this server was built from.
@@ -86,6 +197,25 @@ type QueryRoot {
 	error below rather than some confusing "not found".
 	"""
 	me: User!
+	"""
+	Resolve a slug (from a URL: `/app/:slug`) to the full instance record.
+	Requires *some* authenticated user (checked here, not via a static
+	`#[graphql(guard)]`, since the guard's `Member(instance_id)` requirement
+	needs an instance id this resolver only learns after resolving the
+	slug) and, once resolved, that the caller is actually a member of that
+	instance. A slug that doesn't resolve, or that resolves to an instance
+	the caller isn't a member of, is reported identically — `None` — so a
+	non-member can't use this to probe which slugs exist.
+	"""
+	instance(slug: String!): Instance
+	"""
+	Every instance with public ticket submission enabled — the bare
+	`/submit` list. Unauthenticated by design (this is how an anonymous
+	visitor finds which organisations accept public tickets), and
+	deliberately exposes only `name`/`slug`: see [`PublicInstance`]'s doc
+	comment for why nothing else about a tenant may leak here.
+	"""
+	publicInstances: [PublicInstance!]!
 }
 
 type User {
@@ -103,6 +233,15 @@ type User {
 	metadata.
 	"""
 	passkeys: [PasskeyInfo!]!
+	"""
+	Every instance this user belongs to, and their role in each — the
+	instance switcher's data source. Same defence-in-depth guard as
+	[`Self::passkeys`], and the same caveat: this reads `self.rec.id`
+	directly (not the caller's own id off `AuthInfo`), so it is already
+	correct for a future admin-facing "look up any user" query, not just
+	`me`.
+	"""
+	memberships: [MembershipInfo!]!
 }
 
 """

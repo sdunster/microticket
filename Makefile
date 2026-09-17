@@ -105,13 +105,17 @@ local-tables-check:
 	@$(LOCAL_ENV) cd api && cargo run --quiet --bin local-tables -- --check
 
 local-seed:
-	$(NOT_YET)
+	@$(LOCAL_ENV) cd api && cargo run --quiet --bin local-seed -- apply
 
 local-seed-extract:
 	$(NOT_YET)
 
+# Deletes rows the running app itself writes (session tokens, WebAuthn state,
+# submit codes/tokens); leaves the seeded fixture rows alone. `local-seed`
+# overwrites those on the next apply, so clearing them too would just force a
+# mandatory reseed.
 local-clear:
-	$(NOT_YET)
+	@$(LOCAL_ENV) cd api && cargo run --quiet --bin local-seed -- clear
 
 local-cli:
 	$(NOT_YET)

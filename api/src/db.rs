@@ -184,6 +184,128 @@ pub enum WebauthnCredentialUpdate {
     },
 }
 
+/// An `instance` row — a tenant organisation. Owns zero or more
+/// [`InboundAddress`]es and has zero or more [`Membership`]s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Instance {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    /// Opt-in, default `false`. Gates whether the instance appears in
+    /// `publicInstances` and whether `requestSubmitCode` will issue a code for
+    /// it. Per the omit-optional-attributes house rule, only ever written as
+    /// `true`; `false` is the absence of the attribute.
+    pub public_submission_enabled: bool,
+    pub from_name: String,
+    pub signature: String,
+    pub created_at: u64,
+    /// Soft-delete marker. Same omit convention as
+    /// `public_submission_enabled`: present (and `true`) means deleted, absent
+    /// means active.
+    pub deleted: bool,
+}
+
+impl HasID for Instance {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Update shapes for `instance`. `Fields` never touches `deleted` (soft-delete
+/// is its own variant, since it's a presence-marker attribute per the house
+/// rule, not a plain field overwrite).
+#[derive(Clone, Debug, PartialEq)]
+pub enum InstanceUpdateShape<'a> {
+    Fields {
+        name: &'a str,
+        from_name: &'a str,
+        signature: &'a str,
+        public_submission_enabled: bool,
+    },
+    /// Soft-delete (`true`) or restore (`false`) an instance. `true` sets the
+    /// `deleted` attribute; `false` removes it — never written as `Bool(false)`,
+    /// per the omit-optional-attributes house rule.
+    SetDeleted(bool),
+}
+
+/// `inbound_address.kind`: whether a row matches one exact address or every
+/// address at a domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressKind {
+    Exact,
+    Wildcard,
+}
+
+impl AddressKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Wildcard => "wildcard",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "exact" => Some(Self::Exact),
+            "wildcard" => Some(Self::Wildcard),
+            _ => None,
+        }
+    }
+}
+
+/// An `inbound_address` row. Hash key is `address` itself (lowercased, or a
+/// `*@domain` wildcard) — see `SCHEMA.md` for why: inbound-mail routing
+/// (`crate::inbound::routing`) does a direct `GetItem` on the normalized
+/// recipient, so making the address the key turns routing into a `GetItem`
+/// instead of a `Query`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InboundAddress {
+    pub address: String,
+    pub instance_id: String,
+    pub kind: AddressKind,
+    pub created_at: u64,
+}
+
+/// `membership.role`: what a user may do in an instance. `Owner` implies every
+/// `Agent` permission plus instance settings (inbound addresses, membership).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MembershipRole {
+    Owner,
+    Agent,
+}
+
+impl MembershipRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Agent => "agent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "owner" => Some(Self::Owner),
+            "agent" => Some(Self::Agent),
+            _ => None,
+        }
+    }
+}
+
+/// A `membership` row: one user's role in one instance.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Membership {
+    pub id: String,
+    pub user_id: String,
+    pub instance_id: String,
+    pub role: MembershipRole,
+}
+
+impl HasID for Membership {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 /// A row in the generic, TTL'd `ephemeral_state` table: a `kind`-namespaced
 /// key/value capability store. Backs WebAuthn challenge state (`kind` "reg" /
 /// "auth") in this step, and will back the requester submit-token flow's
@@ -224,6 +346,87 @@ pub struct WebauthnState {
 /// [`crate::mail::Handler`]: `fn foo(&self, ...) -> impl Future<Output = Result<T>> + Send`,
 /// not `async_trait`.
 pub trait Handler: Sync {
+    // ── instance ──────────────────────────────────────────────────────────
+    fn get_instances<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> impl Future<Output = Result<Vec<Option<Instance>>>> + Send;
+    /// Resolve a slug to its instance id via `slug-index`, collapsed through
+    /// [`at_most_one`]. Slug uniqueness is enforced at the application layer
+    /// (DynamoDB only enforces uniqueness on the primary key) — see
+    /// [`Handler::create_instance`]'s doc comment and `SCHEMA.md`'s known-issues
+    /// register for the race this leaves open.
+    fn get_instance_id_by_slug(
+        &self,
+        slug: &str,
+    ) -> impl Future<Output = Result<Option<String>>> + Send;
+    /// Create an instance. Callers (the GraphQL layer, the CLI) are expected to
+    /// call [`Handler::get_instance_id_by_slug`] first and reject a taken slug
+    /// before calling this — this method itself does not re-check, so a
+    /// concurrent pair of callers that both pass that pre-check can still both
+    /// succeed here, leaving two instances that share a slug. That race is
+    /// documented (not fixed) in `SCHEMA.md`'s known-issues register: instance
+    /// creation is a rare, operator-driven action (CLI bootstrap), not a
+    /// high-concurrency user-facing path, so the explicit pre-check plus a
+    /// documented race was chosen over a deterministic-id-from-slug scheme
+    /// (which would break if a slug is ever renamed, since `id` is the stable
+    /// foreign key every other table references).
+    fn create_instance(
+        &self,
+        name: &str,
+        slug: &str,
+        from_name: &str,
+        signature: &str,
+        public_submission_enabled: bool,
+    ) -> impl Future<Output = Result<Instance>> + Send;
+    fn update_instance(
+        &self,
+        id: &str,
+        change: InstanceUpdateShape<'_>,
+    ) -> impl Future<Output = Result<()>> + Send;
+    /// Every instance, active and deleted alike (callers filter as needed) — a
+    /// base-table scan, not a query. Fine at this table's scale: instances are
+    /// tenant organisations, created by an operator via the CLI, not a
+    /// high-cardinality user-generated table.
+    fn list_instances(&self) -> impl Future<Output = Result<Vec<Instance>>> + Send;
+
+    // ── inbound_address ──────────────────────────────────────────────────────
+    /// `address` must already be normalized (lowercased; `*@domain` for a
+    /// wildcard) — see `crate::inbound::routing` for the normalization/
+    /// classification logic callers are expected to run first.
+    fn create_inbound_address(
+        &self,
+        address: &str,
+        instance_id: &str,
+        kind: AddressKind,
+    ) -> impl Future<Output = Result<InboundAddress>> + Send;
+    fn get_inbound_address(
+        &self,
+        address: &str,
+    ) -> impl Future<Output = Result<Option<InboundAddress>>> + Send;
+    fn delete_inbound_address(&self, address: &str) -> impl Future<Output = Result<()>> + Send;
+    fn list_inbound_addresses_by_instance(
+        &self,
+        instance_id: &str,
+    ) -> impl Future<Output = Result<Vec<InboundAddress>>> + Send;
+
+    // ── membership ────────────────────────────────────────────────────────
+    fn create_membership(
+        &self,
+        user_id: &str,
+        instance_id: &str,
+        role: MembershipRole,
+    ) -> impl Future<Output = Result<Membership>> + Send;
+    fn delete_membership(&self, id: &str) -> impl Future<Output = Result<()>> + Send;
+    fn list_memberships_by_user(
+        &self,
+        user_id: &str,
+    ) -> impl Future<Output = Result<Vec<Membership>>> + Send;
+    fn list_memberships_by_instance(
+        &self,
+        instance_id: &str,
+    ) -> impl Future<Output = Result<Vec<Membership>>> + Send;
+
     // ── user ──────────────────────────────────────────────────────────────
     fn get_users<T: AsRef<str> + Sync>(
         &self,
@@ -238,6 +441,12 @@ pub trait Handler: Sync {
         email: &str,
     ) -> impl Future<Output = Result<Option<String>>> + Send;
     fn create_user(&self, email: &str, name: &str) -> impl Future<Output = Result<User>> + Send;
+    /// Every user — a base-table scan, not a query, for the same reason as
+    /// [`Handler::list_instances`]: `user` has no listing GSI (only
+    /// `email-index`, for the login path), and this table's cardinality is a
+    /// handful of team members, not a user-generated table. Backs
+    /// `bin/cli.rs`'s `user list`.
+    fn list_users(&self) -> impl Future<Output = Result<Vec<User>>> + Send;
     fn update_user(
         &self,
         id: &str,

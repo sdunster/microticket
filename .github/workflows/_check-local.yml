@@ -39,6 +39,13 @@ jobs:
             for f in "${files[@]}"; do node --check "$f"; done
           fi
 
+      # JSON-only invariants of local/seed/synthetic.json (token hashes match
+      # their documented plaintexts, referenced ids resolve, every address is
+      # @example.com/@microticket.test) — no DB, so this runs before the local
+      # stack comes up.
+      - name: Seed fixture invariants
+        run: cd api && cargo test --locked --test seed_fixtures
+
       # The part that genuinely needs a database. api/src/bin/local-tables.rs is
       # transcribed by hand from infra/dynamodb.tf, so this is what catches the
       # two drifting apart.
@@ -50,6 +57,8 @@ jobs:
         run: make local-tables
       - name: Every expected table exists
         run: make local-tables-check
+      - name: Seed fixtures
+        run: make local-seed
       - name: Stop DynamoDB Local
         if: always()
         run: make local-down

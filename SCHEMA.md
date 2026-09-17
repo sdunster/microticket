@@ -257,6 +257,10 @@ instance and there is no other access pattern to support.
 No GSIs. Ephemeral: `ttl { attribute_name = "expires_at" }`, no deletion protection, no PITR — a
 login code is worthless once expired, so there is nothing to protect.
 
+**Exclusively backs `requestAuthCode`/`verifyAuthCode` (authenticated user login).** The public
+submit form's email-verification code is a structurally different table (`ephemeral_state`, `kind:
+"submit_code"`) — see that table's entry above for why the separation is load-bearing.
+
 **Non-obvious attributes:**
 
 - `code_hash` (S) — sha256 of the 6-digit code, never the code itself
@@ -321,18 +325,31 @@ verify a signature, the settings page to render each passkey's metadata.
 
 ### `{prefix}_ephemeral_state`
 
-| Attribute | Type | Role                  |
-| --------- | ---- | --------------------- |
-| `id`      | S    | Hash key (PK) — nanoid |
+| Attribute | Type | Role                                                                   |
+| --------- | ---- | ------------------------------------------------------------------------ |
+| `id`      | S    | Hash key (PK) — a random nanoid for WebAuthn challenges; a deterministic, hash-derived string for the two `kind`s below |
 
 No GSIs. Ephemeral: `ttl { attribute_name = "expires_at" }`, no deletion protection, no PITR.
 Generic key/value store, namespaced by a `kind` discriminator that is deliberately *not* a GSI
 key — every access pattern here is a `GetItem` by `id` (the opaque token/challenge handed to the
-client), never a scan or query by kind. Backs:
+client, or a value the caller can recompute), never a scan or query by kind. Backs:
 
-- WebAuthn registration/login challenges (`kind: "reg"` / `"auth"`)
+- WebAuthn registration/login challenges (`kind: "reg"` / `"auth"`), `id` a random 32-char nanoid.
+- The public submit form's 6-digit email-verification code (`kind: "submit_code"`). **Stored here,
+  never in `login_code`** — see `auth::SUBMIT_CODE_STATE_KIND`'s doc comment and
+  `tests/submit_code_dynamodb_local.rs` for why that separation is a security requirement (sharing
+  storage with the user login-code flow would let a code minted for the public, unauthenticated
+  submit form be presented to `verifyAuthCode`, or vice versa). `id` is deterministic —
+  `sha256("submit_code_{sha256(instance_id:email)}")`-derived, via `auth::submit_code_state_id` —
+  scoped to `(instance_id, email)` rather than `email` alone (unlike `login_code`'s hash key),
+  since a requester may hold an outstanding code for more than one public instance at once; a
+  second request for the same pair reuses this same slot, which is what makes the 30s resend rate
+  limit a single-row read, mirroring `login_code`.
 - The requester submit-token flow's short-lived, single-purpose capability token (`kind:
-  "submit_token"`), scoped to `{email, instance_id}` and only usable for `submitTicket`
+  "submit_token"`), scoped to `{email, instance_id}` and only usable for `submitTicket`. `id` is
+  likewise deterministic, derived from the token's own sha256 hash (mirroring `user_token`'s
+  `token_hash`, folded into the row id here instead of a separate GSI since there is no listing
+  access pattern to support).
 
 **Non-obvious attributes:**
 
@@ -409,6 +426,37 @@ arriving mid-processing would not yet see the row). A durable fix needs a two-ph
 commits, with a periodic sweep re-driving anything stuck in `processing` past its TTL) — not
 implemented as of this step; flagged here so step 7 (inbound mail) makes a deliberate choice
 about it rather than inheriting the simple version by default.
+
+#### `instance.slug` — uniqueness is a pre-check, not a guarantee, against a concurrent pair of creates
+
+DynamoDB only enforces uniqueness on a table's primary key, and `instance`'s primary key is a
+random nanoid `id`, not `slug` — so nothing at the database level stops two `PutItem`s from
+succeeding with the same `slug`. Two options were on the table:
+
+1. **A deterministic id derived from the slug** (e.g. `id = hash(slug)`), so a conditional
+   `PutItem` (`attribute_not_exists(id)`) on the primary key itself enforces uniqueness for real.
+   Rejected: `id` is the stable foreign key every other table references (`inbound_address`,
+   `membership`, and eventually `ticket`), and slugs are expected to be editable (`instance
+   update`/a future settings-page rename). A scheme that ties `id` to the *current* slug breaks the
+   moment a slug is renamed — either the id would have to change too (impossible; everything else
+   already points at the old one) or the id/slug relationship silently stops being enforced after
+   the first rename, which is worse than not enforcing it at all.
+2. **An explicit pre-check plus a documented race**: `create_instance`'s callers (`bin/cli.rs`'s
+   `instance create`, and, once instance creation is exposed there, the GraphQL layer) call
+   `get_instance_id_by_slug` first and reject a taken slug before writing. `db::Handler::create_instance`
+   itself does not re-check — a `PutItem` with `condition_expression("attribute_not_exists(id)")`
+   only guards against an astronomically unlikely nanoid collision, not a slug collision.
+
+**Chosen: option 2.** The race this leaves open — two concurrent callers that both pass the
+pre-check for the same slug, so both writes succeed and two instances end up sharing one slug — is
+real but narrow: instance creation is an operator-driven, low-frequency bootstrap action (`instance
+create` in the CLI), not a high-concurrency user-facing path, so the pre-check-then-write window is
+milliseconds wide and would require two operators racing to create the exact same organisation at
+the exact same moment. If it ever happens, `get_instance_id_by_slug` (`slug-index`, collapsed
+through `at_most_one`) will start returning a data-integrity error on the next read — loud, not
+silent — because the index would then have two rows for one slug value. The fix at that point is a
+manual `instance update` to rename one of the two colliding instances' slugs; no automatic
+detection or recovery is implemented.
 
 #### `ticket` marker attributes — a crash between two GSI-affecting updates leaves an inconsistent listing state
 

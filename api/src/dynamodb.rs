@@ -247,6 +247,77 @@ impl TryInto<db::WebauthnCredential> for Item {
     }
 }
 
+impl TryInto<db::Instance> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::Instance, Self::Error> {
+        Ok(db::Instance {
+            id: self.id()?,
+            name: self
+                .string_field("name")?
+                .ok_or_else(|| anyhow!("Instance missing name"))?,
+            slug: self
+                .string_field("slug")?
+                .ok_or_else(|| anyhow!("Instance missing slug"))?,
+            public_submission_enabled: self
+                .bool_field("public_submission_enabled")?
+                .unwrap_or(false),
+            from_name: self.string_field("from_name")?.unwrap_or_default(),
+            signature: self.string_field("signature")?.unwrap_or_default(),
+            created_at: self
+                .i64_field("created_at")?
+                .ok_or_else(|| anyhow!("Instance missing created_at"))?
+                as u64,
+            deleted: self.bool_field("deleted")?.unwrap_or(false),
+        })
+    }
+}
+
+impl TryInto<db::InboundAddress> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::InboundAddress, Self::Error> {
+        let address = self
+            .string_field("address")?
+            .ok_or_else(|| anyhow!("InboundAddress missing address"))?;
+        let kind_str = self
+            .string_field("kind")?
+            .ok_or_else(|| anyhow!("InboundAddress missing kind"))?;
+        let kind = db::AddressKind::parse(&kind_str)
+            .ok_or_else(|| anyhow!("InboundAddress has unrecognized kind: {kind_str}"))?;
+        Ok(db::InboundAddress {
+            address,
+            instance_id: self
+                .string_field("instance_id")?
+                .ok_or_else(|| anyhow!("InboundAddress missing instance_id"))?,
+            kind,
+            created_at: self
+                .i64_field("created_at")?
+                .ok_or_else(|| anyhow!("InboundAddress missing created_at"))?
+                as u64,
+        })
+    }
+}
+
+impl TryInto<db::Membership> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::Membership, Self::Error> {
+        let role_str = self
+            .string_field("role")?
+            .ok_or_else(|| anyhow!("Membership missing role"))?;
+        let role = db::MembershipRole::parse(&role_str)
+            .ok_or_else(|| anyhow!("Membership has unrecognized role: {role_str}"))?;
+        Ok(db::Membership {
+            id: self.id()?,
+            user_id: self
+                .string_field("user_id")?
+                .ok_or_else(|| anyhow!("Membership missing user_id"))?,
+            instance_id: self
+                .string_field("instance_id")?
+                .ok_or_else(|| anyhow!("Membership missing instance_id"))?,
+            role,
+        })
+    }
+}
+
 impl TryInto<db::EphemeralState> for Item {
     type Error = HydrationError;
     fn try_into(self) -> Result<db::EphemeralState, Self::Error> {
@@ -713,6 +784,336 @@ where
 }
 
 impl db::Handler for Handler {
+    // ── instance ──────────────────────────────────────────────────────────
+
+    async fn get_instances<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> db::Result<Vec<Option<db::Instance>>> {
+        self.get_records("instance", ids).await
+    }
+
+    async fn get_instance_id_by_slug(&self, slug: &str) -> db::Result<Option<String>> {
+        let resp = self
+            .client
+            .query()
+            .table_name(self.table_name("instance"))
+            .index_name("slug-index")
+            .key_condition_expression("slug = :slug")
+            .expression_attribute_values(":slug", AttributeValue::S(slug.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "get_instance_id_by_slug",
+            resp.consumed_capacity(),
+            CapKind::Read,
+        );
+
+        let ids = resp
+            .items
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| Item(item).id())
+            .collect::<HydrationResult<Vec<String>>>()?;
+        db::at_most_one(ids, || format!("Multiple instances share slug {slug}"))
+    }
+
+    async fn create_instance(
+        &self,
+        name: &str,
+        slug: &str,
+        from_name: &str,
+        signature: &str,
+        public_submission_enabled: bool,
+    ) -> db::Result<db::Instance> {
+        self.ensure_writable()?;
+        let id = new_id();
+        let now = crate::clock::now_sec();
+
+        let mut req = self
+            .client
+            .put_item()
+            .table_name(self.table_name("instance"))
+            .item("id", AttributeValue::S(id.clone()))
+            .item("name", AttributeValue::S(name.to_string()))
+            .item("slug", AttributeValue::S(slug.to_string()))
+            .item("from_name", AttributeValue::S(from_name.to_string()))
+            .item("signature", AttributeValue::S(signature.to_string()))
+            .item("created_at", AttributeValue::N(now.to_string()))
+            // slug is not itself the primary key, so this cannot enforce
+            // uniqueness — it only guards against generating a colliding
+            // nanoid, which is astronomically unlikely. See the doc comment on
+            // `db::Handler::create_instance`.
+            .condition_expression("attribute_not_exists(id)")
+            .return_consumed_capacity(ReturnConsumedCapacity::Total);
+        // Omit-optional-attributes house rule: only written when true.
+        if public_submission_enabled {
+            req = req.item("public_submission_enabled", AttributeValue::Bool(true));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity("create_instance", resp.consumed_capacity(), CapKind::Write);
+
+        Ok(db::Instance {
+            id,
+            name: name.to_string(),
+            slug: slug.to_string(),
+            public_submission_enabled,
+            from_name: from_name.to_string(),
+            signature: signature.to_string(),
+            created_at: now,
+            deleted: false,
+        })
+    }
+
+    async fn update_instance(
+        &self,
+        id: &str,
+        change: db::InstanceUpdateShape<'_>,
+    ) -> db::Result<()> {
+        self.ensure_writable()?;
+        match change {
+            db::InstanceUpdateShape::Fields {
+                name,
+                from_name,
+                signature,
+                public_submission_enabled,
+            } => {
+                let mut update_expr =
+                    "SET #n = :name, from_name = :from_name, signature = :signature".to_string();
+                let mut req = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("instance"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .expression_attribute_names("#n", "name")
+                    .expression_attribute_values(":name", AttributeValue::S(name.to_string()))
+                    .expression_attribute_values(
+                        ":from_name",
+                        AttributeValue::S(from_name.to_string()),
+                    )
+                    .expression_attribute_values(
+                        ":signature",
+                        AttributeValue::S(signature.to_string()),
+                    );
+                if public_submission_enabled {
+                    update_expr.push_str(", public_submission_enabled = :pse");
+                    req = req.expression_attribute_values(":pse", AttributeValue::Bool(true));
+                } else {
+                    update_expr.push_str(" REMOVE public_submission_enabled");
+                }
+                let resp = req
+                    .update_expression(update_expr)
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Instance {id}")))?;
+                record_capacity("update_instance", resp.consumed_capacity(), CapKind::Write);
+            }
+            db::InstanceUpdateShape::SetDeleted(deleted) => {
+                let mut req = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("instance"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)");
+                if deleted {
+                    req = req
+                        .update_expression("SET deleted = :deleted")
+                        .expression_attribute_values(":deleted", AttributeValue::Bool(true));
+                } else {
+                    req = req.update_expression("REMOVE deleted");
+                }
+                let resp = req
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Instance {id}")))?;
+                record_capacity(
+                    "update_instance_deleted",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_instances(&self) -> db::Result<Vec<db::Instance>> {
+        scan_all("list_instances", || {
+            self.client.scan().table_name(self.table_name("instance"))
+        })
+        .await
+    }
+
+    // ── inbound_address ──────────────────────────────────────────────────────
+
+    async fn create_inbound_address(
+        &self,
+        address: &str,
+        instance_id: &str,
+        kind: db::AddressKind,
+    ) -> db::Result<db::InboundAddress> {
+        self.ensure_writable()?;
+        let now = crate::clock::now_sec();
+        let resp = self
+            .client
+            .put_item()
+            .table_name(self.table_name("inbound_address"))
+            .item("address", AttributeValue::S(address.to_string()))
+            .item("instance_id", AttributeValue::S(instance_id.to_string()))
+            .item("kind", AttributeValue::S(kind.as_str().to_string()))
+            .item("created_at", AttributeValue::N(now.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "create_inbound_address",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+        Ok(db::InboundAddress {
+            address: address.to_string(),
+            instance_id: instance_id.to_string(),
+            kind,
+            created_at: now,
+        })
+    }
+
+    async fn get_inbound_address(&self, address: &str) -> db::Result<Option<db::InboundAddress>> {
+        let resp = self
+            .client
+            .get_item()
+            .table_name(self.table_name("inbound_address"))
+            .key("address", AttributeValue::S(address.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "get_inbound_address",
+            resp.consumed_capacity(),
+            CapKind::Read,
+        );
+        match resp.item {
+            Some(item) => Ok(Some(hydrate_item(item)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_inbound_address(&self, address: &str) -> db::Result<()> {
+        self.ensure_writable()?;
+        self.client
+            .delete_item()
+            .table_name(self.table_name("inbound_address"))
+            .key("address", AttributeValue::S(address.to_string()))
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        Ok(())
+    }
+
+    async fn list_inbound_addresses_by_instance(
+        &self,
+        instance_id: &str,
+    ) -> db::Result<Vec<db::InboundAddress>> {
+        query_all("list_inbound_addresses_by_instance", || {
+            self.client
+                .query()
+                .table_name(self.table_name("inbound_address"))
+                .index_name("instance_id-index")
+                .key_condition_expression("instance_id = :instance_id")
+                .expression_attribute_values(
+                    ":instance_id",
+                    AttributeValue::S(instance_id.to_string()),
+                )
+        })
+        .await
+    }
+
+    // ── membership ────────────────────────────────────────────────────────
+
+    async fn create_membership(
+        &self,
+        user_id: &str,
+        instance_id: &str,
+        role: db::MembershipRole,
+    ) -> db::Result<db::Membership> {
+        self.ensure_writable()?;
+        let id = new_id();
+        let resp = self
+            .client
+            .put_item()
+            .table_name(self.table_name("membership"))
+            .item("id", AttributeValue::S(id.clone()))
+            .item("user_id", AttributeValue::S(user_id.to_string()))
+            .item("instance_id", AttributeValue::S(instance_id.to_string()))
+            .item("role", AttributeValue::S(role.as_str().to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "create_membership",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+        Ok(db::Membership {
+            id,
+            user_id: user_id.to_string(),
+            instance_id: instance_id.to_string(),
+            role,
+        })
+    }
+
+    async fn delete_membership(&self, id: &str) -> db::Result<()> {
+        self.ensure_writable()?;
+        self.client
+            .delete_item()
+            .table_name(self.table_name("membership"))
+            .key("id", AttributeValue::S(id.to_string()))
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        Ok(())
+    }
+
+    async fn list_memberships_by_user(&self, user_id: &str) -> db::Result<Vec<db::Membership>> {
+        query_all("list_memberships_by_user", || {
+            self.client
+                .query()
+                .table_name(self.table_name("membership"))
+                .index_name("user_id-index")
+                .key_condition_expression("user_id = :user_id")
+                .expression_attribute_values(":user_id", AttributeValue::S(user_id.to_string()))
+        })
+        .await
+    }
+
+    async fn list_memberships_by_instance(
+        &self,
+        instance_id: &str,
+    ) -> db::Result<Vec<db::Membership>> {
+        query_all("list_memberships_by_instance", || {
+            self.client
+                .query()
+                .table_name(self.table_name("membership"))
+                .index_name("instance_id-index")
+                .key_condition_expression("instance_id = :instance_id")
+                .expression_attribute_values(
+                    ":instance_id",
+                    AttributeValue::S(instance_id.to_string()),
+                )
+        })
+        .await
+    }
+
     // ── user ──────────────────────────────────────────────────────────────
 
     async fn get_users<T: AsRef<str> + Sync>(
@@ -777,6 +1178,13 @@ impl db::Handler for Handler {
             created_at: now,
             access_time: None,
         })
+    }
+
+    async fn list_users(&self) -> db::Result<Vec<db::User>> {
+        scan_all("list_users", || {
+            self.client.scan().table_name(self.table_name("user"))
+        })
+        .await
     }
 
     async fn update_user(&self, id: &str, change: db::UserUpdateShape<'_>) -> db::Result<()> {

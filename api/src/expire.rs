@@ -10,6 +10,11 @@
 pub const LOGIN_CODE_EXPIRE_S: u64 = 60 * 10;
 /// `user_token`: 8-hour opaque `mtu_` session token.
 pub const USER_TOKEN_EXPIRE_S: u64 = 60 * 60 * 8;
+/// `ephemeral_state`, `kind: "submit_code"`: the public submit form's 6-digit
+/// email-verification code — same 10-minute window as `login_code`, but stored
+/// separately (see `auth::submit_code_state_id`'s doc comment for why the
+/// separation is a security requirement, not just tidiness).
+pub const SUBMIT_CODE_EXPIRE_S: u64 = 60 * 10;
 /// `ephemeral_state`: the public submit form's 15-minute, single-purpose requester
 /// token.
 pub const REQUESTER_SUBMIT_TOKEN_EXPIRE_S: u64 = 60 * 15;
@@ -21,6 +26,7 @@ pub const WEBAUTHN_CHALLENGE_EXPIRE_S: u64 = 60 * 5;
 pub enum ExpirePolicy {
     LoginCode,
     UserToken,
+    SubmitCode,
     RequesterSubmitToken,
     WebauthnChallenge,
     TimeSec(u64),
@@ -32,6 +38,7 @@ impl ExpirePolicy {
         match self {
             Self::LoginCode => now + LOGIN_CODE_EXPIRE_S,
             Self::UserToken => now + USER_TOKEN_EXPIRE_S,
+            Self::SubmitCode => now + SUBMIT_CODE_EXPIRE_S,
             Self::RequesterSubmitToken => now + REQUESTER_SUBMIT_TOKEN_EXPIRE_S,
             Self::WebauthnChallenge => now + WEBAUTHN_CHALLENGE_EXPIRE_S,
             Self::TimeSec(sec) => now + sec,
@@ -56,6 +63,11 @@ mod tests {
     #[test]
     fn user_token_expires_in_eight_hours() {
         assert_eq!(ExpirePolicy::UserToken.expires_at(1_000), 1_000 + 28_800);
+    }
+
+    #[test]
+    fn submit_code_expires_in_ten_minutes() {
+        assert_eq!(ExpirePolicy::SubmitCode.expires_at(1_000), 1_000 + 600);
     }
 
     #[test]

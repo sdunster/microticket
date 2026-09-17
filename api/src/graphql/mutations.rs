@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use async_graphql::{Context, Object, SimpleObject};
+use async_graphql::{Context, ID, Object, SimpleObject};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use tracing::{info, warn};
@@ -15,11 +15,12 @@ use crate::app::{App, HasDb, HasMail};
 use crate::auth::{self, AuthInfo};
 use crate::db;
 use crate::db::Handler as _;
+use crate::inbound::routing;
 use crate::mail::Handler as _;
 
 use super::auth::{AuthGuard, AuthRequirement};
 use super::error::ApiError;
-use super::query::PasskeyInfo;
+use super::query::{InboundAddressInfo, PasskeyInfo};
 
 /// One code per address per this many seconds — cheap anti-spam for
 /// `requestAuthCode`, independent of the code's own 10-minute validity.
@@ -248,6 +249,285 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
                 None
             }
         }
+    }
+
+    /// Request a public-submit-form email verification code for `(slug,
+    /// email)`. **Always returns `true`**, same anti-enumeration rationale as
+    /// [`Self::request_auth_code`] — a bad Turnstile token, an unresolvable
+    /// slug, and an instance with public submission disabled are all
+    /// indistinguishable from the outside. The code itself is stored in
+    /// `ephemeral_state` under `kind: "submit_code"` — never in `login_code`;
+    /// see `auth::SUBMIT_CODE_STATE_KIND`'s doc comment for why that
+    /// separation is load-bearing, not incidental.
+    async fn request_submit_code(
+        &self,
+        ctx: &Context<'_>,
+        slug: String,
+        email: String,
+        turnstile_token: Option<String>,
+    ) -> bool {
+        let remote_ip = ctx
+            .data_opt::<super::ClientIp>()
+            .and_then(|ip| ip.0.as_deref());
+        match crate::turnstile::verify(turnstile_token.as_deref(), remote_ip).await {
+            Ok(true) => {}
+            Ok(false) => {
+                info!("Turnstile challenge failed for request_submit_code");
+                return true;
+            }
+            Err(e) => {
+                warn!("Turnstile error in request_submit_code: {:#}", e);
+                return true;
+            }
+        }
+
+        let instance_id = match self.app.db().get_instance_id_by_slug(&slug).await {
+            Ok(Some(id)) => id,
+            Ok(None) => return true,
+            Err(e) => {
+                warn!("DB error resolving slug in request_submit_code: {:#}", e);
+                return true;
+            }
+        };
+
+        let instance = match self.app.db().get_instances(&[&instance_id]).await {
+            Ok(instances) => match instances.into_iter().next().flatten() {
+                Some(i) if i.public_submission_enabled && !i.deleted => i,
+                _ => {
+                    info!(
+                        "request_submit_code: instance not public or missing id={}",
+                        instance_id
+                    );
+                    return true;
+                }
+            },
+            Err(e) => {
+                warn!("DB error fetching instance in request_submit_code: {:#}", e);
+                return true;
+            }
+        };
+
+        let now = crate::clock::now_sec();
+        let state_id = auth::submit_code_state_id(&instance_id, &email);
+
+        // Rate limit: at most one code per LOGIN_CODE_RATE_LIMIT_S per
+        // (instance, email) — same window as the login-code flow.
+        if let Ok(Some(existing)) = self.app.db().get_ephemeral_state(&state_id).await
+            && existing.kind == auth::SUBMIT_CODE_STATE_KIND
+            && let Ok(payload) = serde_json::from_str::<auth::SubmitCodePayload>(&existing.payload)
+            && now < payload.last_sent_at + LOGIN_CODE_RATE_LIMIT_S
+        {
+            info!(
+                "Rate limit hit for request_submit_code instance={} email={}",
+                instance_id, email
+            );
+            return true;
+        }
+
+        let code = crate::nonce::generate_code(LOGIN_CODE_DIGITS);
+
+        // Log only in debug builds, so a code never reaches a production log.
+        #[cfg(debug_assertions)]
+        info!(
+            "Submit code for instance slug={} email={}: {}",
+            slug, email, code
+        );
+
+        let payload = match serde_json::to_string(&auth::SubmitCodePayload {
+            code_hash: sha256_hex(&code),
+            attempts: 0,
+            last_sent_at: now,
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Failed to serialize submit code payload: {:#}", e);
+                return true;
+            }
+        };
+        let expires_at = crate::expire::ExpirePolicy::SubmitCode.expires_at(now);
+
+        if let Err(e) = self
+            .app
+            .db()
+            .put_ephemeral_state(
+                &state_id,
+                auth::SUBMIT_CODE_STATE_KIND,
+                &payload,
+                expires_at,
+            )
+            .await
+        {
+            warn!("Failed to store submit code: {:#}", e);
+            return true;
+        }
+
+        let subject = format!("Your {} verification code", instance.name);
+        let body = format!(
+            "Your verification code is: {code}\n\n\
+             This code expires in 10 minutes. Do not share it.\n\n\
+             If you did not request this code, you can ignore this email."
+        );
+
+        info!(instance_id = %instance_id, "Sending submit code to {}", email);
+        if let Err(e) = self
+            .app
+            .mail()
+            .send_plain_text(&email, &subject, &body)
+            .await
+        {
+            warn!("Failed to send submit code email to {}: {:#}", email, e);
+        }
+
+        true
+    }
+
+    /// Verify a public-submit-form code and return a short-lived (15 minute)
+    /// capability token scoped to exactly `(email, instance_id)` on success —
+    /// authorised for `submitTicket` alone, never anything a real user
+    /// session can do. **Returns `null` on every failure path**, mirroring
+    /// [`Self::verify_auth_code`]. Reads and writes `ephemeral_state` under
+    /// `kind: "submit_code"` exclusively — never `login_code` — which is what
+    /// makes it structurally impossible for a code minted by
+    /// [`Self::request_auth_code`] to be accepted here, or vice versa; see
+    /// `tests/submit_code_dynamodb_local.rs` for the regression tests.
+    async fn verify_submit_code(
+        &self,
+        slug: String,
+        email: String,
+        code: String,
+    ) -> Option<String> {
+        let instance_id = match self.app.db().get_instance_id_by_slug(&slug).await {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                info!("verify_submit_code: unknown slug={}", slug);
+                return None;
+            }
+            Err(e) => {
+                warn!("DB error resolving slug in verify_submit_code: {:#}", e);
+                return None;
+            }
+        };
+
+        let now = crate::clock::now_sec();
+        let state_id = auth::submit_code_state_id(&instance_id, &email);
+
+        let state = match self.app.db().get_ephemeral_state(&state_id).await {
+            Ok(Some(s)) if s.kind == auth::SUBMIT_CODE_STATE_KIND => s,
+            Ok(_) => {
+                info!(
+                    "verify_submit_code: no submit code for instance={} email={}",
+                    instance_id, email
+                );
+                return None;
+            }
+            Err(e) => {
+                warn!("DB error in verify_submit_code: {:#}", e);
+                return None;
+            }
+        };
+
+        if now >= state.expires_at {
+            let _ = self.app.db().delete_ephemeral_state(&state_id).await;
+            info!("verify_submit_code: expired code for email={}", email);
+            return None;
+        }
+
+        let Ok(mut payload) = serde_json::from_str::<auth::SubmitCodePayload>(&state.payload)
+        else {
+            warn!("verify_submit_code: corrupt payload for id={}", state_id);
+            return None;
+        };
+
+        if payload.attempts >= LOGIN_CODE_MAX_ATTEMPTS {
+            let _ = self.app.db().delete_ephemeral_state(&state_id).await;
+            info!("verify_submit_code: too many attempts for email={}", email);
+            return None;
+        }
+
+        // Count this attempt *before* comparing, mirroring verify_auth_code.
+        payload.attempts += 1;
+        if let Ok(updated) = serde_json::to_string(&payload) {
+            let _ = self
+                .app
+                .db()
+                .put_ephemeral_state(
+                    &state_id,
+                    auth::SUBMIT_CODE_STATE_KIND,
+                    &updated,
+                    state.expires_at,
+                )
+                .await;
+        }
+
+        if payload.code_hash != sha256_hex(&code) {
+            info!("verify_submit_code: wrong code for email={}", email);
+            return None;
+        }
+
+        let _ = self.app.db().delete_ephemeral_state(&state_id).await;
+
+        match auth::issue_submit_token(&*self.app, &email, &instance_id).await {
+            Ok(token) => {
+                info!(
+                    "Issued submit token for instance={} email={}",
+                    instance_id, email
+                );
+                Some(token)
+            }
+            Err(e) => {
+                warn!("Failed to issue submit token: {:#}", e);
+                None
+            }
+        }
+    }
+
+    /// Add an inbound address to an instance. Owner-only. `address` is
+    /// normalized and classified (exact vs. `*@domain` wildcard) by
+    /// `inbound::routing::classify_for_storage`, the same logic `bin/cli.rs`'s
+    /// `address add` uses, so the two can never disagree about what counts as
+    /// a valid address.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::InstanceOwner(instance_id.to_string()))")]
+    async fn add_inbound_address(
+        &self,
+        instance_id: ID,
+        address: String,
+    ) -> Result<InboundAddressInfo> {
+        let (normalized, kind) =
+            routing::classify_for_storage(&address).map_err(ApiError::forbidden)?;
+        if let Some(existing) = self.app.db().get_inbound_address(&normalized).await? {
+            return Err(ApiError::conflict(format!(
+                "{normalized} is already mapped to instance {}",
+                existing.instance_id
+            ))
+            .into());
+        }
+        let created = self
+            .app
+            .db()
+            .create_inbound_address(&normalized, instance_id.as_str(), kind)
+            .await?;
+        Ok(created.into())
+    }
+
+    /// Remove an inbound address from an instance. Owner-only. An address
+    /// that doesn't exist, or that belongs to a different instance, is
+    /// reported the same "not found" either way — so this can't be used to
+    /// probe another instance's addresses.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::InstanceOwner(instance_id.to_string()))")]
+    async fn remove_inbound_address(&self, instance_id: ID, address: String) -> Result<bool> {
+        let normalized = address.trim().to_lowercase();
+        let existing = self
+            .app
+            .db()
+            .get_inbound_address(&normalized)
+            .await?
+            .filter(|a| a.instance_id == instance_id.as_str())
+            .ok_or_else(|| ApiError::not_found("InboundAddress", &normalized))?;
+        self.app
+            .db()
+            .delete_inbound_address(&existing.address)
+            .await?;
+        Ok(true)
     }
 
     /// Revoke the calling token, if there is one to revoke (a `Requester`

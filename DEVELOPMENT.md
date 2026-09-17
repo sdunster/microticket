@@ -71,18 +71,84 @@ stale.
 
 ## 5. Running without AWS
 
-_(later step)_ `make dev-local` brings up DynamoDB Local plus mocked SES/SQS so the whole stack —
-including inbound mail — runs with no AWS account. This section will cover: one-time setup of
-DynamoDB Local, seeding fixture data (`make local-seed`), feeding a raw `.eml` fixture through the
-inbound pipeline (`make local-mail FILE=...`), and reading mocked outbound mail back out of
-`local/mail-out/`.
+```bash
+make dev-local                  # DynamoDB Local + mocked SES/SQS — no AWS account needed
+make local-seed                 # writes local/seed/synthetic.json into the local DB
+make local-clear                # deletes app-written rows (tokens, WebAuthn state, ...), keeps the seed
+```
 
-## 6. Bypassing auth for local UI work
+`make local-seed` (`api/src/bin/local-seed.rs apply`) writes two seeded instances, an owner and an
+agent, a handful of inbound addresses (including a wildcard), and a ready-made session token for
+each user — all as raw DynamoDB items from `local/seed/synthetic.json`, so their ids are exactly as
+committed. Nothing in the fixture is real: `api/tests/seed_fixtures.rs` pins that every address is
+`@example.com`/`@microticket.test` and refuses anything else.
 
-_(later step, once auth exists)_ Document any `--dev-auth-*` flag the dev server grows, mirroring
-seslogin's, if one is added.
+Seeded accounts (only ever valid against a `local`-prefixed database — never real):
 
-## 7. Troubleshooting
+| Role  | Email                     | Instance(s)          | Ready-made token                        |
+| ----- | ------------------------- | --------------------- | ---------------------------------------- |
+| owner | `owner@microticket.test`  | `acme`, `ridgeline`   | `mtu_localdev0000000000000000000owner`  |
+| agent | `agent@microticket.test`  | `acme`                | `mtu_localdev0000000000000000000agent`  |
+
+Use a token directly (`Authorization: Bearer mtu_localdev...`) to skip the email-code flow entirely
+when poking at the API by hand (`curl`, GraphiQL at `http://localhost:8000/`), or log in normally
+with the seeded emails — `poem-local`'s mocked mailer prints the 6-digit code to the API's own log.
+
+`make local-clear` deletes everything the *running app* writes on top of the seed (session tokens
+minted by a real login, WebAuthn credentials, submit codes/tokens) without touching the seeded rows
+themselves, so a re-`local-seed` afterward is a clean overwrite rather than a pile-up. `make
+local-reset` is the blunter tool: it destroys and rebuilds every table, discarding the seed too.
+
+_(later step: feeding a raw `.eml` fixture through the inbound pipeline (`make local-mail
+FILE=...`), and reading mocked outbound mail back out of `local/mail-out/`.)_
+
+## 6. The admin CLI and bootstrapping an organisation
+
+`api/src/bin/cli.rs` (`cargo run --bin cli --`) is the operator tool for inspecting and writing the
+DB directly — instances, inbound addresses, users, and memberships. It writes immediately; pass the
+global `--dry-run` flag to see what a command *would* do without writing anything. It takes
+`--db-prefix` (or the `DB_PREFIX` env var) and, unlike `local-tables`/`local-seed`, is **not**
+restricted to a local database — this is the same tool that bootstraps the first real organisation
+in prod.
+
+```bash
+cd api && cargo run --bin cli -- --help
+```
+
+Bootstrap sequence for a brand-new deployment's first organisation and owner:
+
+```bash
+# 1. Create the first user (the person who will own the organisation).
+cargo run --bin cli -- user create owner@yourdomain.com "Your Name"
+
+# 2. Create the instance (the tenant organisation).
+cargo run --bin cli -- instance create "Your Company Support" your-company \
+    --from-name "Your Company Support" \
+    --signature "Thanks, Your Company Support" \
+    --public-submission-enabled
+
+# 3. Grant that user the owner role in the instance (member invites are a CLI-only
+#    operation for now — there is no invite mutation over GraphQL).
+cargo run --bin cli -- member add --instance <instance_id> --user owner@yourdomain.com --role owner
+
+# 4. Map the instance's real inbound address(es).
+cargo run --bin cli -- address add --instance <instance_id> support@yourdomain.com
+```
+
+Against the local stack, export `local/local.env` first (`set -a && . ../local/local.env && set
++a`, from `api/`) so the CLI points at DynamoDB Local instead of a real account — or just run `make
+local-seed`, which does the local-stack equivalent of this whole sequence for you, twice over, from
+`local/seed/synthetic.json`.
+
+## 7. Bypassing auth for local UI work
+
+`--dev-auth-user <id-or-email>` on `poem`/`poem-local` bypasses token verification entirely and
+treats every request as that user, with their *real* permissions (memberships included) — never a
+synthetic elevated principal. Only a `User` principal can be impersonated (microticket has no
+kiosk/session-equivalent). Never enable this in a deployed environment; the Lambda binary has no
+CLI to read the flag from in the first place, so it is unreachable there by construction.
+
+## 8. Troubleshooting
 
 _(later step — fill in as real issues come up; don't invent hypothetical ones.)_
 

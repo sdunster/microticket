@@ -78,6 +78,106 @@ pub enum AuthInfo {
 /// whose hash is looked up in DynamoDB, per `CLAUDE.md`/the build plan.
 pub const USER_TOKEN_PREFIX: &str = "mtu_";
 
+/// Prefix of the public submit form's opaque capability token, sha256-hashed
+/// and stored in `ephemeral_state` under `kind: "submit_token"`. Deliberately
+/// a different prefix from [`USER_TOKEN_PREFIX`] so [`verify_token`]'s
+/// dispatch can never confuse the two, however either is stored.
+pub const REQUESTER_TOKEN_PREFIX: &str = "mts_";
+
+/// `ephemeral_state` `kind` for the requester submit-token flow's short-lived
+/// capability token (post-code-verification). Distinct from
+/// [`SUBMIT_CODE_STATE_KIND`] — the token and the code that unlocks it are two
+/// different secrets with two different lifetimes, stored under two different
+/// kinds.
+const SUBMIT_TOKEN_STATE_KIND: &str = "submit_token";
+
+/// `ephemeral_state` `kind` for the public submit form's 6-digit
+/// email-verification code.
+///
+/// **Critically not `login_code`.** If the submit-code flow reused the
+/// `login_code` table (or otherwise shared storage with the user login-code
+/// flow), a code written by `requestSubmitCode` could be presented to
+/// `verifyAuthCode` — or a code written by `requestAuthCode` presented to
+/// `verifySubmitCode` — and, for an email that happens to resolve on both
+/// sides, cross-authenticate into the wrong flow's outcome (a full user
+/// session from a public, unauthenticated submit-code request). Storing
+/// submit codes in `ephemeral_state` under this `kind`, and login codes in the
+/// dedicated `login_code` table, makes that structurally impossible: the two
+/// lookups touch different tables. See
+/// `tests/submit_code_dynamodb_local.rs` for the regression tests covering
+/// both directions.
+pub const SUBMIT_CODE_STATE_KIND: &str = "submit_code";
+
+/// Deterministic `ephemeral_state` id for a submit code, scoped to
+/// `(instance_id, email)` — not just `email` the way `login_code` is keyed,
+/// because a requester may hold an outstanding code for more than one public
+/// instance at once. A second request for the same `(instance_id, email)`
+/// pair reuses (overwrites) this same slot, which is what makes the 30s
+/// resend rate limit a single-row read, mirroring `login_code`.
+pub fn submit_code_state_id(instance_id: &str, email: &str) -> String {
+    format!(
+        "{SUBMIT_CODE_STATE_KIND}_{}",
+        hash_token(&format!("{instance_id}:{email}"))
+    )
+}
+
+/// JSON payload of a `kind: "submit_code"` `ephemeral_state` row. Mirrors
+/// `login_code`'s columns (`code_hash`/`attempts`/`last_sent_at`), folded into
+/// one opaque payload since `ephemeral_state` has no schema of its own.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SubmitCodePayload {
+    pub code_hash: String,
+    pub attempts: u64,
+    pub last_sent_at: u64,
+}
+
+/// JSON payload of a `kind: "submit_token"` `ephemeral_state` row: the two
+/// pieces of authority the requester submit token carries and nothing else —
+/// it cannot read or touch any ticket other than one it creates for this
+/// exact `(email, instance_id)` pair.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SubmitTokenPayload {
+    email: String,
+    instance_id: String,
+}
+
+fn submit_token_state_id(token_hash: &str) -> String {
+    format!("{SUBMIT_TOKEN_STATE_KIND}_{token_hash}")
+}
+
+/// Issue a fresh opaque `mts_` capability token scoped to exactly
+/// `(email, instance_id)`. Only its sha256 hash is stored; the secret returned
+/// here is the only time it exists in full. Mirrors [`issue_user_token`]'s
+/// shape, but stored under `ephemeral_state`/`submit_token` rather than
+/// `user_token` — this token authorises `submitTicket` alone, never a `me`
+/// query or anything else a real user session can do.
+pub async fn issue_submit_token<A: App + HasDb>(
+    app: &A,
+    email: &str,
+    instance_id: &str,
+) -> anyhow::Result<String> {
+    let secret = format!(
+        "{}{}",
+        REQUESTER_TOKEN_PREFIX,
+        crate::nonce::generate_nonce(16)
+    );
+    let hash = hash_token(&secret);
+    let expires_at = crate::expire::ExpirePolicy::RequesterSubmitToken.from_now();
+    let payload = serde_json::to_string(&SubmitTokenPayload {
+        email: email.to_string(),
+        instance_id: instance_id.to_string(),
+    })?;
+    app.db()
+        .put_ephemeral_state(
+            &submit_token_state_id(&hash),
+            SUBMIT_TOKEN_STATE_KIND,
+            &payload,
+            expires_at,
+        )
+        .await?;
+    Ok(secret)
+}
+
 /// Dev-only auth override configured via a CLI flag on the poem server. When set,
 /// the server bypasses token verification entirely and treats every request as
 /// the configured caller. Intended for local UI testing/screenshots only — never
@@ -225,11 +325,24 @@ async fn fetch_update_user_auth_info<A: App + HasDb>(
         }
     }
 
-    // memberships: empty until step 4's membership table lands a real lookup
-    // here (see the field doc on `AuthInfo::User`).
+    // One query against membership.user_id-index — every instance this user
+    // belongs to, in one round trip, so guards can check Member/InstanceOwner
+    // without a further DB call per field.
+    let memberships = app
+        .db()
+        .list_memberships_by_user(&user_id)
+        .await
+        .map_err(|e| classify_db_err("fetch user memberships", e))?
+        .into_iter()
+        .map(|m| Membership {
+            instance_id: m.instance_id,
+            is_owner: m.role == db::MembershipRole::Owner,
+        })
+        .collect();
+
     Ok(AuthInfo::User {
         id: user_id,
-        memberships: Vec::new(),
+        memberships,
         token_id: None,
     })
 }
@@ -280,12 +393,42 @@ async fn verify_token_with_user_token<A: App + HasDb>(
     }
 }
 
-/// Dispatch an opaque token to the right verifier by its prefix. `mtu_` is the
-/// only recognized scheme in this project (no JWTs) — anything else is a
+async fn verify_token_with_requester_token<A: App + HasDb>(
+    app: &A,
+    token: &str,
+) -> Result<AuthInfo, AuthError> {
+    let hash = hash_token(token);
+    let state = app
+        .db()
+        .get_ephemeral_state(&submit_token_state_id(&hash))
+        .await
+        .map_err(|e| classify_db_err("fetch submit token", e))?
+        .filter(|s| s.kind == SUBMIT_TOKEN_STATE_KIND)
+        .ok_or_else(|| AuthError::Permanent("Invalid submit token".into()))?;
+
+    let now = crate::clock::now_sec();
+    if now >= state.expires_at {
+        return Err(AuthError::Permanent("Submit token has expired".into()));
+    }
+
+    let payload: SubmitTokenPayload = serde_json::from_str(&state.payload)
+        .map_err(|e| AuthError::Permanent(format!("Corrupt submit token payload: {e}")))?;
+
+    Ok(AuthInfo::Requester {
+        email: payload.email,
+        instance_id: payload.instance_id,
+    })
+}
+
+/// Dispatch an opaque token to the right verifier by its prefix: `mtu_` for a
+/// user session, `mts_` for a requester submit capability. Anything else is a
 /// definitively bad credential, not a "try the next scheme" fallthrough.
 pub async fn verify_token<A: App + HasDb>(app: &A, token: &str) -> Result<AuthInfo, AuthError> {
     if token.starts_with(USER_TOKEN_PREFIX) {
         return verify_token_with_user_token(app, token).await;
+    }
+    if token.starts_with(REQUESTER_TOKEN_PREFIX) {
+        return verify_token_with_requester_token(app, token).await;
     }
     Err(AuthError::Permanent("Unrecognized token".into()))
 }

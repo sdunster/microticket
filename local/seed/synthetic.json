@@ -1,0 +1,222 @@
+{
+  "_comment": "Local-dev fixture for `make local-seed` (api/src/bin/local-seed.rs). Applied as raw DynamoDB items \u2014 not through db::Handler's create_* calls \u2014 so record ids are preserved exactly as written here. Everything in this file is invented: no real person, organisation, or domain. api/tests/seed_fixtures.rs pins the invariants that make this safe to keep committed (token hashes match their documented plaintexts, referenced ids resolve, and every address is @example.com or @microticket.test).",
+  "tables": {
+    "instance": [
+      {
+        "_comment": "Public-submission-enabled instance. Its name ('Acme Support') deliberately does not substring-match the other seeded instance's name ('Ridgeline Help Desk'), so a name-based selector in a script or test can't accidentally hit both.",
+        "id": {
+          "S": "SeedAcme0001"
+        },
+        "name": {
+          "S": "Acme Support"
+        },
+        "slug": {
+          "S": "acme"
+        },
+        "public_submission_enabled": {
+          "BOOL": true
+        },
+        "from_name": {
+          "S": "Acme Support"
+        },
+        "signature": {
+          "S": "Thanks,\nAcme Support"
+        },
+        "created_at": {
+          "N": "1735689600"
+        }
+      },
+      {
+        "_comment": "Public submission NOT enabled (the attribute is simply absent, per the omit-optional-attributes house rule) \u2014 the counterpart instance for exercising the publicInstances/requestSubmitCode gate.",
+        "id": {
+          "S": "SeedRidge001"
+        },
+        "name": {
+          "S": "Ridgeline Help Desk"
+        },
+        "slug": {
+          "S": "ridgeline"
+        },
+        "from_name": {
+          "S": "Ridgeline Help Desk"
+        },
+        "signature": {
+          "S": "\u2014 Ridgeline Help Desk"
+        },
+        "created_at": {
+          "N": "1735689600"
+        }
+      }
+    ],
+    "inbound_address": [
+      {
+        "_comment": "Exact address for Acme.",
+        "address": {
+          "S": "support@acme.microticket.test"
+        },
+        "instance_id": {
+          "S": "SeedAcme0001"
+        },
+        "kind": {
+          "S": "exact"
+        },
+        "created_at": {
+          "N": "1735689600"
+        }
+      },
+      {
+        "_comment": "A second exact address for Acme, proving 'many addresses per instance'.",
+        "address": {
+          "S": "billing@acme.microticket.test"
+        },
+        "instance_id": {
+          "S": "SeedAcme0001"
+        },
+        "kind": {
+          "S": "exact"
+        },
+        "created_at": {
+          "N": "1735689600"
+        }
+      },
+      {
+        "_comment": "Wildcard address for Ridgeline: any local part at this subdomain routes here.",
+        "address": {
+          "S": "*@ridgeline.microticket.test"
+        },
+        "instance_id": {
+          "S": "SeedRidge001"
+        },
+        "kind": {
+          "S": "wildcard"
+        },
+        "created_at": {
+          "N": "1735689600"
+        }
+      }
+    ],
+    "user": [
+      {
+        "_comment": "The seeded owner. DEVELOPMENT.md documents this email and its ready-made token.",
+        "id": {
+          "S": "SeedOwnerUsr"
+        },
+        "email": {
+          "S": "owner@microticket.test"
+        },
+        "name": {
+          "S": "Olive Owner"
+        },
+        "enabled": {
+          "BOOL": true
+        },
+        "created_at": {
+          "N": "1735689600"
+        }
+      },
+      {
+        "_comment": "The seeded agent. DEVELOPMENT.md documents this email and its ready-made token.",
+        "id": {
+          "S": "SeedAgentUsr"
+        },
+        "email": {
+          "S": "agent@microticket.test"
+        },
+        "name": {
+          "S": "Adrian Agent"
+        },
+        "enabled": {
+          "BOOL": true
+        },
+        "created_at": {
+          "N": "1735689600"
+        }
+      }
+    ],
+    "membership": [
+      {
+        "_comment": "Owner of Acme.",
+        "id": {
+          "S": "SeedMembOwn1"
+        },
+        "user_id": {
+          "S": "SeedOwnerUsr"
+        },
+        "instance_id": {
+          "S": "SeedAcme0001"
+        },
+        "role": {
+          "S": "owner"
+        }
+      },
+      {
+        "_comment": "Also owner of Ridgeline, so the instance switcher has something to switch between.",
+        "id": {
+          "S": "SeedMembOwn2"
+        },
+        "user_id": {
+          "S": "SeedOwnerUsr"
+        },
+        "instance_id": {
+          "S": "SeedRidge001"
+        },
+        "role": {
+          "S": "owner"
+        }
+      },
+      {
+        "_comment": "Agent of Acme only.",
+        "id": {
+          "S": "SeedMembAgt1"
+        },
+        "user_id": {
+          "S": "SeedAgentUsr"
+        },
+        "instance_id": {
+          "S": "SeedAcme0001"
+        },
+        "role": {
+          "S": "agent"
+        }
+      }
+    ],
+    "user_token": [
+      {
+        "_comment": "Ready-made session token for the owner. Plaintext (only ever valid against a local database \u2014 see DEVELOPMENT.md) is mtu_localdev0000000000000000000owner; only its sha256 is stored here, exactly as a real token would be.",
+        "id": {
+          "S": "SeedTokOwner"
+        },
+        "token_hash": {
+          "S": "eab21068f56c2dbe2be85a12f243d944fd01e2d249232c4ba368b54233d277bb"
+        },
+        "user_id": {
+          "S": "SeedOwnerUsr"
+        },
+        "created_at": {
+          "N": "1735689600"
+        },
+        "expires_at": {
+          "N": "4070908800"
+        }
+      },
+      {
+        "_comment": "Ready-made session token for the agent. Plaintext is mtu_localdev0000000000000000000agent.",
+        "id": {
+          "S": "SeedTokAgent"
+        },
+        "token_hash": {
+          "S": "302a13886374dc5da954f2f694cda897fa0e1b1738fe446a2667e8102ebac0b6"
+        },
+        "user_id": {
+          "S": "SeedAgentUsr"
+        },
+        "created_at": {
+          "N": "1735689600"
+        },
+        "expires_at": {
+          "N": "4070908800"
+        }
+      }
+    ]
+  }
+}
