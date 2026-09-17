@@ -4,8 +4,7 @@
 # then hold vite until it is actually listening.
 #
 # $(1) is the server binary to run; $(2) is a shell prelude, used by dev-local to
-# export local/local.env first. `dev-local` isn't wired to this yet — it also needs
-# DynamoDB Local plumbing (`local/dynamodb.sh`), which is a later step's job.
+# export local/local.env first.
 define run_dev
 	@set -e; \
 	$(2) \
@@ -39,9 +38,10 @@ endef
 	lint gha-lint format test check check-toolchain
 
 # ── Not implemented yet ────────────────────────────────────────────────────────
-# These depend on pieces later build steps add (DynamoDB Local plumbing and
-# seed/CLI binaries in `local/`). They stub out rather than failing, so `make
-# dev-local` et al. give a clear message instead of a confusing build error.
+# These depend on pieces later build steps add: seed fixtures need entity types
+# that don't exist until step 4 (instances/memberships), and the mail pipeline is
+# step 7. They stub out rather than failing, so a command against them gives a
+# clear message instead of a confusing error.
 NOT_YET = @echo "==> $@: not implemented yet (see local/README.md / DEVELOPMENT.md)"; exit 0
 
 # Against real AWS DynamoDB tables — needs AWS credentials and `.env.secret`
@@ -50,23 +50,59 @@ NOT_YET = @echo "==> $@: not implemented yet (see local/README.md / DEVELOPMENT.
 dev:
 	$(call run_dev,poem)
 
-dev-local:
-	$(NOT_YET)
+# ── AWS-free local stack ──────────────────────────────────────────────────────
+# The `poem-local` binary (DynamoDB + mocked SQS/SES) against DynamoDB Local, run
+# by Java or Docker depending on what the machine has, with a database of its own
+# (DB_PREFIX=local). Needs no AWS credentials and touches no AWS account. See
+# DEVELOPMENT.md and local/README.md.
+
+# Exported vars beat .env — dotenvy never overrides an already-set variable.
+LOCAL_ENV = set -a; . ./local/local.env; set +a;
+# Runs DynamoDB Local via Java or Docker, whichever this machine has. Force one
+# with LOCAL_DDB=java / LOCAL_DDB=docker.
+LOCAL_DDB_SH = ./local/dynamodb.sh
+# Same stack as dev-local, started in the background. See local/e2e.sh.
+LOCAL_E2E_SH = ./local/e2e.sh
+
+dev-local: local-up local-tables
+	$(call run_dev,poem-local,$(LOCAL_ENV))
 
 local-up:
-	$(NOT_YET)
+	@$(LOCAL_DDB_SH) start
+
+# ── Detached stack, for scripts ───────────────────────────────────────────────
+# `dev-local` holds the terminal; these return once everything is answering, so a
+# browser test or CI job can drive the app. See local/e2e.sh.
+local-e2e:
+	@$(LOCAL_E2E_SH) up
+
+local-e2e-down:
+	@$(LOCAL_E2E_SH) down
+
+local-e2e-status:
+	@$(LOCAL_E2E_SH) status
 
 local-down:
-	$(NOT_YET)
+	@$(LOCAL_DDB_SH) stop
 
 local-status:
-	$(NOT_YET)
+	@$(LOCAL_DDB_SH) status
 
+# Download Amazon's DynamoDB Local JAR into local/, for the Java route without
+# the `dynamodb-local` brew cask. Checksum-verified against Amazon's published sum.
 local-fetch:
-	$(NOT_YET)
+	@$(LOCAL_DDB_SH) fetch
 
+# Also discards the stored data — every local table and row goes with it.
 local-reset:
-	$(NOT_YET)
+	@$(LOCAL_DDB_SH) reset
+
+local-tables:
+	@$(LOCAL_ENV) cd api && cargo run --quiet --bin local-tables
+
+# Fails if the local database is missing any table this codebase expects.
+local-tables-check:
+	@$(LOCAL_ENV) cd api && cargo run --quiet --bin local-tables -- --check
 
 local-seed:
 	$(NOT_YET)
@@ -78,21 +114,6 @@ local-clear:
 	$(NOT_YET)
 
 local-cli:
-	$(NOT_YET)
-
-local-tables:
-	$(NOT_YET)
-
-local-tables-check:
-	$(NOT_YET)
-
-local-e2e:
-	$(NOT_YET)
-
-local-e2e-down:
-	$(NOT_YET)
-
-local-e2e-status:
 	$(NOT_YET)
 
 local-mail:
@@ -127,6 +148,9 @@ check:
 	@cd web && npm run lint
 	@cd web && npm run typecheck
 	@cd web && npm run build
+	@echo "Running local stack checks..."
+	@if command -v shellcheck >/dev/null 2>&1; then shellcheck local/*.sh; \
+	else echo "  (shellcheck not installed; skipping local/*.sh)"; fi
 	@echo "Running infra checks..."
 	@cd infra && terraform fmt -recursive -check -diff
 	@cd infra && terraform init -backend=false -input=false >/dev/null
