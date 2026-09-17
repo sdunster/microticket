@@ -1,0 +1,49 @@
+[package]
+name = "microticket"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "export-schema"
+path = "src/bin/export-schema.rs"
+
+[dependencies]
+anyhow = "1.0.99"
+async-graphql = { version = "7.0.17", features = ["dataloader"] }
+async-graphql-poem = "7.0.17"
+aws-config = { version = "1.8.5", features = ["credentials-login"] }
+# `default-features = false` drops the legacy `rustls` feature, which pulls in the
+# unmaintained rustls 0.21 / rustls-webpki 0.101 stack (RUSTSEC-2026-0098/0099/0104).
+# `default-https-client` is the modern replacement; `rt-tokio` is the other default we need.
+aws-sdk-dynamodb = { version = "1.89.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.89.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sesv2 = { version = "1.89.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sqs = { version = "1.89.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+lambda_http = "1.2"
+lambda_runtime = "1.2"
+base64 = "0.22.1"
+chrono = "0.4.42"
+clap = { version = "4.5.47", features = ["derive"] }
+hex = "0.4.3"
+mail-builder = "0.5.0"
+mail-parser = "0.11.9"
+poem = "3.1.12"
+rand = "0.10"
+sha2 = "0.10"
+tokio = { version = "1.47.1", features = ["full"] }
+uuid = { version = "1.18.0", features = ["v4", "v5"] }
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "preview-features", "resident-key-support"] }
+# Vendored OpenSSL: webauthn-rs pulls in openssl-sys; building it from source
+# (statically linked) avoids relying on a system libssl, which fails in CI.
+openssl = { version = "0.10", features = ["vendored"] }
+url = "2"
+http = "1.1.0"
+serde_json = "1.0.145"
+thiserror = "2.0.16"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"
+dotenvy = "0.15.7"
+serde = { version = "1.0", features = ["derive"] }
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "charset", "query", "form"] }
+nanoid = "0.5.0"

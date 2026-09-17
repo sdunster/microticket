@@ -1,0 +1,11 @@
+name: API check
+on:
+  pull_request:
+    paths:
+      - 'api/**'
+      - '.github/workflows/api-check.yml'
+      - '.github/workflows/_check-api.yml'
+
+jobs:
+  api_check:
+    uses: ./.github/workflows/_check-api.yml

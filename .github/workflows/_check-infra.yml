@@ -1,0 +1,17 @@
+name: Infra check (reusable)
+on:
+  workflow_call:
+
+jobs:
+  infra_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Check Terraform formatting
+        run: cd infra && terraform fmt -recursive -check -diff
+      - name: Terraform init (no backend — CI never gets Terraform credentials)
+        run: cd infra && terraform init -backend=false -input=false
+      - name: Terraform validate
+        run: cd infra && terraform validate

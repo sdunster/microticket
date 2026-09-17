@@ -1,0 +1,66 @@
+# Contributing
+
+Contributions are welcome — bug fixes, improvements, or new features. Here's how to get involved.
+
+## Getting started
+
+1. Fork the repo and create a branch from `main`.
+2. Follow [DEVELOPMENT.md](DEVELOPMENT.md) to get the project running locally.
+3. Make your changes.
+
+> **Always branch from `main`.** It's the stable branch and its history is never rewritten. The
+> `prod` branch deploys to production on push — don't base work on it. See
+> [Branches & deployments](README.md#branches--deployments) for details.
+
+## Before submitting a PR
+
+Run the full check suite and make sure everything passes:
+
+```
+make check
+make test
+```
+
+`make check` is the static half of CI (actionlint, Relay compilation, Prettier, ESLint,
+TypeScript typecheck, a production web build, `terraform fmt`/`validate`, a Rust toolchain
+version check, `cargo fmt`, GraphQL schema diffing, and Clippy) — **it runs no tests.**
+`make test` runs the Rust and web test suites. CI runs both, so it's worth catching issues
+locally first.
+
+If it fails on formatting, fix it with:
+
+```
+make format
+```
+
+If you've changed the GraphQL API, regenerate the schema file before running `make check`:
+
+```
+cd api && cargo run --locked --bin export-schema > schema.graphql
+cd web && npm run relay
+```
+
+> `make check` needs `actionlint` (`brew install actionlint`) and Terraform on your PATH.
+
+## Opening a pull request
+
+- **One commit per PR.** Squash your branch down to a single commit before opening the PR (or
+  before merge, if review feedback added fixup commits along the way).
+- **Keep PRs small and focused** — one logical change per commit/PR makes review easier. For
+  larger work, prefer a stack of small PRs that build on each other over one large PR.
+- **Every PR/commit must be safe to deploy on its own.** It must pass CI (`make check` &&
+  `make test`) and stand correctly by itself — don't leave a PR in a half-working state that only
+  becomes correct once a later PR in the stack lands. If a change genuinely can't be split into
+  independently-deployable steps, that's a signal to reconsider the approach before opening the PR.
+- Write a clear commit message / PR description explaining what the change does and why.
+- If the change is non-trivial, include a short note on how you tested it.
+
+There's no formal issue requirement for small fixes, but for larger changes it's worth opening an
+issue first to discuss the approach.
+
+## Code style
+
+- Rust: formatted with `cargo fmt`, linted with `cargo clippy`.
+- TypeScript/JS: formatted with Prettier, linted with ESLint (`npm run lint`).
+
+Both are enforced by `make check`.

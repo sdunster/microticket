@@ -1,0 +1,9 @@
+# Pinned to an exact version (not the floating "stable") so that CI and local
+# dev run the *same* clippy lint set. A floating channel would let CI pick up a
+# newer stable — and newer/stricter clippy lints — that doesn't reproduce under
+# `make check` locally. Bump this deliberately in its own PR, fixing any new
+# lints at the same time. `make check-toolchain` verifies the active toolchain
+# matches. 1.97.0 matches the toolchain this project was scaffolded with.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

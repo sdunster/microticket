@@ -1,0 +1,29 @@
+name: Web check (reusable)
+on:
+  workflow_call:
+
+jobs:
+  web_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install modules
+        run: cd web && npm ci
+      - name: Run relay compiler
+        run: cd web && npm run relay
+      - name: Check formatting
+        run: cd web && npx prettier --check .
+      - name: Run linter
+        run: cd web && npm run lint
+      - name: Typecheck
+        run: cd web && npm run typecheck
+      - name: Run tests
+        run: cd web && npm test
+      - name: Build (just for checking)
+        run: cd web && npm run build

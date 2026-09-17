@@ -1,0 +1,11 @@
+name: Web check
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-check.yml'
+      - '.github/workflows/_check-web.yml'
+
+jobs:
+  web_check:
+    uses: ./.github/workflows/_check-web.yml

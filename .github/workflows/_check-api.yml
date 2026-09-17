@@ -1,0 +1,31 @@
+name: API check (reusable)
+on:
+  workflow_call:
+
+env:
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  api_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Rust toolchain (pinned by api/rust-toolchain.toml)
+        run: |
+          channel=$(sed -nE 's/^channel *= *"(.*)"/\1/p' api/rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: api
+      - name: Run rustfmt check
+        run: cd api && cargo fmt --check
+      - name: Check GraphQL schema is up to date
+        run: |
+          cd api
+          cargo run --locked --bin export-schema > /tmp/schema.generated.graphql
+          diff -u schema.graphql /tmp/schema.generated.graphql
+      - name: Run Clippy
+        run: cd api && cargo clippy --locked --all-targets --all-features
+      - name: Run tests
+        run: cd api && cargo test --locked
