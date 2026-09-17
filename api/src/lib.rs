@@ -1,5 +1,20 @@
+pub mod app;
+pub mod auth;
+pub mod clock;
+pub mod db;
+pub mod dynamodb;
 pub mod environment;
+pub mod expire;
 pub mod graphql;
+pub mod local_dev;
+pub mod mail;
+pub mod mockdb;
+pub mod mockmail;
+pub mod nonce;
+pub mod request_metrics;
+pub mod server;
+pub mod sesmail;
+pub mod telemetry;
 
 /// Load local `.env`/`.env.secret` for CLI / dev binaries. The Lambda binaries
 /// don't call this. AWS profile defaulting is handled natively by

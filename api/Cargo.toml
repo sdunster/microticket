@@ -7,6 +7,14 @@ edition = "2024"
 name = "export-schema"
 path = "src/bin/export-schema.rs"
 
+# `src/bin/lambda/main.rs` would otherwise auto-discover as a binary named
+# "lambda" (Cargo's `src/bin/<name>/main.rs` convention); name it explicitly so
+# the deployed function/binary is called `api-lambda`, matching `cargo lambda
+# build --bin api-lambda` in CI and the Terraform `handler = "bootstrap"` setup.
+[[bin]]
+name = "api-lambda"
+path = "src/bin/lambda/main.rs"
+
 [dependencies]
 anyhow = "1.0.99"
 async-graphql = { version = "7.0.17", features = ["dataloader"] }
@@ -44,6 +52,5 @@ tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 dotenvy = "0.15.7"
 serde = { version = "1.0", features = ["derive"] }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "charset", "query", "form"] }
 nanoid = "0.5.0"

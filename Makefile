@@ -4,8 +4,8 @@
 # then hold vite until it is actually listening.
 #
 # $(1) is the server binary to run; $(2) is a shell prelude, used by dev-local to
-# export local/local.env first. Not wired into `dev`/`dev-local` yet — there is no
-# dev server binary until the API foundations step adds `server.rs`/`bin/poem`.
+# export local/local.env first. `dev-local` isn't wired to this yet — it also needs
+# DynamoDB Local plumbing (`local/dynamodb.sh`), which is a later step's job.
 define run_dev
 	@set -e; \
 	$(2) \
@@ -39,14 +39,16 @@ endef
 	lint gha-lint format test check check-toolchain
 
 # ── Not implemented yet ────────────────────────────────────────────────────────
-# These depend on pieces later build steps add (the dev server binary in `api/`,
-# DynamoDB Local plumbing and seed/CLI binaries in `local/`). They stub out
-# rather than failing, so `make dev` et al. give a clear message instead of a
-# confusing build error.
+# These depend on pieces later build steps add (DynamoDB Local plumbing and
+# seed/CLI binaries in `local/`). They stub out rather than failing, so `make
+# dev-local` et al. give a clear message instead of a confusing build error.
 NOT_YET = @echo "==> $@: not implemented yet (see local/README.md / DEVELOPMENT.md)"; exit 0
 
+# Against real AWS DynamoDB tables — needs AWS credentials and `.env.secret`
+# (JWT_SECRET; see .env.secret.example). No tables exist until `infra/` is applied
+# (a later step), so this is real but not yet useful against a fresh checkout.
 dev:
-	$(NOT_YET)
+	$(call run_dev,poem)
 
 dev-local:
 	$(NOT_YET)

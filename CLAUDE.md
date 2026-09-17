@@ -26,6 +26,12 @@ local setup, and `SCHEMA.md` for the data model.
 - **Mutations require `--enable-mutations` on the dev server.** `cargo run --bin poem` (or
   `poem-local`) starts read-only by default; pass `--enable-mutations` to allow writes. This is a
   deliberate guard against accidentally mutating whatever `DB_PREFIX` you're pointed at.
+- **No queue abstraction in `api/src/app.rs`.** seslogin has `HasQueues`/`queue.rs`/`sqs.rs`/
+  `mockqueue.rs` because its API *produces* to SQS (member sync, NITC export, healthchecks).
+  microticket's API never produces to SQS — the only queue in this system carries inbound mail,
+  and that queue is *consumed* by the inbound-mail Lambda (step 7), a separate binary with no
+  GraphQL surface. Don't add a queue trait to `app.rs`/`MyApp` unless the API itself starts
+  producing to a queue.
 
 ## Scope note
 
