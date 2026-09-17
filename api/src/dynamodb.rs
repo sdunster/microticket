@@ -32,6 +32,22 @@ const NANOID_ALPHABET: [char; 62] = [
     'v', 'w', 'x', 'y', 'z',
 ];
 
+/// Turn a failed `UpdateItem` into a [`db::Error`], recognizing the
+/// `condition_expression("attribute_exists(id)")` failure every update method
+/// below uses to distinguish "this row doesn't exist" from an infrastructure
+/// error — otherwise both look identical to the caller.
+fn map_update_err(
+    e: SdkError<aws_sdk_dynamodb::operation::update_item::UpdateItemError>,
+    not_found_msg: String,
+) -> db::Error {
+    if let SdkError::ServiceError(ref se) = e
+        && se.err().is_conditional_check_failed_exception()
+    {
+        return db::Error::NotFound(not_found_msg);
+    }
+    db::Error::Infrastructure(sdk_err_msg(e))
+}
+
 /// Extract the most useful info from a DynamoDB SdkError.
 /// `{}` just prints "service error"; `{:?}` dumps raw HTTP responses.
 /// This gives the DynamoDB error code + message for service errors, or the variant
@@ -140,6 +156,113 @@ impl Item {
         } else {
             Ok(vec![])
         }
+    }
+}
+
+impl TryInto<db::User> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::User, Self::Error> {
+        Ok(db::User {
+            id: self.id()?,
+            email: self
+                .string_field("email")?
+                .ok_or_else(|| anyhow!("User missing email"))?,
+            name: self.string_field("name")?.unwrap_or_default(),
+            enabled: self.bool_field("enabled")?.unwrap_or(false),
+            created_at: self
+                .i64_field("created_at")?
+                .ok_or_else(|| anyhow!("User missing created_at"))? as u64,
+            access_time: self.i64_field("access_time")?.map(|i| i as u64),
+        })
+    }
+}
+
+impl TryInto<db::LoginCode> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::LoginCode, Self::Error> {
+        Ok(db::LoginCode {
+            email: self
+                .string_field("email")?
+                .ok_or_else(|| anyhow!("LoginCode missing email"))?,
+            code_hash: self
+                .string_field("code_hash")?
+                .ok_or_else(|| anyhow!("LoginCode missing code_hash"))?,
+            expires_at: self
+                .i64_field("expires_at")?
+                .ok_or_else(|| anyhow!("LoginCode missing expires_at"))?
+                as u64,
+            attempts: self.i64_field("attempts")?.unwrap_or(0) as u64,
+            last_sent_at: self
+                .i64_field("last_sent_at")?
+                .ok_or_else(|| anyhow!("LoginCode missing last_sent_at"))?
+                as u64,
+        })
+    }
+}
+
+impl TryInto<db::UserToken> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::UserToken, Self::Error> {
+        Ok(db::UserToken {
+            id: self.id()?,
+            token_hash: self
+                .string_field("token_hash")?
+                .ok_or_else(|| anyhow!("UserToken missing token_hash"))?,
+            user_id: self
+                .string_field("user_id")?
+                .ok_or_else(|| anyhow!("UserToken missing user_id"))?,
+            created_at: self
+                .i64_field("created_at")?
+                .ok_or_else(|| anyhow!("UserToken missing created_at"))?
+                as u64,
+            expires_at: self
+                .i64_field("expires_at")?
+                .ok_or_else(|| anyhow!("UserToken missing expires_at"))?
+                as u64,
+            last_used_at: self.i64_field("last_used_at")?.map(|i| i as u64),
+        })
+    }
+}
+
+impl TryInto<db::WebauthnCredential> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::WebauthnCredential, Self::Error> {
+        Ok(db::WebauthnCredential {
+            id: self.id()?,
+            user_id: self
+                .string_field("user_id")?
+                .ok_or_else(|| anyhow!("WebauthnCredential missing user_id"))?,
+            name: self
+                .string_field("name")?
+                .ok_or_else(|| anyhow!("WebauthnCredential missing name"))?,
+            passkey_json: self
+                .string_field("passkey")?
+                .ok_or_else(|| anyhow!("WebauthnCredential missing passkey_json"))?,
+            created_at: self
+                .i64_field("created_at")?
+                .ok_or_else(|| anyhow!("WebauthnCredential missing created_at"))?
+                as u64,
+            last_used_at: self.i64_field("last_used_at")?.map(|i| i as u64),
+        })
+    }
+}
+
+impl TryInto<db::EphemeralState> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::EphemeralState, Self::Error> {
+        Ok(db::EphemeralState {
+            id: self.id()?,
+            kind: self
+                .string_field("kind")?
+                .ok_or_else(|| anyhow!("EphemeralState missing kind"))?,
+            payload: self
+                .string_field("payload")?
+                .ok_or_else(|| anyhow!("EphemeralState missing payload"))?,
+            expires_at: self
+                .i64_field("expires_at")?
+                .ok_or_else(|| anyhow!("EphemeralState missing expires_at"))?
+                as u64,
+        })
     }
 }
 
@@ -421,8 +544,6 @@ fn unprocessed_keys_for(
 
 enum CapKind {
     Read,
-    /// Not yet constructed anywhere — there are no write methods until step 3.
-    #[allow(dead_code)]
     Write,
 }
 
@@ -591,7 +712,620 @@ where
     Ok(hydrate_items(Some(scan_all_items(op, build).await?))?)
 }
 
-impl db::Handler for Handler {}
+impl db::Handler for Handler {
+    // ── user ──────────────────────────────────────────────────────────────
+
+    async fn get_users<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> db::Result<Vec<Option<db::User>>> {
+        self.get_records("user", ids).await
+    }
+
+    async fn get_user_id_by_email(&self, email: &str) -> db::Result<Option<String>> {
+        let resp = self
+            .client
+            .query()
+            .table_name(self.table_name("user"))
+            .index_name("email-index")
+            .key_condition_expression("email = :email")
+            .expression_attribute_values(":email", AttributeValue::S(email.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "get_user_id_by_email",
+            resp.consumed_capacity(),
+            CapKind::Read,
+        );
+
+        let ids = resp
+            .items
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| Item(item).id())
+            .collect::<HydrationResult<Vec<String>>>()?;
+        db::at_most_one(ids, || format!("Multiple users share email {email}"))
+    }
+
+    async fn create_user(&self, email: &str, name: &str) -> db::Result<db::User> {
+        self.ensure_writable()?;
+        let id = new_id();
+        let now = crate::clock::now_sec();
+
+        let resp = self
+            .client
+            .put_item()
+            .table_name(self.table_name("user"))
+            .item("id", AttributeValue::S(id.clone()))
+            .item("email", AttributeValue::S(email.to_string()))
+            .item("name", AttributeValue::S(name.to_string()))
+            .item("enabled", AttributeValue::Bool(true))
+            .item("created_at", AttributeValue::N(now.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity("create_user", resp.consumed_capacity(), CapKind::Write);
+
+        Ok(db::User {
+            id,
+            email: email.to_string(),
+            name: name.to_string(),
+            enabled: true,
+            created_at: now,
+            access_time: None,
+        })
+    }
+
+    async fn update_user(&self, id: &str, change: db::UserUpdateShape<'_>) -> db::Result<()> {
+        self.ensure_writable()?;
+        match change {
+            db::UserUpdateShape::Fields { name, enabled } => {
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("user"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET #n = :name, enabled = :enabled")
+                    .expression_attribute_names("#n", "name")
+                    .expression_attribute_values(":name", AttributeValue::S(name.to_string()))
+                    .expression_attribute_values(":enabled", AttributeValue::Bool(enabled))
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("User {id}")))?;
+                record_capacity("update_user", resp.consumed_capacity(), CapKind::Write);
+            }
+            db::UserUpdateShape::AccessTime => {
+                let now = crate::clock::now_sec();
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("user"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET access_time = :access_time")
+                    .expression_attribute_values(":access_time", AttributeValue::N(now.to_string()))
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("User {id}")))?;
+                record_capacity(
+                    "update_user_access_time",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // ── login_code ────────────────────────────────────────────────────────
+
+    async fn put_login_code(
+        &self,
+        email: &str,
+        code_hash: &str,
+        expires_at: u64,
+        now: u64,
+    ) -> db::Result<()> {
+        self.ensure_writable()?;
+        let resp = self
+            .client
+            .put_item()
+            .table_name(self.table_name("login_code"))
+            .item("email", AttributeValue::S(email.to_string()))
+            .item("code_hash", AttributeValue::S(code_hash.to_string()))
+            .item("expires_at", AttributeValue::N(expires_at.to_string()))
+            .item("attempts", AttributeValue::N("0".to_string()))
+            .item("last_sent_at", AttributeValue::N(now.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity("put_login_code", resp.consumed_capacity(), CapKind::Write);
+        Ok(())
+    }
+
+    async fn get_login_code(&self, email: &str) -> db::Result<Option<db::LoginCode>> {
+        let resp = self
+            .client
+            .get_item()
+            .table_name(self.table_name("login_code"))
+            .key("email", AttributeValue::S(email.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity("get_login_code", resp.consumed_capacity(), CapKind::Read);
+        match resp.item {
+            Some(item) => Ok(Some(hydrate_item(item)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_login_code(&self, email: &str) -> db::Result<()> {
+        self.ensure_writable()?;
+        self.client
+            .delete_item()
+            .table_name(self.table_name("login_code"))
+            .key("email", AttributeValue::S(email.to_string()))
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        Ok(())
+    }
+
+    async fn increment_login_code_attempts(&self, email: &str) -> db::Result<()> {
+        self.ensure_writable()?;
+        self.client
+            .update_item()
+            .table_name(self.table_name("login_code"))
+            .key("email", AttributeValue::S(email.to_string()))
+            .update_expression("ADD attempts :one")
+            .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        Ok(())
+    }
+
+    // ── user_token ────────────────────────────────────────────────────────
+
+    async fn create_user_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        expires_at: u64,
+    ) -> db::Result<db::UserToken> {
+        self.ensure_writable()?;
+        let id = new_id();
+        let now = crate::clock::now_sec();
+        let resp = self
+            .client
+            .put_item()
+            .table_name(self.table_name("user_token"))
+            .item("id", AttributeValue::S(id.clone()))
+            .item("token_hash", AttributeValue::S(token_hash.to_string()))
+            .item("user_id", AttributeValue::S(user_id.to_string()))
+            .item("created_at", AttributeValue::N(now.to_string()))
+            .item("expires_at", AttributeValue::N(expires_at.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "create_user_token",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+        Ok(db::UserToken {
+            id,
+            token_hash: token_hash.to_string(),
+            user_id: user_id.to_string(),
+            created_at: now,
+            expires_at,
+            last_used_at: None,
+        })
+    }
+
+    async fn get_user_token_by_hash(&self, token_hash: &str) -> db::Result<Option<db::UserToken>> {
+        let resp = self
+            .client
+            .query()
+            .table_name(self.table_name("user_token"))
+            .index_name("token_hash-index")
+            .key_condition_expression("token_hash = :token_hash")
+            .expression_attribute_values(":token_hash", AttributeValue::S(token_hash.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "get_user_token_by_hash",
+            resp.consumed_capacity(),
+            CapKind::Read,
+        );
+        let ids = resp
+            .items
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| Item(item).id())
+            .collect::<HydrationResult<Vec<String>>>()?;
+        let Some(id) = db::at_most_one(ids, || {
+            "Multiple user tokens share the same hash".to_string()
+        })?
+        else {
+            return Ok(None);
+        };
+
+        let full = self
+            .client
+            .get_item()
+            .table_name(self.table_name("user_token"))
+            .key("id", AttributeValue::S(id))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "get_user_token_by_hash_fetch",
+            full.consumed_capacity(),
+            CapKind::Read,
+        );
+        match full.item {
+            Some(item) => Ok(Some(hydrate_item(item)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn update_user_token(
+        &self,
+        id: &str,
+        change: db::UserTokenUpdateShape,
+    ) -> db::Result<()> {
+        self.ensure_writable()?;
+        match change {
+            db::UserTokenUpdateShape::TouchLastUsed => {
+                let now = crate::clock::now_sec();
+                let new_expires_at = crate::expire::ExpirePolicy::UserToken.expires_at(now);
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("user_token"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET last_used_at = :last_used_at, expires_at = :expires_at")
+                    .expression_attribute_values(
+                        ":last_used_at",
+                        AttributeValue::N(now.to_string()),
+                    )
+                    .expression_attribute_values(
+                        ":expires_at",
+                        AttributeValue::N(new_expires_at.to_string()),
+                    )
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("UserToken {id}")))?;
+                record_capacity(
+                    "update_user_token",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_user_token(&self, id: &str) -> db::Result<()> {
+        self.ensure_writable()?;
+        self.client
+            .delete_item()
+            .table_name(self.table_name("user_token"))
+            .key("id", AttributeValue::S(id.to_string()))
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        Ok(())
+    }
+
+    // ── webauthn_credential ───────────────────────────────────────────────
+
+    async fn create_webauthn_credential(
+        &self,
+        id: &str,
+        user_id: &str,
+        name: &str,
+        passkey_json: &str,
+    ) -> db::Result<db::WebauthnCredential> {
+        self.ensure_writable()?;
+        let now = crate::clock::now_sec();
+        let resp = self
+            .client
+            .put_item()
+            .table_name(self.table_name("webauthn_credential"))
+            .item("id", AttributeValue::S(id.to_string()))
+            .item("user_id", AttributeValue::S(user_id.to_string()))
+            .item("name", AttributeValue::S(name.to_string()))
+            .item("passkey", AttributeValue::S(passkey_json.to_string()))
+            .item("created_at", AttributeValue::N(now.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "create_webauthn_credential",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+        Ok(db::WebauthnCredential {
+            id: id.to_string(),
+            user_id: user_id.to_string(),
+            name: name.to_string(),
+            passkey_json: passkey_json.to_string(),
+            created_at: now,
+            last_used_at: None,
+        })
+    }
+
+    async fn get_webauthn_credential(
+        &self,
+        id: &str,
+    ) -> db::Result<Option<db::WebauthnCredential>> {
+        let resp = self
+            .client
+            .get_item()
+            .table_name(self.table_name("webauthn_credential"))
+            .key("id", AttributeValue::S(id.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "get_webauthn_credential",
+            resp.consumed_capacity(),
+            CapKind::Read,
+        );
+        match resp.item {
+            Some(item) => Ok(Some(hydrate_item(item)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn list_webauthn_credentials_by_user(
+        &self,
+        user_id: &str,
+    ) -> db::Result<Vec<db::WebauthnCredential>> {
+        query_all("list_webauthn_credentials_by_user", || {
+            self.client
+                .query()
+                .table_name(self.table_name("webauthn_credential"))
+                .index_name("user_id-index")
+                .key_condition_expression("user_id = :user_id")
+                .expression_attribute_values(":user_id", AttributeValue::S(user_id.to_string()))
+        })
+        .await
+    }
+
+    async fn count_webauthn_credentials_by_user(&self, user_id: &str) -> db::Result<usize> {
+        // `Select::Count` still reports a per-page count alongside a continuation
+        // key, so sum across pages rather than trusting the first response.
+        let mut total: usize = 0;
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+
+        loop {
+            let mut builder = self
+                .client
+                .query()
+                .table_name(self.table_name("webauthn_credential"))
+                .index_name("user_id-index")
+                .key_condition_expression("user_id = :user_id")
+                .expression_attribute_values(":user_id", AttributeValue::S(user_id.to_string()))
+                .select(aws_sdk_dynamodb::types::Select::Count)
+                .return_consumed_capacity(ReturnConsumedCapacity::Total);
+            if let Some(esk) = exclusive_start_key.take() {
+                builder = builder.set_exclusive_start_key(Some(esk));
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+            record_capacity(
+                "count_webauthn_credentials_by_user",
+                resp.consumed_capacity(),
+                CapKind::Read,
+            );
+
+            total += resp.count.max(0) as usize;
+            exclusive_start_key = resp.last_evaluated_key;
+            if exclusive_start_key.is_none() {
+                return Ok(total);
+            }
+        }
+    }
+
+    async fn update_webauthn_credential(
+        &self,
+        id: &str,
+        change: db::WebauthnCredentialUpdate,
+    ) -> db::Result<()> {
+        self.ensure_writable()?;
+        match change {
+            db::WebauthnCredentialUpdate::Rename(name) => {
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("webauthn_credential"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET #n = :name")
+                    .expression_attribute_names("#n", "name")
+                    .expression_attribute_values(":name", AttributeValue::S(name))
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("WebauthnCredential {id}")))?;
+                record_capacity(
+                    "update_webauthn_credential_rename",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::WebauthnCredentialUpdate::TouchLastUsed { passkey_json } => {
+                let now = crate::clock::now_sec();
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("webauthn_credential"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET last_used_at = :last_used_at, passkey = :passkey_json")
+                    .expression_attribute_values(
+                        ":last_used_at",
+                        AttributeValue::N(now.to_string()),
+                    )
+                    .expression_attribute_values(":passkey_json", AttributeValue::S(passkey_json))
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("WebauthnCredential {id}")))?;
+                record_capacity(
+                    "update_webauthn_credential_touch",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_webauthn_credential(&self, id: &str) -> db::Result<()> {
+        self.ensure_writable()?;
+        self.client
+            .delete_item()
+            .table_name(self.table_name("webauthn_credential"))
+            .key("id", AttributeValue::S(id.to_string()))
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        Ok(())
+    }
+
+    // ── ephemeral_state (generic) ────────────────────────────────────────────
+
+    async fn put_ephemeral_state(
+        &self,
+        id: &str,
+        kind: &str,
+        payload: &str,
+        expires_at: u64,
+    ) -> db::Result<()> {
+        self.ensure_writable()?;
+        let resp = self
+            .client
+            .put_item()
+            .table_name(self.table_name("ephemeral_state"))
+            .item("id", AttributeValue::S(id.to_string()))
+            .item("kind", AttributeValue::S(kind.to_string()))
+            .item("payload", AttributeValue::S(payload.to_string()))
+            .item("expires_at", AttributeValue::N(expires_at.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "put_ephemeral_state",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+        Ok(())
+    }
+
+    async fn get_ephemeral_state(&self, id: &str) -> db::Result<Option<db::EphemeralState>> {
+        let resp = self
+            .client
+            .get_item()
+            .table_name(self.table_name("ephemeral_state"))
+            .key("id", AttributeValue::S(id.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "get_ephemeral_state",
+            resp.consumed_capacity(),
+            CapKind::Read,
+        );
+        match resp.item {
+            Some(item) => Ok(Some(hydrate_item(item)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_ephemeral_state(&self, id: &str) -> db::Result<()> {
+        self.ensure_writable()?;
+        self.client
+            .delete_item()
+            .table_name(self.table_name("ephemeral_state"))
+            .key("id", AttributeValue::S(id.to_string()))
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        Ok(())
+    }
+
+    // ── WebAuthn challenge state — a thin view over ephemeral_state ─────────
+
+    async fn put_webauthn_state(
+        &self,
+        id: &str,
+        kind: &str,
+        user_id: Option<&str>,
+        state_json: &str,
+        expires_at: u64,
+    ) -> db::Result<()> {
+        let payload = serde_json::json!({
+            "user_id": user_id,
+            "state_json": state_json,
+        })
+        .to_string();
+        self.put_ephemeral_state(id, kind, &payload, expires_at)
+            .await
+    }
+
+    async fn get_webauthn_state(&self, id: &str) -> db::Result<Option<db::WebauthnState>> {
+        let Some(state) = self.get_ephemeral_state(id).await? else {
+            return Ok(None);
+        };
+        let payload: serde_json::Value = serde_json::from_str(&state.payload)
+            .map_err(|e| db::Error::Hydration(format!("WebauthnState payload: {e}")))?;
+        let state_json = payload
+            .get("state_json")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| db::Error::Hydration("WebauthnState payload missing state_json".into()))?
+            .to_string();
+        let user_id = payload
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Ok(Some(db::WebauthnState {
+            id: state.id,
+            kind: state.kind,
+            user_id,
+            state_json,
+            expires_at: state.expires_at,
+        }))
+    }
+
+    async fn delete_webauthn_state(&self, id: &str) -> db::Result<()> {
+        self.delete_ephemeral_state(id).await
+    }
+}
 
 #[cfg(test)]
 mod tests {

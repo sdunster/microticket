@@ -6,9 +6,13 @@
 //! - a plain `db::Error` bubbling out of a resolver, with no `ApiError` wrapping,
 //!   must default to `extensions.code = "INTERNAL"`
 //!
-//! This is a small ad hoc schema rather than the crate's real (still domain-less)
-//! `QueryRoot`, so it can exercise both guard and non-guard failure paths without
-//! polluting the committed `schema.graphql` with test-only fields.
+//! `guard_failure_is_unauthenticated`/`plain_db_error_is_internal` use a small ad
+//! hoc schema rather than the crate's real `QueryRoot`, so they can exercise both
+//! guard and non-guard failure paths without polluting the committed
+//! `schema.graphql` with test-only fields. `real_schema_guarded_field_with_no_credentials_is_unauthenticated`
+//! covers the same guard-failure shape but against the crate's actual production
+//! schema (`me`), so a regression in how `graphql::build_schema` wires the guard
+//! extension wouldn't be masked by the ad hoc schema alone.
 
 use std::sync::Arc;
 
@@ -72,4 +76,19 @@ async fn plain_db_error_is_internal() {
     let response = schema.execute("{ boom }").await;
     assert!(!response.errors.is_empty(), "expected an error");
     assert_eq!(error_code(&response).as_deref(), Some("INTERNAL"));
+}
+
+#[tokio::test]
+async fn real_schema_guarded_field_with_no_credentials_is_unauthenticated() {
+    let my_app = Arc::new(app::new(
+        mockdb::Handler::new(),
+        mockmail::Handler::new(),
+        0,
+    ));
+    let webauthn = Arc::new(app::build_webauthn().expect("WebAuthn build failed"));
+    let schema = microticket::graphql::build_schema(my_app, webauthn);
+
+    let response = schema.execute("{ me { id } }").await;
+    assert!(!response.errors.is_empty(), "expected an error");
+    assert_eq!(error_code(&response).as_deref(), Some("UNAUTHENTICATED"));
 }

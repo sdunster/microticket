@@ -13,11 +13,16 @@ pub const USER_TOKEN_EXPIRE_S: u64 = 60 * 60 * 8;
 /// `ephemeral_state`: the public submit form's 15-minute, single-purpose requester
 /// token.
 pub const REQUESTER_SUBMIT_TOKEN_EXPIRE_S: u64 = 60 * 15;
+/// `ephemeral_state`: how long a WebAuthn registration/login challenge stays
+/// valid — long enough for a user to complete a platform authenticator prompt,
+/// short enough that an abandoned challenge can't be replayed much later.
+pub const WEBAUTHN_CHALLENGE_EXPIRE_S: u64 = 60 * 5;
 
 pub enum ExpirePolicy {
     LoginCode,
     UserToken,
     RequesterSubmitToken,
+    WebauthnChallenge,
     TimeSec(u64),
 }
 
@@ -28,6 +33,7 @@ impl ExpirePolicy {
             Self::LoginCode => now + LOGIN_CODE_EXPIRE_S,
             Self::UserToken => now + USER_TOKEN_EXPIRE_S,
             Self::RequesterSubmitToken => now + REQUESTER_SUBMIT_TOKEN_EXPIRE_S,
+            Self::WebauthnChallenge => now + WEBAUTHN_CHALLENGE_EXPIRE_S,
             Self::TimeSec(sec) => now + sec,
         }
     }
@@ -57,6 +63,14 @@ mod tests {
         assert_eq!(
             ExpirePolicy::RequesterSubmitToken.expires_at(1_000),
             1_000 + 900
+        );
+    }
+
+    #[test]
+    fn webauthn_challenge_expires_in_five_minutes() {
+        assert_eq!(
+            ExpirePolicy::WebauthnChallenge.expires_at(1_000),
+            1_000 + 300
         );
     }
 

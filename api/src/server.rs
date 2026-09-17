@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use async_graphql::ServerError;
-use async_graphql::{EmptyMutation, EmptySubscription, http::GraphiQLSource};
+use async_graphql::http::GraphiQLSource;
 use async_graphql_poem::*;
 use clap::Parser;
 use poem::EndpointExt;
@@ -31,7 +31,7 @@ use crate::mail;
 use crate::request_metrics::{self, RequestMetrics};
 use crate::telemetry;
 
-type Schema = async_graphql::Schema<graphql::QueryRoot, EmptyMutation, EmptySubscription>;
+type Schema<H, M> = graphql::MicroticketSchema<MyApp<H, M>>;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -44,9 +44,9 @@ pub struct Cli {
     pub enable_mutations: bool,
 
     /// DEV ONLY: bypass auth and treat every request as this user, given by record
-    /// id or email. Not yet functional — see `auth::resolve_dev_auth` — but the
-    /// flag exists now so it doesn't have to be threaded through the CLI, `Startup`
-    /// and the request handler again once it is.
+    /// id or email — with their real permissions (memberships), not some
+    /// synthetic elevated principal. See `auth::resolve_dev_auth`. Never enable
+    /// this in a deployed environment.
     #[arg(long, value_name = "USER_ID_OR_EMAIL")]
     pub dev_auth_user: Option<String>,
 }
@@ -68,16 +68,10 @@ pub fn init() -> Result<Startup, Box<dyn Error>> {
 
     let cli = Cli::parse();
 
-    // JWT_SECRET isn't consumed by anything yet — microticket has no JWTs, only
-    // opaque `mtu_` tokens, and token verification itself is step 3's job (see
-    // `auth::verify_authorization_header`). Warn rather than fail so this binary
-    // still runs today; step 3 will make this a hard requirement.
-    if env::var("JWT_SECRET").is_err() {
-        tracing::warn!(
-            "JWT_SECRET is not set. Token verification isn't implemented until step 3, but a \
-             value will be required once it is."
-        );
-    }
+    // microticket has no JWTs — every credential is an opaque secret whose
+    // sha256 hash is looked up in DynamoDB (`auth::verify_authorization_header`),
+    // so there is no signing secret to check for here.
+    crate::turnstile::log_startup_state();
 
     let dev_auth = cli
         .dev_auth_user
@@ -85,9 +79,9 @@ pub fn init() -> Result<Startup, Box<dyn Error>> {
         .map(|id_or_email| auth::DevAuthConfig::User { id_or_email });
     if dev_auth.is_some() {
         tracing::warn!(
-            "DEV AUTH OVERRIDE ENABLED: token verification is bypassed for all requests. \
-             Never use this in a deployed environment. (Not yet functional — every request will \
-             fail until the user/membership tables land.)"
+            "DEV AUTH OVERRIDE ENABLED: token verification is bypassed for all requests, which \
+             are treated as the configured caller with their real permissions. Never use this in \
+             a deployed environment."
         );
     }
 
@@ -102,7 +96,7 @@ pub fn init() -> Result<Startup, Box<dyn Error>> {
 
 #[handler]
 async fn index<H, M>(
-    schema: Data<&Schema>,
+    schema: Data<&Schema<H, M>>,
     app: Data<&Arc<MyApp<H, M>>>,
     dev_auth: Data<&Arc<Option<auth::DevAuthConfig>>>,
     headers: &HeaderMap,

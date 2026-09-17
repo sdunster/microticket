@@ -1,8 +1,108 @@
+type MutationRoot {
+	"""
+	Request an email login code. **Always returns `true`**, whether or not the
+	address belongs to a real, enabled user — telling the caller otherwise
+	would let anyone enumerate registered emails one guess at a time. Every
+	early-return path below exists to preserve that: a bad Turnstile token, an
+	unknown/disabled user, and a rate-limit hit are all indistinguishable from
+	the outside.
+	"""
+	requestAuthCode(email: String!, turnstileToken: String): Boolean!
+	"""
+	Verify an email login code and return an opaque `mtu_` token on success.
+	**Returns `null` on every failure path** — expired, wrong code, too many
+	attempts, unknown/disabled user — so the response never tells the caller
+	which step failed.
+	"""
+	verifyAuthCode(email: String!, code: String!): String
+	"""
+	Revoke the calling token, if there is one to revoke (a `Requester`
+	capability token, or an impersonated dev-auth session, has none — this is
+	still a harmless `true` for either).
+	"""
+	logout: Boolean!
+	"""
+	Start passkey registration for the authenticated user. Returns a JSON
+	challenge to pass to the browser's WebAuthn API.
+	"""
+	beginPasskeyRegistration: PasskeyChallenge!
+	"""
+	Finish passkey registration: verify the browser response and store the
+	credential.
+	"""
+	finishPasskeyRegistration(challengeId: String!, credentialJson: String!, name: String!): PasskeyInfo!
+	"""
+	Start a discoverable passkey login (no username required). Returns a JSON
+	challenge to pass to the browser's WebAuthn API.
+	"""
+	beginPasskeyLogin: PasskeyChallenge!
+	"""
+	Finish passkey login: verify the browser response and return an opaque
+	`mtu_` token. `Ok(None)` for anything that means "this credential doesn't
+	authenticate" (expired challenge, unknown credential, disabled user) — an
+	`Err` is reserved for the request itself being malformed.
+	"""
+	finishPasskeyLogin(challengeId: String!, credentialJson: String!): String
+	"""
+	Rename one of the authenticated user's passkeys. A credential belonging
+	to someone else reports the same "not found" as a nonexistent one — never
+	"belongs to another user" — so this can't be used to probe who owns a
+	guessed credential id.
+	"""
+	renamePasskey(id: String!, name: String!): PasskeyInfo!
+	"""
+	Delete one of the authenticated user's passkeys. Same ownership-hiding
+	"not found" as [`Self::rename_passkey`].
+	"""
+	deletePasskey(id: String!): Boolean!
+}
+
+type PasskeyChallenge {
+	challengeId: String!
+	optionsJson: String!
+}
+
+"""
+Metadata for a stored passkey credential — never the credential itself (no
+private key material, no raw `passkey_json`).
+"""
+type PasskeyInfo {
+	id: String!
+	name: String!
+	createdAt: Int!
+	lastUsedAt: Int
+}
+
 type QueryRoot {
 	"""
 	API build version — the git commit this server was built from.
 	"""
 	version: String!
+	"""
+	The authenticated caller's own user record. Guarded on `Authenticated`
+	(the only requirement microticket's guard enum offers that fits a "must
+	have *some* credential" query), but only a `User` principal actually has
+	a record to return — a `Requester` capability token hits the explicit
+	error below rather than some confusing "not found".
+	"""
+	me: User!
+}
+
+type User {
+	id: ID!
+	email: String!
+	name: String!
+	enabled: Boolean!
+	createdAt: Int!
+	accessTime: Int
+	"""
+	The caller's own registered passkeys. Guarded again even though the only
+	current path to a `User` object (`me`) is already guarded — defence in
+	depth against a future unguarded resolver that returns a `User` (e.g. an
+	admin-facing user lookup) accidentally leaking another user's passkey
+	metadata.
+	"""
+	passkeys: [PasskeyInfo!]!
 }
 
 """
@@ -15,4 +115,5 @@ Directs the executor to skip this field or fragment when the `if` argument is tr
 directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
 	query: QueryRoot
+	mutation: MutationRoot
 }

@@ -2,18 +2,19 @@
 //! per-request DataLoader, and the always-on extension that classifies every
 //! resolver error into a machine-readable `extensions.code`.
 //!
-//! `QueryRoot`'s domain fields and `MutationRoot` land in later steps — this module
-//! is the plumbing they sit on. `QueryRoot` is not (yet) generic over the `App`
-//! type the way seslogin's is, because nothing here needs request-scoped app data;
-//! step 3 will likely need to genericize it once its first resolver does.
+//! `QueryRoot<A>` and `MutationRoot<A>` (in `query.rs`/`mutations.rs`) are generic
+//! over the `App` type, mirroring seslogin: each resolver either reaches the app
+//! through `ctx.data_unchecked::<Arc<A>>()` (`QueryRoot`, which holds no field of
+//! its own) or through a stored `app: Arc<A>` field (`MutationRoot`, matching
+//! seslogin's `self.app.db()` idiom). `A` is fixed to a concrete `MyApp<H, M>` at
+//! the two places a schema actually gets built: `build_schema` below, and the
+//! Lambda handler's `GraphQlSchema<H, M>` alias.
 
 use async_graphql::dataloader::DataLoader;
 use async_graphql::extensions::{
     Extension, ExtensionContext, ExtensionFactory, NextResolve, ResolveInfo,
 };
-use async_graphql::{
-    EmptyMutation, EmptySubscription, Object, Schema, ServerError, ServerResult, Value,
-};
+use async_graphql::{EmptySubscription, Schema, ServerError, ServerResult, Value};
 use std::sync::Arc;
 
 use crate::app::{App, HasDb, HasMail};
@@ -24,7 +25,12 @@ use crate::telemetry::{self, OperationKind};
 pub mod auth;
 pub mod dataloader;
 pub mod error;
+pub mod mutations;
 pub mod pagination;
+pub mod query;
+
+pub use mutations::MutationRoot;
+pub use query::{PasskeyInfo, QueryRoot, User};
 
 use self::dataloader::DatabaseLoader;
 
@@ -48,17 +54,10 @@ impl ClientIp {
     }
 }
 
-pub struct QueryRoot;
-
-#[Object]
-impl QueryRoot {
-    /// API build version — the git commit this server was built from.
-    async fn version(&self) -> String {
-        crate::environment::GIT_REV.to_string()
-    }
-}
-
-pub type MicroticketSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
+/// The schema type for a given `App` implementation. Every binary that builds a
+/// schema (`bin/poem`, `bin/poem-local`, `bin/lambda`, `bin/export-schema`) picks
+/// a concrete `A = MyApp<H, M>` and gets a concrete `MicroticketSchema<MyApp<H, M>>`.
+pub type MicroticketSchema<A> = Schema<QueryRoot<A>, MutationRoot<A>, EmptySubscription>;
 
 /// Always-on extension that records top-level query/mutation field failures. On
 /// each error it bumps the per-request failure counter (consumed by the slim EMF
@@ -146,12 +145,16 @@ impl Extension for RequestMetricsExtImpl {
 pub fn build_schema<A: App + HasDb + HasMail + Send + Sync + 'static>(
     app: Arc<A>,
     webauthn: Arc<webauthn_rs::prelude::Webauthn>,
-) -> MicroticketSchema {
-    Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
-        .data(app)
-        .data(webauthn)
-        .extension(RequestMetricsExt)
-        .finish()
+) -> MicroticketSchema<A> {
+    Schema::build(
+        QueryRoot::new(),
+        MutationRoot { app: app.clone() },
+        EmptySubscription,
+    )
+    .data(app)
+    .data(webauthn)
+    .extension(RequestMetricsExt)
+    .finish()
 }
 
 pub fn get_dataloader<A: App + HasDb + Send + Sync + 'static>(

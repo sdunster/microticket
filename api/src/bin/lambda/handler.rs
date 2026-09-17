@@ -20,21 +20,17 @@ use microticket::telemetry::{self, RequestTelemetry};
 
 use crate::errors::{ClientError, ServerError};
 
-type GraphQlSchema = async_graphql::Schema<
-    graphql::QueryRoot,
-    async_graphql::EmptyMutation,
-    async_graphql::EmptySubscription,
->;
+type GraphQlSchema<H, M> = graphql::MicroticketSchema<app::MyApp<H, M>>;
 
 pub struct Handler<H: db::Handler + Send + Sync, M: mail::Handler + Send + Sync> {
     app: Arc<app::MyApp<H, M>>,
-    schema: GraphQlSchema,
+    schema: GraphQlSchema<H, M>,
 }
 
 impl<H: db::Handler + Send + Sync + 'static, M: mail::Handler + Send + Sync + 'static>
     Handler<H, M>
 {
-    pub fn new(app: Arc<app::MyApp<H, M>>, schema: GraphQlSchema) -> Self {
+    pub fn new(app: Arc<app::MyApp<H, M>>, schema: GraphQlSchema<H, M>) -> Self {
         Self { app, schema }
     }
 

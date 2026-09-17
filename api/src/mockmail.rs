@@ -1,10 +1,10 @@
 //! In-process implementation of [`crate::mail::Handler`] that logs the message
 //! instead of sending it.
 //!
-//! This is what will make the email-code login flow (step 3) usable with no AWS
-//! account: the code is printed in the API's own log, so it can be pasted straight
-//! into the browser. Set `MOCK_MAIL_DIR` to also drop each message into a file
-//! there — handy for HTML emails, which are unreadable in a log line.
+//! This is what makes the email-code login flow (`requestAuthCode`) usable with
+//! no AWS account: the code is printed in the API's own log, so it can be pasted
+//! straight into the browser. Set `MOCK_MAIL_DIR` to also drop each message into
+//! a file there — handy for HTML emails, which are unreadable in a log line.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -119,6 +119,11 @@ mod tests {
 
     #[tokio::test]
     async fn records_what_was_sent() {
+        // Serialized against `mail::tests`, which mutate the same process-global
+        // `MAIL_OVERRIDE_TO` this test implicitly asserts is *not* set — see
+        // `mail::OVERRIDE_TO_ENV_LOCK`'s doc comment.
+        let _guard = crate::mail::OVERRIDE_TO_ENV_LOCK.lock().await;
+
         let m = Handler::new();
         m.send_plain_text("a@example.com", "Your microticket login code", "123456")
             .await

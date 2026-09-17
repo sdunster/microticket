@@ -19,16 +19,10 @@ use std::sync::Arc;
 async fn main() -> Result<(), Error> {
     tracing::init_default_subscriber();
 
-    // JWT_SECRET isn't consumed by anything yet — microticket has no JWTs, only
-    // opaque `mtu_` tokens, and token verification itself is step 3's job. Reading
-    // the real auth secret from SSM at cold start is step 9's concern; for now this
-    // just warns rather than requiring the env var to be set at all.
-    if env::var("JWT_SECRET").is_err() {
-        tracing::warn!(
-            "JWT_SECRET is not set. Token verification isn't implemented until step 3, but a \
-             value will be required once it is."
-        );
-    }
+    // microticket has no JWTs — every credential is an opaque secret whose
+    // sha256 hash is looked up in DynamoDB, so there is no signing secret to
+    // read from SSM at cold start the way seslogin reads a JWT secret.
+    microticket::turnstile::log_startup_state();
 
     let mailer = sesmail::Mailer::new().await;
 

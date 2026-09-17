@@ -106,6 +106,10 @@ drive the next `GetItem`.
 
 - `name` (S)
 - `enabled` (Bool)
+- `created_at` (N) — Unix timestamp
+- `access_time` (N) — Unix timestamp of the user's last authenticated request;
+  absent until their first one. Throttled to at most one write per minute (see
+  `auth::fetch_update_user_auth_info`), so it does not track requests precisely.
 
 ---
 

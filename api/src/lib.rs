@@ -15,6 +15,7 @@ pub mod request_metrics;
 pub mod server;
 pub mod sesmail;
 pub mod telemetry;
+pub mod turnstile;
 
 /// Load local `.env`/`.env.secret` for CLI / dev binaries. The Lambda binaries
 /// don't call this. AWS profile defaulting is handled natively by

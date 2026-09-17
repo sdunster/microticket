@@ -3,7 +3,7 @@
 //! Mirrors the [`crate::db`] / [`crate::dynamodb`] / [`crate::mockdb`] split: this
 //! module holds the trait, [`crate::sesmail`] sends via AWS SES, and
 //! [`crate::mockmail`] logs the message instead, so the API can run — including the
-//! email-code login flow, once step 3 adds it — with no AWS account.
+//! email-code login flow (`requestAuthCode`) — with no AWS account.
 //!
 //! Only `send_plain_text` and `send_html` for now. `send_raw` and MIME/attachment
 //! building (needed for ticket replies with real threading headers) are step 6's
@@ -26,6 +26,24 @@ pub const REPLY_TO: &str = "support@microticket.test";
 /// `MAIL_OVERRIDE_TO` in `.env` makes it impossible for a local run to mail a real
 /// person. Never set it in a deployed environment.
 const OVERRIDE_TO_VAR: &str = "MAIL_OVERRIDE_TO";
+
+/// Serializes every test in this crate that reads or writes the process-global
+/// `MAIL_OVERRIDE_TO` env var — not just the ones in this module's own `tests`
+/// submodule. `cargo test` runs tests from every module in one process on
+/// multiple threads, so `mockmail::tests::records_what_was_sent` (which asserts
+/// on `resolve_recipient`'s *unset* behaviour) must serialize against this
+/// module's own tests (which set and clear the var) or it can observe another
+/// thread's in-flight override and fail nondeterministically.
+///
+/// `tokio::sync::Mutex`, not `std::sync::Mutex`: `mockmail`'s test is
+/// `#[tokio::test]` and needs to hold the guard across an `.await`, which is
+/// exactly what a `std`/`parking_lot` guard must never do (see
+/// `clippy::await_holding_lock`) but a tokio guard is designed for.
+/// `blocking_lock()` (used by this module's own, synchronous `#[test]`s) is
+/// safe here specifically because none of those tests run inside a tokio
+/// runtime themselves.
+#[cfg(test)]
+pub(crate) static OVERRIDE_TO_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Resolve the address to actually send to, honouring [`OVERRIDE_TO_VAR`].
 ///
@@ -64,16 +82,16 @@ pub trait Handler: Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // These three tests share the process-global `MAIL_OVERRIDE_TO` env var, so they
-    // must not run concurrently with each other (`cargo test` runs tests in the same
-    // process on multiple threads by default).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // These tests share the process-global `MAIL_OVERRIDE_TO` env var (as does
+    // `mockmail::tests::records_what_was_sent`), so they must not run
+    // concurrently with anything else that touches it — see
+    // `OVERRIDE_TO_ENV_LOCK`'s doc comment.
+    use super::OVERRIDE_TO_ENV_LOCK as ENV_LOCK;
 
     #[test]
     fn resolve_recipient_passes_through_when_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.blocking_lock();
         // SAFETY: serialized by ENV_LOCK; no other thread reads/writes this var
         // concurrently within this test binary.
         unsafe {
@@ -84,7 +102,7 @@ mod tests {
 
     #[test]
     fn resolve_recipient_redirects_when_set() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.blocking_lock();
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
             std::env::set_var(OVERRIDE_TO_VAR, " override@example.com ");
@@ -97,7 +115,7 @@ mod tests {
 
     #[test]
     fn resolve_recipient_ignores_a_blank_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.blocking_lock();
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
             std::env::set_var(OVERRIDE_TO_VAR, "   ");
