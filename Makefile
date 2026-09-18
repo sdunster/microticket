@@ -162,8 +162,13 @@ check:
 	else echo "  (shellcheck not installed; skipping local/*.sh)"; fi
 	@echo "Running infra checks..."
 	@cd infra && terraform fmt -recursive -check -diff
-	@cd infra && terraform init -backend=false -input=false >/dev/null
-	@cd infra && terraform validate
+#	Validate in a throwaway TF_DATA_DIR. Once an operator has run the real
+#	`terraform init` against the S3 backend, plain `init -backend=false` does
+#	not undo that, and `validate` then fails demanding credentials it should
+#	never need. A separate data dir keeps the static check working on a
+#	machine that is also used to apply.
+	@cd infra && TF_DATA_DIR=.terraform-check terraform init -backend=false -input=false >/dev/null
+	@cd infra && TF_DATA_DIR=.terraform-check terraform validate
 	@echo "Running API checks..."
 	@$(MAKE) check-toolchain
 	@cd api && cargo fmt --check
