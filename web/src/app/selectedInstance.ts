@@ -17,4 +17,7 @@ export interface SelectedInstance {
   id: string;
   slug: string;
   name: string;
+  /** The signed-in user's role in this instance — drives owner-only UI
+   * (the Deleted list, the full assignee picker) without a separate query. */
+  role: "OWNER" | "AGENT";
 }

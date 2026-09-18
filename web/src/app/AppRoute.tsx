@@ -2,7 +2,8 @@ import { Navigate, Route, Routes } from "react-router";
 import AuthenticatedSession from "../auth/AuthenticatedSession";
 import AppShell from "./AppShell";
 import Settings from "./Settings";
-import { TicketsPlaceholder } from "./TicketsPlaceholder";
+import { TicketListPage } from "./tickets/TicketListPage";
+import { TicketThreadPage } from "./tickets/TicketThreadPage";
 
 /**
  * `/app/*` — the authenticated area. `AuthenticatedSession` decides between
@@ -18,24 +19,56 @@ export default function AppRoute() {
           <Route index element={<Navigate to="tickets/open" replace />} />
           <Route
             path="tickets/open"
-            element={<TicketsPlaceholder title="Open tickets" />}
+            element={
+              <TicketListPage
+                status="OPEN"
+                title="Open tickets"
+                emptyMessage="No open tickets — the queue is clear."
+              />
+            }
           />
           <Route
             path="tickets/closed"
-            element={<TicketsPlaceholder title="Closed tickets" />}
+            element={
+              <TicketListPage
+                status="CLOSED"
+                title="Closed tickets"
+                emptyMessage="No closed tickets yet."
+              />
+            }
           />
           <Route
             path="tickets/all"
-            element={<TicketsPlaceholder title="All tickets" />}
+            element={
+              <TicketListPage
+                status="ALL"
+                title="All tickets"
+                emptyMessage="No tickets yet."
+              />
+            }
           />
           <Route
             path="tickets/mine"
-            element={<TicketsPlaceholder title="Assigned to me" />}
+            element={
+              <TicketListPage
+                status="ALL"
+                assignedToMe
+                title="Assigned to me"
+                emptyMessage="Nothing assigned to you right now."
+              />
+            }
           />
           <Route
-            path="tickets/:id"
-            element={<TicketsPlaceholder title="Ticket" />}
+            path="tickets/deleted"
+            element={
+              <TicketListPage
+                status="DELETED"
+                title="Deleted tickets"
+                emptyMessage="No deleted tickets."
+              />
+            }
           />
+          <Route path="tickets/:id" element={<TicketThreadPage />} />
           <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>

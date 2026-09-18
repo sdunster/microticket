@@ -70,3 +70,28 @@ export function createUnauthenticatedGraphQLEnvironment(): Environment {
 
 export const unauthenticatedEnvironment =
   createUnauthenticatedGraphQLEnvironment();
+
+/**
+ * The environment for `/submit/:slug` once a submit token exists
+ * (`verifySubmitCode`'s result): a fixed capability token, scoped by the API
+ * to one `(email, instance)` pair and authorised for `submitTicket` alone.
+ * Unlike the authenticated environment's `getToken`, the token here never
+ * refreshes and never triggers `onUnauthorized`-driven re-login — a
+ * requester token that stops working (expired, already used) just fails the
+ * one mutation it exists for, which the caller surfaces inline rather than
+ * bouncing to a login screen that doesn't apply to an anonymous requester.
+ * A real (if lightly used) `Store` so `useMutation`'s optimistic/updater
+ * machinery works the same as everywhere else.
+ */
+export function createRequesterGraphQLEnvironment(token: string): Environment {
+  const _fetchGraphQL: FetchFunction = async (request, variables) => {
+    return await fetchGraphQL(`Bearer ${token}`, request, variables, () => {
+      console.warn("Unauthorized in requester environment");
+    });
+  };
+
+  return new Environment({
+    network: Network.create(_fetchGraphQL),
+    store: new Store(new RecordSource()),
+  });
+}

@@ -53,7 +53,7 @@ export function InstanceSwitcher({
     const match = memberships.find((m) => m.instance.id === initialInstanceId);
     if (match) {
       const { id, name, slug } = match.instance;
-      onChange({ id, name, slug });
+      onChange({ id, name, slug, role: match.role as "OWNER" | "AGENT" });
     }
   }, [initialInstanceId, memberships, selected, onChange]);
 
@@ -66,7 +66,7 @@ export function InstanceSwitcher({
     if (!match) return;
     setStoredSelectedInstanceId(instanceId);
     const { id, name, slug } = match.instance;
-    onChange({ id, name, slug });
+    onChange({ id, name, slug, role: match.role as "OWNER" | "AGENT" });
   }
 
   const selectedRole = memberships.find(
