@@ -1,25 +1,39 @@
+import { Suspense } from "react";
 import { BrowserRouter, Routes, Route } from "react-router";
+import { ErrorBoundary } from "react-error-boundary";
 
-/**
- * Placeholder shell. Real routes (`/login`, `/submit/:slug`, `/app/...`) land in
- * the web step of the build plan, once there is a Relay environment and an
- * auth story to route around.
- */
-function Home() {
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-2 text-center">
-      <h1 className="text-2xl font-semibold text-ink-strong">microticket</h1>
-      <p className="text-ink-muted">Coming soon.</p>
-    </main>
-  );
-}
+import { lazyWithReload } from "./lib/lazyWithReload";
+import LoadingIndicator from "./components/LoadingIndicator";
+import PageErrorFallback from "./components/PageErrorFallback";
+
+// Home is the front door — keep it eager for fast first paint.
+import Home from "./home/Home";
+
+// Everything else is its own lazily-loaded chunk.
+const LoginRoute = lazyWithReload("login", () => import("./auth/LoginRoute"));
+const AppRoute = lazyWithReload("app", () => import("./app/AppRoute"));
+const SubmitRoute = lazyWithReload(
+  "submit",
+  () => import("./submit/SubmitRoute"),
+);
 
 export default function Router() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Home />} />
-      </Routes>
+      {/* Backstop for anything that escapes a more specific boundary
+          further down the tree (e.g. AuthenticatedSession's own). */}
+      <ErrorBoundary FallbackComponent={PageErrorFallback}>
+        <Suspense fallback={<LoadingIndicator />}>
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/login" element={<LoginRoute />} />
+            <Route path="/app/*" element={<AppRoute />} />
+            <Route path="/submit" element={<SubmitRoute />} />
+            <Route path="/submit/:slug" element={<SubmitRoute />} />
+            <Route path="*" element={<h1>Not Found</h1>} />
+          </Routes>
+        </Suspense>
+      </ErrorBoundary>
     </BrowserRouter>
   );
 }
