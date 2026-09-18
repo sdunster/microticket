@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use microticket::db::{Handler, Instance, InstanceUpdateShape, MembershipRole, User};
+use microticket::db::{self, Handler, Instance, InstanceUpdateShape, MembershipRole, User};
 use microticket::dynamodb;
 use microticket::inbound::routing;
 use std::path::PathBuf;
@@ -363,6 +363,7 @@ async fn run_instance(db: &impl Handler, cmd: InstanceCmd, dry_run: bool) -> Res
 async fn run_address(db: &impl Handler, cmd: AddressCmd, dry_run: bool) -> Result<()> {
     match cmd {
         AddressCmd::Add { instance, address } => {
+            let instance = db::resolve_instance_id(db, &instance).await?;
             let (normalized, kind) =
                 routing::classify_for_storage(&address).map_err(|e| anyhow!(e))?;
             if let Some(existing) = db.get_inbound_address(&normalized).await? {
@@ -403,6 +404,7 @@ async fn run_address(db: &impl Handler, cmd: AddressCmd, dry_run: bool) -> Resul
             println!("removed {normalized}");
         }
         AddressCmd::List { instance } => {
+            let instance = db::resolve_instance_id(db, &instance).await?;
             let addrs = db.list_inbound_addresses_by_instance(&instance).await?;
             println!("{:<30}  {:<10}  {:<12}", "address", "kind", "created_at");
             for a in &addrs {
@@ -455,6 +457,7 @@ async fn run_member(db: &impl Handler, cmd: MemberCmd, dry_run: bool) -> Result<
             user,
             role,
         } => {
+            let instance = db::resolve_instance_id(db, &instance).await?;
             let user_id = resolve_user_id(db, &user).await?;
             let existing = db.list_memberships_by_user(&user_id).await?;
             if existing.iter().any(|m| m.instance_id == instance) {
@@ -481,6 +484,7 @@ async fn run_member(db: &impl Handler, cmd: MemberCmd, dry_run: bool) -> Result<
             );
         }
         MemberCmd::Remove { instance, user } => {
+            let instance = db::resolve_instance_id(db, &instance).await?;
             let user_id = resolve_user_id(db, &user).await?;
             let membership = db
                 .list_memberships_by_user(&user_id)
@@ -499,6 +503,7 @@ async fn run_member(db: &impl Handler, cmd: MemberCmd, dry_run: bool) -> Result<
             println!("removed membership {}", membership.id);
         }
         MemberCmd::List { instance } => {
+            let instance = db::resolve_instance_id(db, &instance).await?;
             let memberships = db.list_memberships_by_instance(&instance).await?;
             if memberships.is_empty() {
                 println!("0 member(s)");

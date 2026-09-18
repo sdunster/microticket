@@ -19,7 +19,7 @@
 //! so `cargo test` and CI (which never brings up DynamoDB Local for the
 //! `api-check` job) stay green with no local stack running.
 
-use microticket::db::Handler as _;
+use microticket::db::{self, Handler as _};
 use microticket::dynamodb;
 use microticket::inbound::routing;
 
@@ -252,4 +252,44 @@ async fn only_one_of_several_recipients_being_ours_still_resolves() {
     .await
     .expect("resolve_instance_id");
     assert_eq!(resolved.as_deref(), Some(instance.id.as_str()));
+}
+
+/// `--instance` on the CLI takes a slug, but every row that references an
+/// instance stores its **id**. Passing the argument through unresolved wrote the
+/// slug into `instance_id`, which fails nowhere: the row is created, the CLI
+/// prints it back, and nothing notices until a resolver loads the instance by
+/// that id and finds nothing. In production the visible symptom was an empty
+/// instance switcher for a user whose membership plainly existed.
+#[tokio::test]
+async fn resolve_instance_id_maps_a_slug_to_the_id_rows_must_store() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+
+    let slug = format!("resolve-{}", nanoid::nanoid!(8)).to_lowercase();
+    let instance = db
+        .create_instance("Resolve Test", &slug, "Resolve Test", "", false)
+        .await
+        .expect("create instance");
+
+    // The slug and the id are different strings — the whole point.
+    assert_ne!(instance.id, slug);
+
+    assert_eq!(
+        db::resolve_instance_id(&db, &slug).await.expect("by slug"),
+        instance.id,
+        "a slug must resolve to the instance id, never pass through as itself"
+    );
+    assert_eq!(
+        db::resolve_instance_id(&db, &instance.id)
+            .await
+            .expect("by id"),
+        instance.id,
+        "an id must resolve to itself"
+    );
+    assert!(
+        db::resolve_instance_id(&db, "definitely-not-an-instance")
+            .await
+            .is_err(),
+        "an unknown slug or id must be rejected, not persisted"
+    );
 }

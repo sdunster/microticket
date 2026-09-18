@@ -679,6 +679,32 @@ pub enum TicketMessageUpdateShape<'a> {
 /// Every method here follows the RPITIT style already used by
 /// [`crate::mail::Handler`]: `fn foo(&self, ...) -> impl Future<Output = Result<T>> + Send`,
 /// not `async_trait`.
+/// Resolve an `--instance` argument, which may be a slug or an id, to the
+/// instance's **id**.
+///
+/// Every row that references an instance stores its id. Taking the argument at
+/// face value silently writes the slug into `instance_id` instead, which does
+/// not fail anywhere: the row is created, the CLI prints it back, and nothing
+/// reads it until a resolver tries to load the instance by that id and finds
+/// nothing. The visible symptom is an empty instance switcher for a user whose
+/// membership plainly exists — a long way from the cause.
+///
+/// Slug is tried first because that is what an operator types. An argument that
+/// matches no slug is treated as an id and checked, so a typo is rejected here
+/// rather than persisted.
+pub async fn resolve_instance_id(db: &impl Handler, slug_or_id: &str) -> Result<String> {
+    if let Some(id) = db.get_instance_id_by_slug(slug_or_id).await? {
+        return Ok(id);
+    }
+    let found = db.get_instances(&[slug_or_id]).await?;
+    if found.into_iter().next().flatten().is_some() {
+        return Ok(slug_or_id.to_string());
+    }
+    Err(Error::NotFound(format!(
+        "no instance with slug or id {slug_or_id:?}"
+    )))
+}
+
 pub trait Handler: Sync {
     // ── instance ──────────────────────────────────────────────────────────
     fn get_instances<T: AsRef<str> + Sync>(
