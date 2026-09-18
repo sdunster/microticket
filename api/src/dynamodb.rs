@@ -2023,6 +2023,7 @@ impl db::Handler for Handler {
         body_text: Option<&str>,
         body_html: Option<&str>,
         in_reply_to: Option<&str>,
+        references: Option<&str>,
     ) -> db::Result<db::TicketMessage> {
         self.ensure_writable()?;
         let id = new_id();
@@ -2059,6 +2060,9 @@ impl db::Handler for Handler {
         if let Some(irt) = in_reply_to {
             req = req.item("in_reply_to", AttributeValue::S(irt.to_string()));
         }
+        if let Some(refs) = references {
+            req = req.item("references", AttributeValue::S(refs.to_string()));
+        }
 
         let resp = req
             .send()
@@ -2082,7 +2086,7 @@ impl db::Handler for Handler {
             body_html: body_html.map(String::from),
             rfc_message_id: None,
             in_reply_to: in_reply_to.map(String::from),
-            references: None,
+            references: references.map(String::from),
             attachments: vec![],
             raw_s3_key: None,
             created_at: now,
@@ -2099,6 +2103,39 @@ impl db::Handler for Handler {
                 .expression_attribute_values(":ticket_id", AttributeValue::S(ticket_id.to_string()))
         })
         .await
+    }
+
+    async fn update_ticket_message(
+        &self,
+        id: &str,
+        change: db::TicketMessageUpdateShape<'_>,
+    ) -> db::Result<()> {
+        self.ensure_writable()?;
+        match change {
+            db::TicketMessageUpdateShape::SetRfcMessageId { rfc_message_id } => {
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket_message"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET rfc_message_id = :rfc_message_id")
+                    .expression_attribute_values(
+                        ":rfc_message_id",
+                        AttributeValue::S(rfc_message_id.to_string()),
+                    )
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("TicketMessage {id}")))?;
+                record_capacity(
+                    "update_ticket_message_set_rfc_message_id",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+        }
+        Ok(())
     }
 
     // ── webauthn_credential ───────────────────────────────────────────────

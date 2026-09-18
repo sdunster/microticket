@@ -5,17 +5,24 @@
 //! [`crate::mockmail`] logs the message instead, so the API can run — including the
 //! email-code login flow (`requestAuthCode`) — with no AWS account.
 //!
-//! Only `send_plain_text` and `send_html` for now. `send_raw` and MIME/attachment
-//! building (needed for ticket replies with real threading headers) are step 6's
-//! job — see `sesmail.rs`'s doc comment.
+//! `send_plain_text`/`send_html` cover the auth flow's simple mail. `send_raw`
+//! (step 6) is for ticket mail: a fully-built RFC 5322 message from
+//! [`crate::outbound`], sent with explicit envelope recipients so threading
+//! headers, `Reply-To`, and attachments (step 7) are under this project's
+//! control rather than SES's "simple" template. It returns the provider's
+//! message id in the exact form later threading needs to look it back up —
+//! see [`crate::sesmail`]'s doc comment for what that form is and why.
 
 use anyhow::Result;
 use std::future::Future;
 
-/// Placeholder sender/reply-to addresses, used until step 6 wires up per-instance
-/// addressing (`"{instance.from_name}" <{instance's inbound address}>`, with
-/// `Reply-To` carrying the ticket's reply token). Only exercised by the code that
-/// exists so far (nothing, yet) and by tests.
+/// Sender/reply-to for the simple auth-code mail (`send_plain_text`/
+/// `send_html` — `requestAuthCode`'s login code), which has no per-instance
+/// identity to speak from. **Not used by ticket mail**: that has real
+/// per-instance addressing (`"{instance.from_name}" <{instance's primary
+/// inbound address}>`, `Reply-To` carrying the ticket's reply token) via
+/// [`crate::outbound`] and `send_raw`, computed fresh per send rather than
+/// living behind a crate-wide constant.
 pub const FROM: &str = "no-reply@microticket.test";
 pub const REPLY_TO: &str = "support@microticket.test";
 
@@ -25,7 +32,7 @@ pub const REPLY_TO: &str = "support@microticket.test";
 /// member/requester email addresses (e.g. a sanitized snapshot of prod). Setting
 /// `MAIL_OVERRIDE_TO` in `.env` makes it impossible for a local run to mail a real
 /// person. Never set it in a deployed environment.
-const OVERRIDE_TO_VAR: &str = "MAIL_OVERRIDE_TO";
+pub(crate) const OVERRIDE_TO_VAR: &str = "MAIL_OVERRIDE_TO";
 
 /// Serializes every test in this crate that reads or writes the process-global
 /// `MAIL_OVERRIDE_TO` env var — not just the ones in this module's own `tests`
@@ -77,6 +84,24 @@ pub trait Handler: Sync {
         subject: &str,
         html: &str,
     ) -> impl Future<Output = Result<()>> + Send;
+
+    /// Send a fully-built raw RFC 5322 message (see [`crate::outbound`]) to
+    /// explicit envelope recipients, returning the provider's message id.
+    ///
+    /// `to`/`cc` are the *envelope* recipients — what actually receives the
+    /// mail — independent of whatever the raw bytes' own `To`/`Cc` headers
+    /// say (in practice always the same, since `crate::outbound` builds both
+    /// from the same filtered list). Every implementation must apply
+    /// [`resolve_recipient`] to each of `to`/`cc` before sending, exactly as
+    /// `send_plain_text`/`send_html` do — see [`OVERRIDE_TO_VAR`]'s doc
+    /// comment: a raw send must be just as impossible to point at a real
+    /// person from local dev as a plain-text one.
+    fn send_raw(
+        &self,
+        raw: &[u8],
+        to: &[String],
+        cc: &[String],
+    ) -> impl Future<Output = Result<String>> + Send;
 }
 
 #[cfg(test)]

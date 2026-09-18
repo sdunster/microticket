@@ -610,9 +610,12 @@ pub struct TicketMessage {
     pub body_text: Option<String>,
     pub body_html: Option<String>,
     /// SES's rewritten `Message-ID` once this message is actually sent (step
-    /// 6) or the id an inbound message arrived with (step 7). Absent for a
-    /// `reply` created in this step — sending is a `TODO(step 6)`, so there is
-    /// no real Message-ID to store yet.
+    /// 6) or the id an inbound message arrived with (step 7). Absent until
+    /// [`Handler::update_ticket_message`]'s `SetRfcMessageId` lands it — the
+    /// row is always created first (see `graphql::mutations::reply_to_ticket`),
+    /// before the send even happens, so this is genuinely absent, not just
+    /// unset-by-convention, for a reply that hasn't gone out yet or whose
+    /// send failed.
     pub rfc_message_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
@@ -627,6 +630,18 @@ impl HasID for TicketMessage {
     fn id(&self) -> &str {
         &self.id
     }
+}
+
+/// Update shapes for `ticket_message`. Only `rfc_message_id` is ever
+/// updated after creation — every other attribute is fixed at
+/// [`Handler::create_ticket_message`] time — because it's the one thing
+/// that can't be known until *after* the row exists: a reply is persisted
+/// first, then sent, then (only on success) stamped with the id SES
+/// returned. See `graphql::mutations::reply_to_ticket`'s doc comment for
+/// why the row is never rolled back when the send itself fails.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TicketMessageUpdateShape<'a> {
+    SetRfcMessageId { rfc_message_id: &'a str },
 }
 
 /// `Sync` is required so a `&impl Handler` (including the erased handle returned by
@@ -819,6 +834,14 @@ pub trait Handler: Sync {
     ) -> impl Future<Output = Result<Vec<Ticket>>> + Send;
 
     // ── ticket_message ───────────────────────────────────────────────────
+    /// `in_reply_to`/`references` are this new message's *own* threading
+    /// headers — for a reply/notice/acknowledgement (step 6), computed by
+    /// `outbound::threading_for` from the ticket's prior messages before
+    /// this one is built; for an inbound message (step 7), copied from the
+    /// arriving mail's own headers. Neither is the row's `rfc_message_id`
+    /// (this message's *own* identity once sent) — that lands afterward via
+    /// [`Handler::update_ticket_message`], since it isn't known until the
+    /// send actually happens.
     #[allow(clippy::too_many_arguments)]
     fn create_ticket_message(
         &self,
@@ -831,6 +854,7 @@ pub trait Handler: Sync {
         body_text: Option<&str>,
         body_html: Option<&str>,
         in_reply_to: Option<&str>,
+        references: Option<&str>,
     ) -> impl Future<Output = Result<TicketMessage>> + Send;
     /// Every message for a ticket, oldest first (the GSI's natural ascending
     /// scan order) — the thread view's data source.
@@ -838,6 +862,11 @@ pub trait Handler: Sync {
         &self,
         ticket_id: &str,
     ) -> impl Future<Output = Result<Vec<TicketMessage>>> + Send;
+    fn update_ticket_message(
+        &self,
+        id: &str,
+        change: TicketMessageUpdateShape<'_>,
+    ) -> impl Future<Output = Result<()>> + Send;
 
     // ── webauthn_credential ───────────────────────────────────────────────
     fn create_webauthn_credential(

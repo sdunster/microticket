@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use async_graphql::{Context, ID, Object, SimpleObject};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -17,6 +17,7 @@ use crate::db;
 use crate::db::Handler as _;
 use crate::inbound::routing;
 use crate::mail::Handler as _;
+use crate::outbound;
 
 use super::auth::{AuthGuard, AuthRequirement, is_member};
 use super::error::ApiError;
@@ -85,6 +86,133 @@ async fn require_ticket_member<A: App + HasDb + HasMail + Send + Sync>(
         return Err(ApiError::not_found("Ticket", ticket_id).into());
     }
     Ok(ticket)
+}
+
+/// Load an instance and its inbound addresses together — the "can't build
+/// outbound mail without these" precondition every mail-sending mutation
+/// needs — logging and returning `None` on any failure rather than
+/// propagating. Only used by [`send_system_notification`]'s best-effort
+/// sends (the acknowledgement, a status notice); `reply_to_ticket` does its
+/// own non-swallowing lookup, because a reply that can't be built/sent must
+/// fail loudly (see that mutation's doc comment), not silently skip.
+async fn load_instance_and_addresses<A: App + HasDb + Send + Sync>(
+    app: &A,
+    instance_id: &str,
+    context: &str,
+) -> Option<(db::Instance, Vec<db::InboundAddress>)> {
+    let instance = match app.db().get_instances(&[instance_id]).await {
+        Ok(v) => v.into_iter().next().flatten(),
+        Err(e) => {
+            warn!("{context}: could not load instance {instance_id}: {e}");
+            return None;
+        }
+    };
+    let Some(instance) = instance else {
+        warn!("{context}: instance {instance_id} missing");
+        return None;
+    };
+    match app
+        .db()
+        .list_inbound_addresses_by_instance(&instance.id)
+        .await
+    {
+        Ok(addresses) => Some((instance, addresses)),
+        Err(e) => {
+            warn!("{context}: could not load inbound addresses for instance {instance_id}: {e}");
+            None
+        }
+    }
+}
+
+/// Build, send, and persist (as a `System` `ticket_message`) one
+/// best-effort outbound notification: the `submitTicket` acknowledgement or
+/// a `setTicketStatus` close/reopen notice. Every failure, at any stage, is
+/// logged and swallowed rather than propagated — see those two mutations'
+/// doc comments for why a notification failure must never fail a mutation
+/// whose primary effect (the ticket exists; its status changed) has already
+/// succeeded. Contrast `reply_to_ticket`, where a send failure *is*
+/// surfaced: an agent's reply is primary content, not a secondary notice.
+async fn send_system_notification<A: App + HasDb + HasMail + Send + Sync>(
+    app: &A,
+    ticket: &db::Ticket,
+    requester_emails: &[String],
+    cc_emails: &[String],
+    body: &str,
+    context: &str,
+) {
+    let Some((instance, addresses)) =
+        load_instance_and_addresses(app, &ticket.instance_id, context).await
+    else {
+        return;
+    };
+    let built = match outbound::build_outbound(
+        &instance,
+        &addresses,
+        ticket,
+        requester_emails,
+        cc_emails,
+        body,
+        &outbound::Threading::default(),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                "{context}: could not build notification for ticket {}: {e}",
+                ticket.id
+            );
+            return;
+        }
+    };
+    let message_id = match app.mail().send_raw(&built.raw, &built.to, &built.cc).await {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(
+                "{context}: failed to send notification for ticket {}: {e}",
+                ticket.id
+            );
+            return;
+        }
+    };
+    let msg = match app
+        .db()
+        .create_ticket_message(
+            &ticket.id,
+            db::TicketMessageKind::System,
+            None,
+            None,
+            &built.to,
+            &built.cc,
+            Some(body),
+            None,
+            None,
+            None,
+        )
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                "{context}: notification sent for ticket {} but could not persist the system message: {e}",
+                ticket.id
+            );
+            return;
+        }
+    };
+    if let Err(e) = app
+        .db()
+        .update_ticket_message(
+            &msg.id,
+            db::TicketMessageUpdateShape::SetRfcMessageId {
+                rfc_message_id: &message_id,
+            },
+        )
+        .await
+    {
+        warn!(
+            "{context}: could not stamp rfc_message_id on notification for ticket {}: {e}",
+            ticket.id
+        );
+    }
 }
 
 /// Trim, lowercase, and sanity-check an email address supplied to
@@ -593,6 +721,14 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
     /// wasn't scoped to. The requester's own submission becomes the ticket's
     /// first message, stored as `kind: INBOUND` with `fromEmail` set (never
     /// `authorUserId` — no staff member wrote it).
+    ///
+    /// Sends the requester a brief acknowledgement — with the `Reply-To`
+    /// thread already wired up, so the web form's result lands in their
+    /// inbox ready to reply to. **Best-effort**: see
+    /// `send_system_notification`'s doc comment for why a failure here is
+    /// logged, not surfaced — the ticket itself is the primary effect and
+    /// already exists by the time this runs; failing the mutation over it
+    /// would risk a duplicate submission on retry.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Requester)")]
     async fn submit_ticket(
         &self,
@@ -648,8 +784,19 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
                 Some(body),
                 None,
                 None,
+                None,
             )
             .await?;
+
+        send_system_notification(
+            &*self.app,
+            &ticket,
+            std::slice::from_ref(email),
+            &[],
+            outbound::ACKNOWLEDGEMENT_BODY,
+            "submit_ticket",
+        )
+        .await;
 
         info!(
             "Ticket submitted: instance={} ticket={} number={}",
@@ -658,14 +805,28 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
         Ok(Ticket::new(ticket))
     }
 
-    /// Reply to a ticket as a member (agent/owner). Creates the `ticket_message`
-    /// row (`kind: REPLY`) and bumps the ticket's activity — **does not
-    /// actually send the email**. `TODO(step 6)`: build the outbound MIME
-    /// message (`mail-builder`) and send it via SESv2 with the `Reply-To`
-    /// threading token; this step only persists the reply and updates the
-    /// ticket, which is why `rfc_message_id` is absent on the returned
-    /// message (there is no real one yet). Attachments are similarly
-    /// `TODO(step 7)` — no `attachmentKeys` argument exists yet.
+    /// Reply to a ticket as a member (agent/owner): persists the reply
+    /// (`kind: REPLY`), bumps the ticket's activity, builds the outbound
+    /// RFC 5322 message (`crate::outbound`) and sends it via
+    /// `crate::mail::Handler::send_raw`, then stamps the returned message id
+    /// onto the row so a further reply — from either side — threads
+    /// correctly. Attachments are `TODO(step 7)` — no `attachmentKeys`
+    /// argument exists yet.
+    ///
+    /// **On a send failure, this mutation returns `Err` — but the
+    /// `ticket_message` row it already created is *not* rolled back.**
+    /// What the agent typed is the durable record of what they tried to
+    /// say; a transient SES/network failure shouldn't erase it and force a
+    /// retype. But the caller must be told delivery didn't happen — a
+    /// silent success here would let an agent believe a customer received a
+    /// reply that never left the building — so the failure surfaces as a
+    /// mutation error rather than a quietly-`null` `rfcMessageId` on an
+    /// otherwise-successful response. The persisted-but-unsent row (no
+    /// `rfcMessageId`) doubles as the audit trail an operator needs to spot
+    /// and retry a failed send. Contrast `submit_ticket`'s acknowledgement
+    /// and `set_ticket_status`'s notice, both best-effort: those mutations'
+    /// primary effect already succeeded by the time mail is attempted, so a
+    /// failure there is logged, not surfaced.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn reply_to_ticket(
         &self,
@@ -680,6 +841,44 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
             return Err(anyhow!("body cannot be empty"));
         }
 
+        // Threading is computed from the ticket's *existing* messages,
+        // before this reply is created — see `outbound::threading_for`'s
+        // doc comment for why it chains from the last message that
+        // actually carries an `rfc_message_id`, not just the last row.
+        let prior_messages = self.app.db().list_ticket_messages(&ticket.id).await?;
+        let threading = outbound::threading_for(&prior_messages);
+
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[ticket.instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", &ticket.instance_id))?;
+        let addresses = self
+            .app
+            .db()
+            .list_inbound_addresses_by_instance(&instance.id)
+            .await?;
+
+        // Built (and can fail on a configuration problem — no inbound
+        // address, no recipients left once our own are excluded) *before*
+        // anything is persisted, so a reply that can't possibly be sent
+        // never creates a dangling message row in the first place. That's
+        // a different failure mode from the send failure this method's doc
+        // comment is about: this one means the reply was never attempted.
+        let built = outbound::build_outbound(
+            &instance,
+            &addresses,
+            &ticket,
+            &ticket.requester_emails,
+            &ticket.cc_emails,
+            body,
+            &threading,
+        )?;
+
         let msg = self
             .app
             .db()
@@ -688,11 +887,12 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
                 db::TicketMessageKind::Reply,
                 Some(&user_id),
                 None,
-                &ticket.requester_emails,
-                &ticket.cc_emails,
+                &built.to,
+                &built.cc,
                 Some(body),
                 None,
-                None,
+                threading.in_reply_to.as_deref(),
+                threading.references.as_deref(),
             )
             .await?;
 
@@ -706,15 +906,41 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
             )
             .await?;
 
-        Ok(TicketMessage::new(msg))
+        // From here on, the row exists no matter what happens next — see
+        // this method's doc comment.
+        let message_id = self
+            .app
+            .mail()
+            .send_raw(&built.raw, &built.to, &built.cc)
+            .await
+            .with_context(|| format!("sending reply for ticket {}", ticket.id))?;
+
+        self.app
+            .db()
+            .update_ticket_message(
+                &msg.id,
+                db::TicketMessageUpdateShape::SetRfcMessageId {
+                    rfc_message_id: &message_id,
+                },
+            )
+            .await?;
+
+        Ok(TicketMessage::new(db::TicketMessage {
+            rfc_message_id: Some(message_id),
+            ..msg
+        }))
     }
 
     /// Add an internal note to a ticket. Member-only, same per-ticket
     /// authorization as every other ticket mutation. Stored as `kind: NOTE`,
     /// which `Ticket.messages` filters out for anyone but a member of this
-    /// ticket's instance — see that field's doc comment. Never emailed, now
-    /// or ever: the outbound-mail path (step 6) only ever sends `REPLY`
-    /// messages.
+    /// ticket's instance — see that field's doc comment. **Never emailed,
+    /// now or ever**: this mutation never calls `send_system_notification`
+    /// or `mail::Handler::send_raw`, unlike `submit_ticket` (an
+    /// acknowledgement), `set_ticket_status` (a close/reopen notice), and
+    /// `reply_to_ticket` (the `REPLY` itself) — pinned by
+    /// `tests/outbound_mail_dynamodb_local.rs`'s
+    /// `internal_note_sends_no_mail`.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn add_internal_note(
         &self,
@@ -742,6 +968,7 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
                 Some(body),
                 None,
                 None,
+                None,
             )
             .await?;
 
@@ -764,7 +991,13 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
     /// that one variant, not a bespoke delete/restore code path, is what
     /// keeps the three composite marker attributes consistent. A no-op
     /// transition (already at the requested status) still succeeds, returning
-    /// the ticket unchanged, rather than erroring — idempotent by design.
+    /// the ticket unchanged, rather than erroring — idempotent by design
+    /// (and, since it returns before reaching the mail step below, sends no
+    /// notice either).
+    ///
+    /// A close or a reopen (including restoring a deleted ticket) mails
+    /// requesters/CCs a brief notice — see `outbound::status_notice_body`.
+    /// Deleting one does not: see that function's doc comment.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn set_ticket_status(
         &self,
@@ -790,6 +1023,25 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
                 },
             )
             .await?;
+
+        // Best-effort: a close or reopen mails requesters/CCs a brief
+        // notice; assignment and requester/CC edits do not (see
+        // `outbound::status_notice_body`'s doc comment, and the "Outbound
+        // mail" entry in `CLAUDE.md`, for the reasoning). Failure here is
+        // logged, never surfaced — the status change is this mutation's
+        // primary effect and has already succeeded.
+        if let Some(notice) = outbound::status_notice_body(ticket.status, new_status) {
+            send_system_notification(
+                &*self.app,
+                &ticket,
+                &ticket.requester_emails,
+                &ticket.cc_emails,
+                notice,
+                "set_ticket_status",
+            )
+            .await;
+        }
+
         Ok(Ticket::new(db::Ticket {
             status: new_status,
             updated_at: now,
@@ -802,7 +1054,9 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
     /// when assigning, must themselves be a member of this ticket's
     /// instance — assigning to an outsider would be silently useless (they
     /// could never see it via the "assigned to me" filter, which is itself
-    /// instance-scoped).
+    /// instance-scoped). **Sends no mail**: which agent owns a ticket is
+    /// internal bookkeeping the requester has no reason to be notified
+    /// about — see the "Outbound mail" entry in `CLAUDE.md`.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn assign_ticket(
         &self,
@@ -844,7 +1098,9 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
         }))
     }
 
-    /// Add a requester (a "To" recipient) to a ticket.
+    /// Add a requester (a "To" recipient) to a ticket. **Sends no mail** —
+    /// see `assign_ticket`'s doc comment and `CLAUDE.md`'s "Outbound mail"
+    /// entry; this mutation, like assignment, is internal bookkeeping.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn add_ticket_requester(
         &self,
@@ -875,7 +1131,8 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
     }
 
     /// Remove a requester from a ticket. Refuses to remove the last one — a
-    /// ticket must always have someone to reply to.
+    /// ticket must always have someone to reply to. **Sends no mail** — see
+    /// `assign_ticket`'s doc comment.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn remove_ticket_requester(
         &self,
@@ -910,7 +1167,8 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
         }))
     }
 
-    /// Add a CC recipient to a ticket.
+    /// Add a CC recipient to a ticket. **Sends no mail** — see
+    /// `assign_ticket`'s doc comment.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn add_ticket_cc(
         &self,

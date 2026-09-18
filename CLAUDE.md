@@ -32,6 +32,29 @@ local setup, and `SCHEMA.md` for the data model.
   and that queue is *consumed* by the inbound-mail Lambda (step 7), a separate binary with no
   GraphQL surface. Don't add a queue trait to `app.rs`/`MyApp` unless the API itself starts
   producing to a queue.
+- **Outbound mail: which ticket updates email.** The build plan says "every ticket update that is
+  not an internal note mails requesters + CCs" — read literally that would include assignment and
+  requester/CC-list edits, which would mean a customer gets an email every time a ticket changes
+  hands internally. That's noise, not signal, so the actual rule implemented (`graphql/mutations.rs`)
+  is narrower:
+  - `replyToTicket` sends the reply itself (`kind: REPLY`) — the agent's own words, always.
+  - `submitTicket` sends the requester a brief acknowledgement (`kind: SYSTEM`), so the public
+    form's result lands in their inbox with the `Reply-To` thread already wired up.
+  - `setTicketStatus` sends requesters/CCs a brief notice (`kind: SYSTEM`) **only on a close or a
+    reopen** (including restoring a deleted ticket back to open) — see `outbound::status_notice_body`.
+    Transitioning *into* `DELETED`, in either direction, sends nothing: deleting a ticket is admin
+    housekeeping (spam cleanup, a mistaken submission), not a resolution the customer is owed a
+    notification about.
+  - `assignTicket`, `addTicketRequester`/`removeTicketRequester`, `addTicketCc`/`removeTicketCc`
+    send nothing at all — which agent owns a ticket, and who else is copied on it, is internal
+    bookkeeping. `addInternalNote` never sends mail, as the build plan says explicitly.
+  - A send failure is handled differently depending on whether the mail *is* the mutation's
+    primary effect or a secondary side effect of one: `replyToTicket` fails the mutation (the
+    message row survives, but the caller is told delivery didn't happen); `submitTicket`'s
+    acknowledgement and `setTicketStatus`'s notice are best-effort — logged on failure, never
+    surfacing as a mutation error, since the ticket already exists / the status already changed by
+    the time mail is attempted. See `reply_to_ticket`'s doc comment in `graphql/mutations.rs` for
+    the full reasoning.
 
 ## Scope note
 

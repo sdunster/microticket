@@ -242,11 +242,20 @@ impl db::Handler for Handler {
         _body_text: Option<&str>,
         _body_html: Option<&str>,
         _in_reply_to: Option<&str>,
+        _references: Option<&str>,
     ) -> db::Result<db::TicketMessage> {
         Self::unsupported()
     }
 
     async fn list_ticket_messages(&self, _ticket_id: &str) -> db::Result<Vec<db::TicketMessage>> {
+        Self::unsupported()
+    }
+
+    async fn update_ticket_message(
+        &self,
+        _id: &str,
+        _change: db::TicketMessageUpdateShape<'_>,
+    ) -> db::Result<()> {
         Self::unsupported()
     }
 

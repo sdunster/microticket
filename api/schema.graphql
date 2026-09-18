@@ -123,26 +123,52 @@ type MutationRoot {
 	wasn't scoped to. The requester's own submission becomes the ticket's
 	first message, stored as `kind: INBOUND` with `fromEmail` set (never
 	`authorUserId` — no staff member wrote it).
+	
+	Sends the requester a brief acknowledgement — with the `Reply-To`
+	thread already wired up, so the web form's result lands in their
+	inbox ready to reply to. **Best-effort**: see
+	`send_system_notification`'s doc comment for why a failure here is
+	logged, not surfaced — the ticket itself is the primary effect and
+	already exists by the time this runs; failing the mutation over it
+	would risk a duplicate submission on retry.
 	"""
 	submitTicket(subject: String!, body: String!): Ticket!
 	"""
-	Reply to a ticket as a member (agent/owner). Creates the `ticket_message`
-	row (`kind: REPLY`) and bumps the ticket's activity — **does not
-	actually send the email**. `TODO(step 6)`: build the outbound MIME
-	message (`mail-builder`) and send it via SESv2 with the `Reply-To`
-	threading token; this step only persists the reply and updates the
-	ticket, which is why `rfc_message_id` is absent on the returned
-	message (there is no real one yet). Attachments are similarly
-	`TODO(step 7)` — no `attachmentKeys` argument exists yet.
+	Reply to a ticket as a member (agent/owner): persists the reply
+	(`kind: REPLY`), bumps the ticket's activity, builds the outbound
+	RFC 5322 message (`crate::outbound`) and sends it via
+	`crate::mail::Handler::send_raw`, then stamps the returned message id
+	onto the row so a further reply — from either side — threads
+	correctly. Attachments are `TODO(step 7)` — no `attachmentKeys`
+	argument exists yet.
+	
+	**On a send failure, this mutation returns `Err` — but the
+	`ticket_message` row it already created is *not* rolled back.**
+	What the agent typed is the durable record of what they tried to
+	say; a transient SES/network failure shouldn't erase it and force a
+	retype. But the caller must be told delivery didn't happen — a
+	silent success here would let an agent believe a customer received a
+	reply that never left the building — so the failure surfaces as a
+	mutation error rather than a quietly-`null` `rfcMessageId` on an
+	otherwise-successful response. The persisted-but-unsent row (no
+	`rfcMessageId`) doubles as the audit trail an operator needs to spot
+	and retry a failed send. Contrast `submit_ticket`'s acknowledgement
+	and `set_ticket_status`'s notice, both best-effort: those mutations'
+	primary effect already succeeded by the time mail is attempted, so a
+	failure there is logged, not surfaced.
 	"""
 	replyToTicket(ticketId: ID!, body: String!): TicketMessage!
 	"""
 	Add an internal note to a ticket. Member-only, same per-ticket
 	authorization as every other ticket mutation. Stored as `kind: NOTE`,
 	which `Ticket.messages` filters out for anyone but a member of this
-	ticket's instance — see that field's doc comment. Never emailed, now
-	or ever: the outbound-mail path (step 6) only ever sends `REPLY`
-	messages.
+	ticket's instance — see that field's doc comment. **Never emailed,
+	now or ever**: this mutation never calls `send_system_notification`
+	or `mail::Handler::send_raw`, unlike `submit_ticket` (an
+	acknowledgement), `set_ticket_status` (a close/reopen notice), and
+	`reply_to_ticket` (the `REPLY` itself) — pinned by
+	`tests/outbound_mail_dynamodb_local.rs`'s
+	`internal_note_sends_no_mail`.
 	"""
 	addInternalNote(ticketId: ID!, body: String!): TicketMessage!
 	"""
@@ -152,7 +178,13 @@ type MutationRoot {
 	that one variant, not a bespoke delete/restore code path, is what
 	keeps the three composite marker attributes consistent. A no-op
 	transition (already at the requested status) still succeeds, returning
-	the ticket unchanged, rather than erroring — idempotent by design.
+	the ticket unchanged, rather than erroring — idempotent by design
+	(and, since it returns before reaching the mail step below, sends no
+	notice either).
+	
+	A close or a reopen (including restoring a deleted ticket) mails
+	requesters/CCs a brief notice — see `outbound::status_notice_body`.
+	Deleting one does not: see that function's doc comment.
 	"""
 	setTicketStatus(ticketId: ID!, status: TicketStatusType!): Ticket!
 	"""
@@ -160,20 +192,26 @@ type MutationRoot {
 	when assigning, must themselves be a member of this ticket's
 	instance — assigning to an outsider would be silently useless (they
 	could never see it via the "assigned to me" filter, which is itself
-	instance-scoped).
+	instance-scoped). **Sends no mail**: which agent owns a ticket is
+	internal bookkeeping the requester has no reason to be notified
+	about — see the "Outbound mail" entry in `CLAUDE.md`.
 	"""
 	assignTicket(ticketId: ID!, userId: ID): Ticket!
 	"""
-	Add a requester (a "To" recipient) to a ticket.
+	Add a requester (a "To" recipient) to a ticket. **Sends no mail** —
+	see `assign_ticket`'s doc comment and `CLAUDE.md`'s "Outbound mail"
+	entry; this mutation, like assignment, is internal bookkeeping.
 	"""
 	addTicketRequester(ticketId: ID!, email: String!): Ticket!
 	"""
 	Remove a requester from a ticket. Refuses to remove the last one — a
-	ticket must always have someone to reply to.
+	ticket must always have someone to reply to. **Sends no mail** — see
+	`assign_ticket`'s doc comment.
 	"""
 	removeTicketRequester(ticketId: ID!, email: String!): Ticket!
 	"""
-	Add a CC recipient to a ticket.
+	Add a CC recipient to a ticket. **Sends no mail** — see
+	`assign_ticket`'s doc comment.
 	"""
 	addTicketCc(ticketId: ID!, email: String!): Ticket!
 	"""

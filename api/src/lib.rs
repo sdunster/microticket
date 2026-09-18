@@ -12,6 +12,7 @@ pub mod mail;
 pub mod mockdb;
 pub mod mockmail;
 pub mod nonce;
+pub mod outbound;
 pub mod request_metrics;
 pub mod server;
 pub mod sesmail;

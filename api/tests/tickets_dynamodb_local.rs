@@ -898,6 +898,7 @@ async fn a_requester_principal_cannot_see_internal_notes() {
         Some("Something is broken"),
         None,
         None,
+        None,
     )
     .await
     .expect("create initial message");
@@ -909,6 +910,7 @@ async fn a_requester_principal_cannot_see_internal_notes() {
         &[],
         &[],
         Some("Internal-only: this is a known issue, waiting on vendor fix"),
+        None,
         None,
         None,
     )
