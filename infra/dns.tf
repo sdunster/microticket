@@ -44,7 +44,7 @@ locals {
       {
         name    = "_dmarc.${var.support_domain}"
         type    = "TXT"
-        value   = "v=DMARC1; p=none; rua=mailto:${var.alert_email}"
+        value   = var.alert_email == "" ? "v=DMARC1; p=none" : "v=DMARC1; p=none; rua=mailto:${var.alert_email}"
         purpose = "DMARC. p=none to start -- tighten once you have seen the reports."
       },
       {
