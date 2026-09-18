@@ -9,11 +9,12 @@
 //! restricted to a local DynamoDB endpoint — it is the general admin tool,
 //! meant to run against a real deployed `DB_PREFIX` too.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use microticket::db::{Handler, Instance, InstanceUpdateShape, MembershipRole, User};
 use microticket::dynamodb;
 use microticket::inbound::routing;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(about = "Admin/inspection CLI for the microticket DB API")]
@@ -54,6 +55,12 @@ enum Object {
     Member {
         #[command(subcommand)]
         cmd: MemberCmd,
+    },
+    /// Inbound mail, exercised locally with no AWS account. Backs `make
+    /// local-mail FILE=...`.
+    Mail {
+        #[command(subcommand)]
+        cmd: MailCmd,
     },
 }
 
@@ -150,6 +157,34 @@ enum MemberCmd {
     List {
         #[arg(long)]
         instance: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MailCmd {
+    /// Feed a raw `.eml` file straight into the same parse → route →
+    /// resolve → store pipeline the inbound-mail Lambda uses
+    /// (`inbound::pipeline::process_raw_message`) — no S3, no SQS. Mail
+    /// sending is mocked (`mockmail`, logged/written under `MOCK_MAIL_DIR`)
+    /// and attachment/raw-MIME storage is a local directory (`mockstorage`,
+    /// under `MOCK_STORAGE_DIR`), exactly as `make dev-local` mocks them —
+    /// so this needs a local DynamoDB (`make local-up && make
+    /// local-tables`) but no AWS account at all.
+    ///
+    /// The idempotency key (`ses_message_id`) is derived from the file's
+    /// own sha256 — running the same fixture twice is therefore a
+    /// deliberate way to exercise the duplicate-delivery no-op path, not an
+    /// accident to work around. Pass `--fresh` when you want the opposite:
+    /// a new id per invocation, so a fixture can be replayed as if it were
+    /// a genuinely new delivery.
+    Process {
+        /// Path to a raw RFC 5322 `.eml` file.
+        #[arg(long)]
+        file: PathBuf,
+        /// Treat this as a brand-new delivery: generate a unique
+        /// `ses_message_id` instead of deriving it from the file's content.
+        #[arg(long, default_value_t = false)]
+        fresh: bool,
     },
 }
 
@@ -484,6 +519,85 @@ async fn run_member(db: &impl Handler, cmd: MemberCmd, dry_run: bool) -> Result<
     Ok(())
 }
 
+async fn run_mail(db: dynamodb::Handler, cmd: MailCmd, dry_run: bool) -> Result<()> {
+    if dry_run {
+        bail!("mail process does not support --dry-run (it always writes: a ticket/message)");
+    }
+    match cmd {
+        MailCmd::Process { file, fresh } => {
+            let raw =
+                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            // Content-derived, not path-derived: two different fixture
+            // files with the same bytes are (correctly) the same SES
+            // message id; running the same file twice is how the
+            // duplicate-delivery path gets exercised, per this
+            // subcommand's doc comment.
+            let ses_message_id = if fresh {
+                format!("local-fresh-{}", nanoid::nanoid!(24))
+            } else {
+                format!("local-{}", sha256_hex(&raw))
+            };
+
+            let app = microticket::app::new(
+                db,
+                microticket::mockmail::Handler::from_env(),
+                microticket::mockstorage::Storage::from_env(),
+                0,
+            );
+
+            // Mirror what SES's own S3 action would have written, so the
+            // local path exercises exactly the same raw_s3_key plumbing the
+            // Lambda does.
+            let raw_key = format!("inbound/{ses_message_id}");
+            {
+                use microticket::storage::Handler as _;
+                app.storage
+                    .put_bytes(&raw_key, &raw, "message/rfc822")
+                    .await
+                    .context("writing raw MIME to local mock storage")?;
+            }
+
+            let outcome = microticket::inbound::pipeline::process_raw_message(
+                &app,
+                &ses_message_id,
+                &raw,
+                Some(&raw_key),
+            )
+            .await?;
+
+            println!("ses_message_id: {ses_message_id}");
+            match &outcome.dropped_reason {
+                Some(reason) => println!("dropped: {reason}"),
+                None => {
+                    println!("ticket_id: {}", outcome.ticket_id.as_deref().unwrap_or("-"));
+                    println!(
+                        "message_id: {}",
+                        outcome.message_id.as_deref().unwrap_or("-")
+                    );
+                    println!(
+                        "created_new_ticket: {}",
+                        bool_str(outcome.created_new_ticket)
+                    );
+                    println!("reopened: {}", bool_str(outcome.reopened));
+                    println!(
+                        "added_sender_as_cc: {}",
+                        bool_str(outcome.added_sender_as_cc)
+                    );
+                    println!("attachment_count: {}", outcome.attachment_count);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -506,5 +620,6 @@ async fn main() -> Result<()> {
         Object::Address { cmd } => run_address(&db, cmd, cli.dry_run).await,
         Object::User { cmd } => run_user(&db, cmd, cli.dry_run).await,
         Object::Member { cmd } => run_member(&db, cmd, cli.dry_run).await,
+        Object::Mail { cmd } => run_mail(db, cmd, cli.dry_run).await,
     }
 }

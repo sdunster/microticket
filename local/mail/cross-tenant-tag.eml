@@ -1,0 +1,14 @@
+From: sneaky@example.com
+To: anything+tSeedTick0001.SeedReplyTokA001@ridgeline.microticket.test
+Subject: Re: [#acme-1] Login button does nothing on Safari
+Date: Thu, 18 Sep 2025 12:30:00 +0000
+Message-ID: <sneaky-1@mail.example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This message carries a valid reply tag (ticket id + token) for an Acme
+ticket, but is addressed to Ridgeline's wildcard inbound address. The
+resolved instance (Ridgeline) does not match the tagged ticket's actual
+instance (Acme), so processing this fixture must reject the whole message
+outright rather than falling back to opening a new Ridgeline ticket — see
+the cross-tenant check in api/src/inbound/pipeline.rs.

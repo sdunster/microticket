@@ -16,21 +16,29 @@ use microticket::db;
 use microticket::graphql;
 use microticket::mail;
 use microticket::request_metrics::{self, RequestMetrics};
+use microticket::storage;
 use microticket::telemetry::{self, RequestTelemetry};
 
 use crate::errors::{ClientError, ServerError};
 
-type GraphQlSchema<H, M> = graphql::MicroticketSchema<app::MyApp<H, M>>;
+type GraphQlSchema<H, M, S> = graphql::MicroticketSchema<app::MyApp<H, M, S>>;
 
-pub struct Handler<H: db::Handler + Send + Sync, M: mail::Handler + Send + Sync> {
-    app: Arc<app::MyApp<H, M>>,
-    schema: GraphQlSchema<H, M>,
+pub struct Handler<
+    H: db::Handler + Send + Sync,
+    M: mail::Handler + Send + Sync,
+    S: storage::Handler + Send + Sync,
+> {
+    app: Arc<app::MyApp<H, M, S>>,
+    schema: GraphQlSchema<H, M, S>,
 }
 
-impl<H: db::Handler + Send + Sync + 'static, M: mail::Handler + Send + Sync + 'static>
-    Handler<H, M>
+impl<
+    H: db::Handler + Send + Sync + 'static,
+    M: mail::Handler + Send + Sync + 'static,
+    S: storage::Handler + Send + Sync + 'static,
+> Handler<H, M, S>
 {
-    pub fn new(app: Arc<app::MyApp<H, M>>, schema: GraphQlSchema<H, M>) -> Self {
+    pub fn new(app: Arc<app::MyApp<H, M, S>>, schema: GraphQlSchema<H, M, S>) -> Self {
         Self { app, schema }
     }
 

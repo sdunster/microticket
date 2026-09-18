@@ -10,11 +10,13 @@ use microticket::app;
 use microticket::graphql;
 use microticket::mockdb;
 use microticket::mockmail;
+use microticket::mockstorage;
 
 fn main() {
     let app = Arc::new(app::new(
         mockdb::Handler::new(),
         mockmail::Handler::new(),
+        mockstorage::Storage::new(),
         0,
     ));
     let webauthn = Arc::new(app::build_webauthn().expect("WebAuthn build failed"));

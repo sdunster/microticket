@@ -473,6 +473,23 @@ crash between the two calls. Code review on any new ticket-mutating resolver sho
 
 ---
 
+### Message thread ordering within one second
+
+`ticket_message.created_at` is in whole seconds, and it is the sort key of
+`ticket_id-created_at-index`. Two messages written in the same second — an inbound message and
+the notification it triggers is the normal case — therefore tie on the sort key, and DynamoDB may
+return tied rows in either order.
+
+`list_ticket_messages` breaks the tie on `id`, so a thread's order is **stable**: a reader never
+sees the same thread reshuffle between reads. But `id` is a random nanoid, so within a single
+second the order is arbitrary rather than true insertion order. Two agent replies seconds apart
+are unaffected; a reply and its automatic notification could display in either order.
+
+**Fix**, when it matters: give `ticket_message` a millisecond-granular sort key (a new attribute,
+since `created_at` is second-granular across every other table and is exposed as `createdAt: Int!`
+in seconds), or make message ids time-sortable (ULID/KSUID) so the `id` tiebreak *is* insertion
+order. Both are schema changes and neither is worth doing before there is a reason.
+
 ### GSI eventual consistency
 
 All GSI-based lookups use DynamoDB's default eventually-consistent reads; strong consistency is

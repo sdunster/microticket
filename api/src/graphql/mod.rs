@@ -17,7 +17,7 @@ use async_graphql::extensions::{
 use async_graphql::{EmptySubscription, Schema, ServerError, ServerResult, Value};
 use std::sync::Arc;
 
-use crate::app::{App, HasDb, HasMail};
+use crate::app::{App, HasDb, HasMail, HasStorage};
 use crate::auth::AuthInfo;
 use crate::request_metrics;
 use crate::telemetry::{self, OperationKind};
@@ -153,7 +153,7 @@ impl Extension for RequestMetricsExtImpl {
     }
 }
 
-pub fn build_schema<A: App + HasDb + HasMail + Send + Sync + 'static>(
+pub fn build_schema<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static>(
     app: Arc<A>,
     webauthn: Arc<webauthn_rs::prelude::Webauthn>,
 ) -> MicroticketSchema<A> {

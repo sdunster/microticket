@@ -9,13 +9,17 @@ pub mod graphql;
 pub mod inbound;
 pub mod local_dev;
 pub mod mail;
+pub mod mailloop;
 pub mod mockdb;
 pub mod mockmail;
+pub mod mockstorage;
 pub mod nonce;
 pub mod outbound;
 pub mod request_metrics;
+pub mod s3storage;
 pub mod server;
 pub mod sesmail;
+pub mod storage;
 pub mod telemetry;
 pub mod turnstile;
 

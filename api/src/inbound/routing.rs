@@ -33,32 +33,46 @@ pub struct NormalizedRecipient {
     pub domain: Option<String>,
 }
 
-/// Lowercase a raw recipient address and split a `+tag` suffix off the local
-/// part, if present. A `+` only counts within the local part (before the
-/// first `@`) — a bare address with no `@` has no local/domain split to speak
-/// of, so it's returned as-is (lowercased) with no tag and no domain.
+/// Lowercase a raw recipient address for matching, and split a `+tag`
+/// suffix off the local part, if present. A `+` only counts within the
+/// local part (before the first `@`) — a bare address with no `@` has no
+/// local/domain split to speak of, so it's returned as-is (lowercased) with
+/// no tag and no domain.
 ///
 /// Only the *first* `+` in the local part is treated as the tag delimiter:
 /// `user+tag+extra@example.com` strips to local `user`, tag `tag+extra` — the
 /// tag itself may contain further `+` characters (step 7 shapes it as
-/// `t{reply_token}`, but nothing here assumes that).
+/// `t{ticket_id}.{reply_token}`, but nothing here assumes that).
+///
+/// **The tag's own case is preserved, unlike `address`/`domain`.** Every id
+/// this project mints (`dynamodb::new_id`, and the reply token alongside it)
+/// is a nanoid drawn from a *mixed-case* alphabet — lowercasing the tag
+/// before `inbound::resolution::parse_reply_tag` splits it would corrupt the
+/// embedded `ticket_id` for the (overwhelming majority of) tickets whose id
+/// contains an uppercase character, turning a strongly-consistent `GetItem`
+/// by primary key into a silent `NotFound`. Address matching against
+/// `inbound_address` stays case-insensitive (email domains are
+/// case-insensitive by spec, and this project always stores addresses
+/// lowercased), so only the tag half of the split needs this care.
 pub fn normalize_recipient(raw: &str) -> NormalizedRecipient {
-    let lower = raw.to_lowercase();
-    match lower.split_once('@') {
-        Some((local, domain)) => match local.split_once('+') {
-            Some((base, tag)) => NormalizedRecipient {
-                address: format!("{base}@{domain}"),
-                tag: Some(tag.to_string()),
-                domain: Some(domain.to_string()),
-            },
-            None => NormalizedRecipient {
-                address: lower.clone(),
-                tag: None,
-                domain: Some(domain.to_string()),
-            },
-        },
+    match raw.split_once('@') {
+        Some((local, domain)) => {
+            let domain_lower = domain.to_lowercase();
+            match local.split_once('+') {
+                Some((base, tag)) => NormalizedRecipient {
+                    address: format!("{}@{domain_lower}", base.to_lowercase()),
+                    tag: Some(tag.to_string()),
+                    domain: Some(domain_lower),
+                },
+                None => NormalizedRecipient {
+                    address: format!("{}@{domain_lower}", local.to_lowercase()),
+                    tag: None,
+                    domain: Some(domain_lower),
+                },
+            }
+        }
         None => NormalizedRecipient {
-            address: lower,
+            address: raw.to_lowercase(),
             tag: None,
             domain: None,
         },
@@ -185,10 +199,20 @@ mod tests {
     }
 
     #[test]
-    fn normalize_lowercases_before_splitting_the_tag() {
+    fn normalize_lowercases_the_address_but_preserves_tag_case() {
+        // See `normalize_recipient`'s doc comment: the tag carries a
+        // mixed-case nanoid ticket id (step 7's `+t{ticket_id}.{reply_token}`
+        // format), so lowercasing it would corrupt the id.
         let n = normalize_recipient("Support+TAG@Example.com");
         assert_eq!(n.address, "support@example.com");
-        assert_eq!(n.tag.as_deref(), Some("tag"));
+        assert_eq!(n.tag.as_deref(), Some("TAG"));
+    }
+
+    #[test]
+    fn normalize_preserves_mixed_case_within_a_reply_tag() {
+        let n = normalize_recipient("support+tAbC123XyZ987.RepLyTok3n@Example.com");
+        assert_eq!(n.address, "support@example.com");
+        assert_eq!(n.tag.as_deref(), Some("tAbC123XyZ987.RepLyTok3n"));
     }
 
     #[test]

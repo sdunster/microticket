@@ -523,8 +523,14 @@ mod tests {
         use crate::app;
         use crate::mockdb;
         use crate::mockmail;
+        use crate::mockstorage;
 
-        let my_app = app::new(mockdb::Handler::new(), mockmail::Handler::new(), 0);
+        let my_app = app::new(
+            mockdb::Handler::new(),
+            mockmail::Handler::new(),
+            mockstorage::Storage::new(),
+            0,
+        );
         let result = verify_token(&my_app, "slu_not_our_scheme").await;
         assert!(matches!(result, Err(AuthError::Permanent(_))));
     }
@@ -534,8 +540,14 @@ mod tests {
         use crate::app;
         use crate::mockdb;
         use crate::mockmail;
+        use crate::mockstorage;
 
-        let my_app = app::new(mockdb::Handler::new(), mockmail::Handler::new(), 0);
+        let my_app = app::new(
+            mockdb::Handler::new(),
+            mockmail::Handler::new(),
+            mockstorage::Storage::new(),
+            0,
+        );
         assert!(verify_authorization_header(&my_app, None).await.is_none());
     }
 
@@ -544,8 +556,14 @@ mod tests {
         use crate::app;
         use crate::mockdb;
         use crate::mockmail;
+        use crate::mockstorage;
 
-        let my_app = app::new(mockdb::Handler::new(), mockmail::Handler::new(), 0);
+        let my_app = app::new(
+            mockdb::Handler::new(),
+            mockmail::Handler::new(),
+            mockstorage::Storage::new(),
+            0,
+        );
         assert!(
             verify_authorization_header(&my_app, Some("Basic dXNlcjpwYXNz"))
                 .await
@@ -558,8 +576,14 @@ mod tests {
         use crate::app;
         use crate::mockdb;
         use crate::mockmail;
+        use crate::mockstorage;
 
-        let my_app = app::new(mockdb::Handler::new(), mockmail::Handler::new(), 0);
+        let my_app = app::new(
+            mockdb::Handler::new(),
+            mockmail::Handler::new(),
+            mockstorage::Storage::new(),
+            0,
+        );
         let result = verify_authorization_header(&my_app, Some("Bearer garbage"))
             .await
             .expect("a Bearer header must always be checked, never silently ignored");

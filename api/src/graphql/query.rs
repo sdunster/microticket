@@ -11,10 +11,11 @@ use async_graphql::connection::{Connection, EmptyFields};
 use async_graphql::dataloader::DataLoader;
 use async_graphql::{Context, Enum, ID, Object, SimpleObject};
 
-use crate::app::{App, HasDb};
+use crate::app::{App, HasDb, HasStorage};
 use crate::auth::AuthInfo;
 use crate::db;
 use crate::db::Handler as _;
+use crate::storage::Handler as _;
 
 use super::auth::{AuthGuard, AuthRequirement, is_member, is_owner};
 use super::dataloader::DatabaseLoader;
@@ -433,15 +434,57 @@ impl From<db::TicketMessageKind> for TicketMessageKindType {
     }
 }
 
+/// One `ticket_message.attachments` entry, exposed over GraphQL. Generic
+/// over `A` for the same reason as [`User`]/[`Ticket`] — `downloadUrl`
+/// needs `ctx.data_unchecked::<Arc<A>>().storage()` to mint a presigned GET.
+///
+/// `downloadUrl` is a short-lived presigned S3 GET — resolved fresh on every
+/// read, per [`crate::storage::PRESIGN_EXPIRY`], rather than stored, so a
+/// link handed to a client is never valid longer than that window.
+#[derive(Debug, PartialEq)]
+pub struct Attachment<A: App + HasStorage + Send + Sync> {
+    _marker: PhantomData<A>,
+    rec: db::Attachment,
+}
+
+impl<A: App + HasStorage + Send + Sync> Attachment<A> {
+    pub fn new(rec: db::Attachment) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec,
+        }
+    }
+}
+
+impl<A: App + HasStorage + Send + Sync> Clone for Attachment<A> {
+    fn clone(&self) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec: self.rec.clone(),
+        }
+    }
+}
+
+#[Object]
+impl<A: App + HasStorage + Send + Sync + 'static> Attachment<A> {
+    async fn filename(&self) -> &str {
+        &self.rec.filename
+    }
+    async fn content_type(&self) -> &str {
+        &self.rec.content_type
+    }
+    async fn size(&self) -> i64 {
+        self.rec.size as i64
+    }
+    async fn download_url(&self, ctx: &Context<'_>) -> Result<String> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        app.storage().presign_get(&self.rec.s3_key).await
+    }
+}
+
 /// A `ticket_message` row, exposed over GraphQL. Reachable only through
 /// [`Ticket::messages`] (never listed independently), which is where the
 /// internal-note visibility rule is enforced.
-///
-/// **`attachments` is deliberately not exposed yet** — no write path in this
-/// step populates `ticket_message.attachments` (see `db::Attachment`'s doc
-/// comment), and shipping a field that always returns an empty list would
-/// misleadingly suggest attachments are supported. That, and
-/// `createAttachmentUpload`, are `TODO(step 7)`.
 #[derive(Debug, PartialEq)]
 pub struct TicketMessage<A: App + HasDb + Send + Sync> {
     _marker: PhantomData<A>,
@@ -467,7 +510,7 @@ impl<A: App + HasDb + Send + Sync> Clone for TicketMessage<A> {
 }
 
 #[Object]
-impl<A: App + HasDb + Send + Sync + 'static> TicketMessage<A> {
+impl<A: App + HasDb + HasStorage + Send + Sync + 'static> TicketMessage<A> {
     async fn id(&self) -> ID {
         ID(self.rec.id.clone())
     }
@@ -519,6 +562,14 @@ impl<A: App + HasDb + Send + Sync + 'static> TicketMessage<A> {
     async fn created_at(&self) -> i64 {
         self.rec.created_at as i64
     }
+    async fn attachments(&self) -> Vec<Attachment<A>> {
+        self.rec
+            .attachments
+            .iter()
+            .cloned()
+            .map(Attachment::new)
+            .collect()
+    }
 }
 
 /// A `ticket` row, exposed over GraphQL to its instance's members — and, for
@@ -554,7 +605,7 @@ impl<A: App + HasDb + Send + Sync> Clone for Ticket<A> {
 }
 
 #[Object]
-impl<A: App + HasDb + Send + Sync + 'static> Ticket<A> {
+impl<A: App + HasDb + HasStorage + Send + Sync + 'static> Ticket<A> {
     async fn id(&self) -> ID {
         ID(self.rec.id.clone())
     }
@@ -699,7 +750,7 @@ impl<A: App + HasDb + Send + Sync> Default for QueryRoot<A> {
 }
 
 #[Object]
-impl<A: App + HasDb + Send + Sync + 'static> QueryRoot<A> {
+impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
     /// API build version — the git commit this server was built from.
     async fn version(&self) -> String {
         crate::environment::GIT_REV.to_string()

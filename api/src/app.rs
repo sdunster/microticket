@@ -21,6 +21,7 @@
 
 use crate::db;
 use crate::mail;
+use crate::storage;
 use webauthn_rs::prelude::{Webauthn, WebauthnBuilder};
 
 pub trait App {
@@ -67,40 +68,55 @@ pub trait HasMail {
     fn mail(&self) -> &impl mail::Handler;
 }
 
+/// Object storage (the mail bucket: raw MIME, attachments, presigned
+/// upload/download) — step 7's addition alongside `HasDb`/`HasMail`.
+pub trait HasStorage {
+    fn storage(&self) -> &impl storage::Handler;
+}
+
 /// Struct holding our global singletons. See the module doc for why every backend
 /// is a type parameter and there is no queue field.
-pub struct MyApp<DBH: db::Handler, M: mail::Handler> {
+pub struct MyApp<DBH: db::Handler, M: mail::Handler, S: storage::Handler> {
     pub db: DBH,
     pub mail: M,
+    pub storage: S,
     pub response_lag: u64,
 }
 
-pub fn new<DBH: db::Handler, M: mail::Handler>(
+pub fn new<DBH: db::Handler, M: mail::Handler, S: storage::Handler>(
     db: DBH,
     mail: M,
+    storage: S,
     response_lag: u64,
-) -> MyApp<DBH, M> {
+) -> MyApp<DBH, M, S> {
     MyApp {
         db,
         mail,
+        storage,
         response_lag,
     }
 }
 
-impl<DBH: db::Handler, M: mail::Handler> App for MyApp<DBH, M> {
+impl<DBH: db::Handler, M: mail::Handler, S: storage::Handler> App for MyApp<DBH, M, S> {
     fn response_lag(&self) -> u64 {
         self.response_lag
     }
 }
 
-impl<DBH: db::Handler, M: mail::Handler> HasDb for MyApp<DBH, M> {
+impl<DBH: db::Handler, M: mail::Handler, S: storage::Handler> HasDb for MyApp<DBH, M, S> {
     fn db(&self) -> &impl db::Handler {
         &self.db
     }
 }
 
-impl<DBH: db::Handler, M: mail::Handler> HasMail for MyApp<DBH, M> {
+impl<DBH: db::Handler, M: mail::Handler, S: storage::Handler> HasMail for MyApp<DBH, M, S> {
     fn mail(&self) -> &impl mail::Handler {
         &self.mail
+    }
+}
+
+impl<DBH: db::Handler, M: mail::Handler, S: storage::Handler> HasStorage for MyApp<DBH, M, S> {
+    fn storage(&self) -> &impl storage::Handler {
+        &self.storage
     }
 }

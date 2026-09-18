@@ -7,6 +7,7 @@
 use std::error::Error;
 
 use microticket::dynamodb;
+use microticket::s3storage;
 use microticket::server;
 use microticket::sesmail;
 
@@ -15,5 +16,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let startup = server::init()?;
     let db = dynamodb::Handler::new(&startup.db_prefix, !startup.cli.enable_mutations).await;
     let mailer = sesmail::Mailer::new().await;
-    server::run(startup, db, mailer).await
+    let storage = s3storage::Storage::new().await?;
+    server::run(startup, db, mailer, storage).await
 }

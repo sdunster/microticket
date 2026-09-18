@@ -11,13 +11,14 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use tracing::{info, warn};
 
-use crate::app::{App, HasDb, HasMail};
+use crate::app::{App, HasDb, HasMail, HasStorage};
 use crate::auth::{self, AuthInfo};
 use crate::db;
 use crate::db::Handler as _;
-use crate::inbound::routing;
+use crate::inbound::{attachments, routing};
 use crate::mail::Handler as _;
 use crate::outbound;
+use crate::storage::Handler as _;
 
 use super::auth::{AuthGuard, AuthRequirement, is_member};
 use super::error::ApiError;
@@ -86,6 +87,42 @@ async fn require_ticket_member<A: App + HasDb + HasMail + Send + Sync>(
         return Err(ApiError::not_found("Ticket", ticket_id).into());
     }
     Ok(ticket)
+}
+
+/// Move every validated `pending/…` key in `keys` into
+/// `attachments/{ticket_id}/{message_id}/{n}/{filename}`, returning the
+/// `db::Attachment` records to stamp onto the message row. A key that
+/// doesn't belong to `ticket.instance_id`'s pending prefix is rejected
+/// outright (`FORBIDDEN`) — see `reply_to_ticket`'s doc comment. A free
+/// function, not a method on `MutationRoot`'s `#[Object]` impl — everything
+/// in that impl block becomes a GraphQL field, which this must not.
+async fn move_attachments<A: App + HasStorage + Send + Sync>(
+    app: &A,
+    ticket: &db::Ticket,
+    message_id: &str,
+    keys: Vec<String>,
+) -> Result<Vec<db::Attachment>> {
+    let mut stored = Vec::with_capacity(keys.len());
+    for (index, key) in keys.iter().enumerate() {
+        if !attachments::is_pending_key_for_instance(key, &ticket.instance_id) {
+            return Err(ApiError::forbidden(format!(
+                "attachment key {key:?} is not a pending upload for this ticket's instance"
+            ))
+            .into());
+        }
+        let filename = key.rsplit('/').next().unwrap_or("attachment").to_string();
+        let content_type = attachments::guess_content_type(&filename).to_string();
+        let final_key = attachments::attachment_key(&ticket.id, message_id, index, &filename);
+        app.storage().move_object(key, &final_key).await?;
+        let size = app.storage().object_size(&final_key).await.unwrap_or(0);
+        stored.push(db::Attachment {
+            s3_key: final_key,
+            filename,
+            content_type,
+            size,
+        });
+    }
+    Ok(stored)
 }
 
 /// Load an instance and its inbound addresses together — the "can't build
@@ -234,7 +271,7 @@ fn normalize_ticket_email(raw: &str) -> Result<String> {
     Ok(lower)
 }
 
-pub struct MutationRoot<A: App + HasDb + HasMail + Send + Sync> {
+pub struct MutationRoot<A: App + HasDb + HasMail + HasStorage + Send + Sync> {
     pub(super) app: Arc<A>,
 }
 
@@ -244,8 +281,18 @@ struct PasskeyChallenge {
     options_json: String,
 }
 
+/// A presigned upload slot for `createAttachmentUpload`: `key` is what the
+/// client later passes back in `replyToTicket(attachmentKeys:)`;
+/// `uploadUrl` is a short-lived presigned PUT the client uploads the file's
+/// bytes to directly (never through this API).
+#[derive(SimpleObject)]
+struct AttachmentUpload {
+    key: String,
+    upload_url: String,
+}
+
 #[Object]
-impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
+impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot<A> {
     /// Request an email login code. **Always returns `true`**, whether or not the
     /// address belongs to a real, enabled user — telling the caller otherwise
     /// would let anyone enumerate registered emails one guess at a time. Every
@@ -805,13 +852,55 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
         Ok(Ticket::new(ticket))
     }
 
+    /// Mint a presigned S3 PUT into `pending/{instance_id}/{nanoid}/{filename}`
+    /// for an agent to upload an attachment to, ahead of attaching it to a
+    /// reply with `replyToTicket(attachmentKeys:)`. Member-only, using the
+    /// same per-ticket authorization as every other ticket mutation (the
+    /// `ticketId` argument exists only to derive — and check membership of
+    /// — the owning instance; the key itself is instance-scoped, not
+    /// ticket-scoped, since the upload happens before any message row
+    /// exists to scope it to). The upload is not attached to anything until
+    /// `replyToTicket` moves it; an upload that's never attached expires out
+    /// of `pending/` on its own (see the build plan's `s3_mail.tf` sketch —
+    /// a 1-day lifecycle rule on that prefix).
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn create_attachment_upload(
+        &self,
+        ctx: &Context<'_>,
+        ticket_id: ID,
+        filename: String,
+        content_type: String,
+    ) -> Result<AttachmentUpload> {
+        let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let safe_name = attachments::sanitize_filename(Some(&filename), 0);
+        let key =
+            attachments::pending_key(&ticket.instance_id, &crate::dynamodb::new_id(), &safe_name);
+        let upload_url = self.app.storage().presign_put(&key, &content_type).await?;
+        Ok(AttachmentUpload { key, upload_url })
+    }
+
     /// Reply to a ticket as a member (agent/owner): persists the reply
     /// (`kind: REPLY`), bumps the ticket's activity, builds the outbound
     /// RFC 5322 message (`crate::outbound`) and sends it via
     /// `crate::mail::Handler::send_raw`, then stamps the returned message id
     /// onto the row so a further reply — from either side — threads
-    /// correctly. Attachments are `TODO(step 7)` — no `attachmentKeys`
-    /// argument exists yet.
+    /// correctly.
+    ///
+    /// `attachmentKeys`, when given, are `pending/…` keys returned by prior
+    /// `createAttachmentUpload` calls. Each is validated with
+    /// `inbound::attachments::is_pending_key_for_instance` against *this*
+    /// ticket's instance before being moved into place — a caller cannot
+    /// attach an arbitrary S3 key, including another instance's pending
+    /// upload, this way. Moved (and the message row's `attachments`
+    /// stamped) *before* the send is attempted, so a send failure still
+    /// leaves a fully-formed, attachment-bearing row behind — consistent
+    /// with the "the row survives" reasoning below. **Not embedded in the
+    /// outbound MIME message itself** — that would mean fetching every
+    /// attachment's bytes back out of storage and re-encoding them into the
+    /// raw message on every reply, which is a real feature but a separate
+    /// one from wiring up storage/move/record; deferred rather than
+    /// half-built here. The stored attachment is still visible (and
+    /// downloadable) in the thread view either way.
     ///
     /// **On a send failure, this mutation returns `Err` — but the
     /// `ticket_message` row it already created is *not* rolled back.**
@@ -833,6 +922,7 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
         ctx: &Context<'_>,
         ticket_id: ID,
         body: String,
+        attachment_keys: Option<Vec<String>>,
     ) -> Result<TicketMessage<A>> {
         let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
         let user_id = require_user_id(ctx)?;
@@ -906,6 +996,25 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
             )
             .await?;
 
+        let stored_attachments = move_attachments(
+            &*self.app,
+            &ticket,
+            &msg.id,
+            attachment_keys.unwrap_or_default(),
+        )
+        .await?;
+        if !stored_attachments.is_empty() {
+            self.app
+                .db()
+                .update_ticket_message(
+                    &msg.id,
+                    db::TicketMessageUpdateShape::SetAttachments {
+                        attachments: &stored_attachments,
+                    },
+                )
+                .await?;
+        }
+
         // From here on, the row exists no matter what happens next — see
         // this method's doc comment.
         let message_id = self
@@ -927,6 +1036,7 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
 
         Ok(TicketMessage::new(db::TicketMessage {
             rfc_message_id: Some(message_id),
+            attachments: stored_attachments,
             ..msg
         }))
     }

@@ -229,6 +229,14 @@ impl db::Handler for Handler {
         Self::unsupported()
     }
 
+    async fn get_ticket_id_by_instance_number(
+        &self,
+        _instance_id: &str,
+        _number: u64,
+    ) -> db::Result<Option<String>> {
+        Self::unsupported()
+    }
+
     // ── ticket_message ───────────────────────────────────────────────────
 
     async fn create_ticket_message(
@@ -256,6 +264,24 @@ impl db::Handler for Handler {
         _id: &str,
         _change: db::TicketMessageUpdateShape<'_>,
     ) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    async fn get_ticket_id_by_rfc_message_id(
+        &self,
+        _rfc_message_id: &str,
+    ) -> db::Result<Option<String>> {
+        Self::unsupported()
+    }
+
+    // ── processed_message ─────────────────────────────────────────────────
+
+    async fn claim_processed_message(
+        &self,
+        _ses_message_id: &str,
+        _now: u64,
+        _expires_at: u64,
+    ) -> db::Result<bool> {
         Self::unsupported()
     }
 

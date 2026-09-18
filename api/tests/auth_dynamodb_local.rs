@@ -45,6 +45,7 @@ use microticket::db::Handler as _;
 use microticket::dynamodb;
 use microticket::graphql;
 use microticket::mockmail;
+use microticket::mockstorage;
 use serde_json::json;
 
 /// `Some(prefix)` when a local DynamoDB is configured *and* actually
@@ -144,7 +145,7 @@ async fn email_code_login_flow_end_to_end() {
     assert!(user.enabled);
     assert_eq!(user.email, email);
 
-    let my_app = Arc::new(app::new(db, mail, 0));
+    let my_app = Arc::new(app::new(db, mail, mockstorage::Storage::new(), 0));
     let webauthn = Arc::new(app::build_webauthn().expect("WebAuthn build failed"));
     let schema = graphql::build_schema(my_app.clone(), webauthn);
 
@@ -260,7 +261,7 @@ async fn disabled_user_cannot_log_in() {
     .await
     .expect("update_user against DynamoDB Local");
 
-    let my_app = Arc::new(app::new(db, mail, 0));
+    let my_app = Arc::new(app::new(db, mail, mockstorage::Storage::new(), 0));
     let webauthn = Arc::new(app::build_webauthn().expect("WebAuthn build failed"));
     let schema = graphql::build_schema(my_app.clone(), webauthn);
 

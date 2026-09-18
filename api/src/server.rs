@@ -29,9 +29,10 @@ use crate::db;
 use crate::graphql;
 use crate::mail;
 use crate::request_metrics::{self, RequestMetrics};
+use crate::storage;
 use crate::telemetry;
 
-type Schema<H, M> = graphql::MicroticketSchema<MyApp<H, M>>;
+type Schema<H, M, S> = graphql::MicroticketSchema<MyApp<H, M, S>>;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -95,9 +96,9 @@ pub fn init() -> Result<Startup, Box<dyn Error>> {
 }
 
 #[handler]
-async fn index<H, M>(
-    schema: Data<&Schema<H, M>>,
-    app: Data<&Arc<MyApp<H, M>>>,
+async fn index<H, M, S>(
+    schema: Data<&Schema<H, M, S>>,
+    app: Data<&Arc<MyApp<H, M, S>>>,
     dev_auth: Data<&Arc<Option<auth::DevAuthConfig>>>,
     headers: &HeaderMap,
     body: Vec<u8>,
@@ -105,6 +106,7 @@ async fn index<H, M>(
 where
     H: db::Handler + Send + Sync + 'static,
     M: mail::Handler + Send + Sync + 'static,
+    S: storage::Handler + Send + Sync + 'static,
 {
     if app.response_lag() > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(app.response_lag())).await;
@@ -213,21 +215,27 @@ async fn graphiql() -> impl IntoResponse {
 }
 
 /// Serve the GraphQL API on :8000 until interrupted.
-pub async fn run<H, M>(startup: Startup, db: H, mailer: M) -> Result<(), Box<dyn Error>>
+pub async fn run<H, M, S>(
+    startup: Startup,
+    db: H,
+    mailer: M,
+    storage: S,
+) -> Result<(), Box<dyn Error>>
 where
     H: db::Handler + Send + Sync + 'static,
     M: mail::Handler + Send + Sync + 'static,
+    S: storage::Handler + Send + Sync + 'static,
 {
     let Startup { cli, dev_auth, .. } = startup;
     let webauthn = Arc::new(app::build_webauthn()?);
-    let app = Arc::new(app::new(db, mailer, cli.response_lag_ms));
+    let app = Arc::new(app::new(db, mailer, storage, cli.response_lag_ms));
     let schema = graphql::build_schema(app.clone(), webauthn);
     std::fs::write("schema.graphql", schema.sdl())?;
     let allow_cross_origin = Cors::new();
     let routes = Route::new()
         .at(
             "/",
-            get(graphiql).post(index::<H, M> {
+            get(graphiql).post(index::<H, M, S> {
                 ..Default::default()
             }),
         )

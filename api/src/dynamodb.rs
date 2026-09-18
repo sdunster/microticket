@@ -518,7 +518,12 @@ impl From<HydrationError> for db::Error {
     }
 }
 
-#[derive(Debug)]
+// `Clone` is cheap: `aws_sdk_dynamodb::Client` is `Arc`-backed internally
+// (cloning it does not open a new connection), and the two remaining fields
+// are a `String`/`bool`. Used by integration tests that need one `Handler`
+// to build an `App` (which takes it by value) while keeping another handle
+// around for direct assertions afterward.
+#[derive(Debug, Clone)]
 pub struct Handler {
     table_prefix: String,
     client: Client,
@@ -2010,6 +2015,39 @@ impl db::Handler for Handler {
         Ok(tickets)
     }
 
+    async fn get_ticket_id_by_instance_number(
+        &self,
+        instance_id: &str,
+        number: u64,
+    ) -> db::Result<Option<String>> {
+        let key_value = format!("{instance_id}#{number}");
+        let resp = self
+            .client
+            .query()
+            .table_name(self.table_name("ticket"))
+            .index_name("instance_number-index")
+            .key_condition_expression("instance_number = :v")
+            .expression_attribute_values(":v", AttributeValue::S(key_value.clone()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "get_ticket_id_by_instance_number",
+            resp.consumed_capacity(),
+            CapKind::Read,
+        );
+        let ids = resp
+            .items
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| Item(item).id())
+            .collect::<HydrationResult<Vec<String>>>()?;
+        db::at_most_one(ids, || {
+            format!("Multiple tickets share instance_number {key_value}")
+        })
+    }
+
     // ── ticket_message ───────────────────────────────────────────────────
 
     async fn create_ticket_message(
@@ -2094,7 +2132,7 @@ impl db::Handler for Handler {
     }
 
     async fn list_ticket_messages(&self, ticket_id: &str) -> db::Result<Vec<db::TicketMessage>> {
-        query_all("list_ticket_messages", || {
+        let mut messages: Vec<db::TicketMessage> = query_all("list_ticket_messages", || {
             self.client
                 .query()
                 .table_name(self.table_name("ticket_message"))
@@ -2102,7 +2140,22 @@ impl db::Handler for Handler {
                 .key_condition_expression("ticket_id = :ticket_id")
                 .expression_attribute_values(":ticket_id", AttributeValue::S(ticket_id.to_string()))
         })
-        .await
+        .await?;
+        // `created_at` is in whole seconds, so the GSI's sort key ties for any
+        // two messages written in the same second — an inbound message and the
+        // notification it triggers, typically — and DynamoDB is free to return
+        // tied rows in any order. That surfaced as a thread whose order changed
+        // between reads. Breaking the tie on `id` makes the order *stable*;
+        // within one second it is not true insertion order, which is recorded
+        // as a known issue in SCHEMA.md along with the fix (a millisecond sort
+        // key). Stable-but-arbitrary beats non-deterministic: a reader never
+        // sees the same thread reshuffle.
+        messages.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(messages)
     }
 
     async fn update_ticket_message(
@@ -2134,8 +2187,156 @@ impl db::Handler for Handler {
                     CapKind::Write,
                 );
             }
+            db::TicketMessageUpdateShape::SetRawS3Key { raw_s3_key } => {
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket_message"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET raw_s3_key = :raw_s3_key")
+                    .expression_attribute_values(
+                        ":raw_s3_key",
+                        AttributeValue::S(raw_s3_key.to_string()),
+                    )
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("TicketMessage {id}")))?;
+                record_capacity(
+                    "update_ticket_message_set_raw_s3_key",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::TicketMessageUpdateShape::SetAttachments { attachments } => {
+                let mut req = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket_message"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)");
+                if attachments.is_empty() {
+                    req = req.update_expression("REMOVE attachments");
+                } else {
+                    let list = AttributeValue::L(
+                        attachments
+                            .iter()
+                            .map(|a| {
+                                AttributeValue::M(HashMap::from([
+                                    ("s3_key".to_string(), AttributeValue::S(a.s3_key.clone())),
+                                    (
+                                        "filename".to_string(),
+                                        AttributeValue::S(a.filename.clone()),
+                                    ),
+                                    (
+                                        "content_type".to_string(),
+                                        AttributeValue::S(a.content_type.clone()),
+                                    ),
+                                    ("size".to_string(), AttributeValue::N(a.size.to_string())),
+                                ]))
+                            })
+                            .collect(),
+                    );
+                    req = req
+                        .update_expression("SET attachments = :attachments")
+                        .expression_attribute_values(":attachments", list);
+                }
+                let resp = req
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("TicketMessage {id}")))?;
+                record_capacity(
+                    "update_ticket_message_set_attachments",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
         }
         Ok(())
+    }
+
+    async fn get_ticket_id_by_rfc_message_id(
+        &self,
+        rfc_message_id: &str,
+    ) -> db::Result<Option<String>> {
+        let resp = self
+            .client
+            .query()
+            .table_name(self.table_name("ticket_message"))
+            .index_name("rfc_message_id-index")
+            .key_condition_expression("rfc_message_id = :v")
+            .expression_attribute_values(":v", AttributeValue::S(rfc_message_id.to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "get_ticket_id_by_rfc_message_id",
+            resp.consumed_capacity(),
+            CapKind::Read,
+        );
+        let message_ids = resp
+            .items
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| Item(item).id())
+            .collect::<HydrationResult<Vec<String>>>()?;
+        let Some(message_id) = db::at_most_one(message_ids, || {
+            format!("Multiple ticket_messages share rfc_message_id {rfc_message_id}")
+        })?
+        else {
+            return Ok(None);
+        };
+
+        // Strongly consistent GetItem on the message itself, to read
+        // ticket_id back out — the index only projects the message's own id.
+        let messages: Vec<Option<db::TicketMessage>> = self
+            .get_records("ticket_message", &[message_id.as_str()])
+            .await?;
+        Ok(messages.into_iter().next().flatten().map(|m| m.ticket_id))
+    }
+
+    // ── processed_message ─────────────────────────────────────────────────
+
+    async fn claim_processed_message(
+        &self,
+        ses_message_id: &str,
+        now: u64,
+        expires_at: u64,
+    ) -> db::Result<bool> {
+        self.ensure_writable()?;
+        let resp = self
+            .client
+            .put_item()
+            .table_name(self.table_name("processed_message"))
+            .item(
+                "ses_message_id",
+                AttributeValue::S(ses_message_id.to_string()),
+            )
+            .item("processed_at", AttributeValue::N(now.to_string()))
+            .item("expires_at", AttributeValue::N(expires_at.to_string()))
+            .condition_expression("attribute_not_exists(ses_message_id)")
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await;
+        match resp {
+            Ok(r) => {
+                record_capacity(
+                    "claim_processed_message",
+                    r.consumed_capacity(),
+                    CapKind::Write,
+                );
+                Ok(true)
+            }
+            Err(SdkError::ServiceError(ref se))
+                if se.err().is_conditional_check_failed_exception() =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(db::Error::Infrastructure(sdk_err_msg(e))),
+        }
     }
 
     // ── webauthn_credential ───────────────────────────────────────────────

@@ -23,6 +23,7 @@ use microticket::graphql::RequestMetricsExt;
 use microticket::graphql::auth::{AuthGuard, AuthRequirement};
 use microticket::mockdb;
 use microticket::mockmail;
+use microticket::mockstorage;
 
 struct TestQuery;
 
@@ -46,6 +47,7 @@ fn build_test_schema() -> Schema<TestQuery, EmptyMutation, EmptySubscription> {
     let my_app = Arc::new(app::new(
         mockdb::Handler::new(),
         mockmail::Handler::new(),
+        mockstorage::Storage::new(),
         0,
     ));
     Schema::build(TestQuery, EmptyMutation, EmptySubscription)
@@ -83,6 +85,7 @@ async fn real_schema_guarded_field_with_no_credentials_is_unauthenticated() {
     let my_app = Arc::new(app::new(
         mockdb::Handler::new(),
         mockmail::Handler::new(),
+        mockstorage::Storage::new(),
         0,
     ));
     let webauthn = Arc::new(app::build_webauthn().expect("WebAuthn build failed"));

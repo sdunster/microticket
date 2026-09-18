@@ -15,6 +15,7 @@ use std::error::Error;
 
 use microticket::dynamodb;
 use microticket::mockmail;
+use microticket::mockstorage;
 use microticket::server;
 
 #[tokio::main]
@@ -22,5 +23,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let startup = server::init()?;
     tracing::warn!("poem-local: SES is mocked. Email will be logged instead of sent.");
     let db = dynamodb::Handler::new(&startup.db_prefix, !startup.cli.enable_mutations).await;
-    server::run(startup, db, mockmail::Handler::from_env()).await
+    server::run(
+        startup,
+        db,
+        mockmail::Handler::from_env(),
+        mockstorage::Storage::from_env(),
+    )
+    .await
 }

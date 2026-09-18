@@ -579,12 +579,10 @@ impl TicketMessageKind {
     }
 }
 
-/// One `ticket_message.attachments` entry. **Never populated by any write
-/// path in this step** — attachments arrive with inbound-mail storage (step
-/// 7) and the presigned-upload flow (`createAttachmentUpload`, also step 7).
-/// This type exists now, stored-but-unpopulated, so the shape is already
-/// correct when that lands; see `SCHEMA.md`.
-#[derive(Clone, Debug, PartialEq)]
+/// One `ticket_message.attachments` entry — populated by inbound-mail
+/// storage and by `replyToTicket`'s `attachmentKeys` (both step 7), via
+/// `TicketMessageUpdateShape::SetAttachments`. See `SCHEMA.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attachment {
     pub s3_key: String,
     pub filename: String,
@@ -641,7 +639,27 @@ impl HasID for TicketMessage {
 /// why the row is never rolled back when the send itself fails.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TicketMessageUpdateShape<'a> {
-    SetRfcMessageId { rfc_message_id: &'a str },
+    SetRfcMessageId {
+        rfc_message_id: &'a str,
+    },
+    /// Stamp the raw MIME's S3 key onto an `inbound` row. Set after the row
+    /// is created for the same reason `rfc_message_id` is: the pipeline
+    /// creates the row, then stores the raw bytes (or, for the Lambda, has
+    /// already relied on SES having stored them, and only needs to record
+    /// the key), so this can't be known at `create_ticket_message` time
+    /// without reordering the pipeline in a way that would leave a
+    /// half-written row on a storage failure.
+    SetRawS3Key {
+        raw_s3_key: &'a str,
+    },
+    /// Stamp the final `{s3_key, filename, content_type, size}` list onto a
+    /// message once every attachment has been uploaded (inbound) or moved
+    /// out of `pending/` (`replyToTicket`) — see [`Attachment`]'s doc
+    /// comment. An empty slice `REMOVE`s the attribute per the
+    /// omit-optional-attributes house rule.
+    SetAttachments {
+        attachments: &'a [Attachment],
+    },
 }
 
 /// `Sync` is required so a `&impl Handler` (including the erased handle returned by
@@ -832,6 +850,23 @@ pub trait Handler: Sync {
         filter: TicketListFilter,
         page: ListTicketsPage,
     ) -> impl Future<Output = Result<Vec<Ticket>>> + Send;
+    /// Resolve `{instance_id}#{number}` via `instance_number-index` to a
+    /// ticket id — the `[#{slug}-{number}]` subject-tag threading fallback
+    /// (step 7). `number` alone, paired with the *already-resolved*
+    /// `instance_id` (not the subject's slug, which is cosmetic once an
+    /// instance is known), is what the index is keyed on — see
+    /// `inbound::resolution::ResolutionPlan::subject_number`'s doc comment
+    /// for why this makes the result structurally incapable of resolving to
+    /// another tenant's ticket. Collapsed through [`at_most_one`]: the
+    /// composite key is meant to be unique by construction (one ticket per
+    /// instance+number), so more than one hit is a data-integrity error, not
+    /// a normal outcome. Callers still `GetItem` the returned id afterward
+    /// (this is a `KEYS_ONLY` index) for a strongly consistent read.
+    fn get_ticket_id_by_instance_number(
+        &self,
+        instance_id: &str,
+        number: u64,
+    ) -> impl Future<Output = Result<Option<String>>> + Send;
 
     // ── ticket_message ───────────────────────────────────────────────────
     /// `in_reply_to`/`references` are this new message's *own* threading
@@ -867,6 +902,37 @@ pub trait Handler: Sync {
         id: &str,
         change: TicketMessageUpdateShape<'_>,
     ) -> impl Future<Output = Result<()>> + Send;
+    /// Resolve an `In-Reply-To`/`References` id to the ticket it belongs to,
+    /// via `rfc_message_id-index` (a `KEYS_ONLY` index projecting the
+    /// `ticket_message`'s own id, not `ticket_id`) followed by a strongly
+    /// consistent `GetItem` on that message to read `ticket_id` back out —
+    /// the `In-Reply-To`/`References` threading fallback (step 7). `None`
+    /// when no message carries that id. Collapsed through [`at_most_one`]:
+    /// `rfc_message_id` is meant to be unique (it's the provider's own
+    /// message id), so more than one hit is a data-integrity error.
+    fn get_ticket_id_by_rfc_message_id(
+        &self,
+        rfc_message_id: &str,
+    ) -> impl Future<Output = Result<Option<String>>> + Send;
+
+    // ── processed_message ─────────────────────────────────────────────────
+    /// Inbound-mail idempotency: a conditional `PutItem`
+    /// (`attribute_not_exists(ses_message_id)`) written *before* any other
+    /// processing of a given SES message id. Returns `true` when this call
+    /// is the one that claimed it (processing should proceed); `false` when
+    /// another call already claimed it (a duplicate SQS delivery — the
+    /// caller exits successfully without reprocessing). See `SCHEMA.md`'s
+    /// "Known issues" register for the window this does and does not close:
+    /// marking *before* the work means a crash mid-processing drops the
+    /// message rather than duplicating it, a deliberate trade (SES retries
+    /// are common; double-posting a customer reply into a ticket is worse
+    /// than a rare dropped message that stays in S3 and the DLQ).
+    fn claim_processed_message(
+        &self,
+        ses_message_id: &str,
+        now: u64,
+        expires_at: u64,
+    ) -> impl Future<Output = Result<bool>> + Send;
 
     // ── webauthn_credential ───────────────────────────────────────────────
     fn create_webauthn_credential(

@@ -31,9 +31,10 @@ use microticket::db::Handler as _;
 use microticket::dynamodb;
 use microticket::graphql;
 use microticket::mockmail;
+use microticket::mockstorage;
 use serde_json::json;
 
-type TestApp = app::MyApp<dynamodb::Handler, mockmail::Handler>;
+type TestApp = app::MyApp<dynamodb::Handler, mockmail::Handler, mockstorage::Storage>;
 type TestSchema = graphql::MicroticketSchema<TestApp>;
 
 /// See `tests/auth_dynamodb_local.rs`'s identically-named helper for the
@@ -163,7 +164,12 @@ async fn make_ticket(
 }
 
 fn build_app_and_schema(db: dynamodb::Handler) -> (Arc<TestApp>, TestSchema) {
-    let my_app = Arc::new(app::new(db, mockmail::Handler::new(), 0));
+    let my_app = Arc::new(app::new(
+        db,
+        mockmail::Handler::new(),
+        mockstorage::Storage::new(),
+        0,
+    ));
     let webauthn = Arc::new(app::build_webauthn().expect("WebAuthn build failed"));
     let schema = graphql::build_schema(my_app.clone(), webauthn);
     (my_app, schema)

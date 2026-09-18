@@ -11,6 +11,7 @@ use lambda_http::{Error, run, service_fn, tracing};
 use microticket::app;
 use microticket::dynamodb;
 use microticket::graphql;
+use microticket::s3storage;
 use microticket::sesmail;
 use std::env;
 use std::sync::Arc;
@@ -25,6 +26,9 @@ async fn main() -> Result<(), Error> {
     microticket::turnstile::log_startup_state();
 
     let mailer = sesmail::Mailer::new().await;
+    let storage = s3storage::Storage::new()
+        .await
+        .expect("MAIL_BUCKET must be set for the API lambda's attachment upload/download");
 
     let read_only = env::var("READ_ONLY")
         .map(|v| v == "true" || v == "1")
@@ -32,7 +36,7 @@ async fn main() -> Result<(), Error> {
 
     let db_prefix = env::var("DB_PREFIX").expect("DB_PREFIX must be set for dynamodb backend");
     let db = dynamodb::Handler::new(&db_prefix, read_only).await;
-    let app = Arc::new(app::new(db, mailer, 0));
+    let app = Arc::new(app::new(db, mailer, storage, 0));
     let webauthn = Arc::new(app::build_webauthn().expect("WebAuthn build failed"));
     let schema = graphql::build_schema(app.clone(), webauthn);
     let handler = handler::Handler::new(app, schema);

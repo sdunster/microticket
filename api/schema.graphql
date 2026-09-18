@@ -6,6 +6,24 @@ enum AddressKindType {
 	WILDCARD
 }
 
+type Attachment {
+	filename: String!
+	contentType: String!
+	size: Int!
+	downloadUrl: String!
+}
+
+"""
+A presigned upload slot for `createAttachmentUpload`: `key` is what the
+client later passes back in `replyToTicket(attachmentKeys:)`;
+`uploadUrl` is a short-lived presigned PUT the client uploads the file's
+bytes to directly (never through this API).
+"""
+type AttachmentUpload {
+	key: String!
+	uploadUrl: String!
+}
+
 """
 An `inbound_address` row, exposed over GraphQL. Only reachable through
 `Instance.inboundAddresses`, which is owner-guarded — see that field's doc
@@ -134,13 +152,42 @@ type MutationRoot {
 	"""
 	submitTicket(subject: String!, body: String!): Ticket!
 	"""
+	Mint a presigned S3 PUT into `pending/{instance_id}/{nanoid}/{filename}`
+	for an agent to upload an attachment to, ahead of attaching it to a
+	reply with `replyToTicket(attachmentKeys:)`. Member-only, using the
+	same per-ticket authorization as every other ticket mutation (the
+	`ticketId` argument exists only to derive — and check membership of
+	— the owning instance; the key itself is instance-scoped, not
+	ticket-scoped, since the upload happens before any message row
+	exists to scope it to). The upload is not attached to anything until
+	`replyToTicket` moves it; an upload that's never attached expires out
+	of `pending/` on its own (see the build plan's `s3_mail.tf` sketch —
+	a 1-day lifecycle rule on that prefix).
+	"""
+	createAttachmentUpload(ticketId: ID!, filename: String!, contentType: String!): AttachmentUpload!
+	"""
 	Reply to a ticket as a member (agent/owner): persists the reply
 	(`kind: REPLY`), bumps the ticket's activity, builds the outbound
 	RFC 5322 message (`crate::outbound`) and sends it via
 	`crate::mail::Handler::send_raw`, then stamps the returned message id
 	onto the row so a further reply — from either side — threads
-	correctly. Attachments are `TODO(step 7)` — no `attachmentKeys`
-	argument exists yet.
+	correctly.
+	
+	`attachmentKeys`, when given, are `pending/…` keys returned by prior
+	`createAttachmentUpload` calls. Each is validated with
+	`inbound::attachments::is_pending_key_for_instance` against *this*
+	ticket's instance before being moved into place — a caller cannot
+	attach an arbitrary S3 key, including another instance's pending
+	upload, this way. Moved (and the message row's `attachments`
+	stamped) *before* the send is attempted, so a send failure still
+	leaves a fully-formed, attachment-bearing row behind — consistent
+	with the "the row survives" reasoning below. **Not embedded in the
+	outbound MIME message itself** — that would mean fetching every
+	attachment's bytes back out of storage and re-encoding them into the
+	raw message on every reply, which is a real feature but a separate
+	one from wiring up storage/move/record; deferred rather than
+	half-built here. The stored attachment is still visible (and
+	downloadable) in the thread view either way.
 	
 	**On a send failure, this mutation returns `Err` — but the
 	`ticket_message` row it already created is *not* rolled back.**
@@ -157,7 +204,7 @@ type MutationRoot {
 	primary effect already succeeded by the time mail is attempted, so a
 	failure there is logged, not surfaced.
 	"""
-	replyToTicket(ticketId: ID!, body: String!): TicketMessage!
+	replyToTicket(ticketId: ID!, body: String!, attachmentKeys: [String!]): TicketMessage!
 	"""
 	Add an internal note to a ticket. Member-only, same per-ticket
 	authorization as every other ticket mutation. Stored as `kind: NOTE`,
@@ -456,6 +503,7 @@ type TicketMessage {
 	rfcMessageId: String
 	inReplyTo: String
 	createdAt: Int!
+	attachments: [Attachment!]!
 }
 
 """

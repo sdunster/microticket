@@ -120,8 +120,13 @@ local-clear:
 local-cli:
 	$(NOT_YET)
 
+# FRESH=1 replays a fixture as a brand-new delivery. Without it the idempotency
+# key is the file's own sha256, so a second run of the same fixture is correctly
+# a no-op -- useful for exercising that path, confusing when you just want to
+# see the fixture land again.
 local-mail:
-	$(NOT_YET)
+	@test -n "$(FILE)" || { echo "usage: make local-mail FILE=local/mail/some-fixture.eml [FRESH=1]"; exit 1; }
+	@$(LOCAL_ENV) cd api && cargo run --quiet --bin cli -- mail process --file ../$(FILE) $(if $(FRESH),--fresh,)
 
 # ── Working targets ─────────────────────────────────────────────────────────────
 

@@ -1,0 +1,24 @@
+From: New Attacher <new-attacher@example.com>
+To: billing@acme.microticket.test
+Subject: Diagnostic report attached
+Date: Thu, 18 Sep 2025 12:20:00 +0000
+Message-ID: <new-attacher-1@mail.example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BOUNDARY123"
+
+--BOUNDARY123
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Attaching the diagnostic report you asked for.
+
+New Attacher
+
+--BOUNDARY123
+Content-Type: text/plain; name="diagnostic report.txt"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="diagnostic report.txt"
+
+RGlhZ25vc3RpYyByZXBvcnQgY29udGVudHMuCkJ1aWxkOiA0LjIuMQpPUzogbWFjT1MgMTQK
+
+--BOUNDARY123--

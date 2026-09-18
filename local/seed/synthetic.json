@@ -404,13 +404,14 @@
         "created_at": { "N": "1735700400" }
       },
       {
-        "_comment": "Acme #5's opening message.",
+        "_comment": "Acme #5's opening message. rfc_message_id is set (unlike every other seeded message) so local/mail/reply-via-in-reply-to.eml has something real to thread onto via rfc_message_id-index — see that fixture and api/src/inbound/pipeline.rs.",
         "id": { "S": "SeedMsg00007" },
         "ticket_id": { "S": "SeedTick0005" },
         "kind": { "S": "inbound" },
         "from_email": { "S": "requester5@example.com" },
         "to_emails": { "SS": ["support@acme.microticket.test"] },
         "body_text": { "S": "I never received the password reset email, can you check?" },
+        "rfc_message_id": { "S": "<seed-msg-acme-5@ap-southeast-2.amazonses.com>" },
         "created_at": { "N": "1735704000" }
       },
       {

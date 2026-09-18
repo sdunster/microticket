@@ -15,6 +15,14 @@ path = "src/bin/export-schema.rs"
 name = "api-lambda"
 path = "src/bin/lambda/main.rs"
 
+# Same auto-discovery quirk as api-lambda: src/bin/inbound-mail/main.rs would
+# otherwise be named "inbound-mail", not "inbound-mail-lambda" — matching
+# `cargo lambda build --bin inbound-mail-lambda` in CI and Terraform's
+# `handler = "bootstrap"` setup.
+[[bin]]
+name = "inbound-mail-lambda"
+path = "src/bin/inbound-mail/main.rs"
+
 [dependencies]
 anyhow = "1.0.99"
 async-graphql = { version = "7.0.17", features = ["dataloader"] }
@@ -27,6 +35,7 @@ aws-sdk-dynamodb = { version = "1.89.0", default-features = false, features = ["
 aws-sdk-s3 = { version = "1.89.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-sesv2 = { version = "1.89.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-sqs = { version = "1.89.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws_lambda_events = { version = "1.2.0", default-features = false, features = ["sqs", "ses"] }
 lambda_http = "1.2"
 lambda_runtime = "1.2"
 base64 = "0.22.1"

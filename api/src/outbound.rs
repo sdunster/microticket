@@ -14,10 +14,25 @@
 //!
 //! **The step 6/7 contract**: [`reply_to_address`] builds the `Reply-To`
 //! this module stamps on every outbound message, and it must parse back to
-//! the same instance and reply token through `inbound::routing`'s `+tag`
-//! stripping (step 7). [`tests::reply_to_address_round_trips_through_inbound_routing`]
+//! the same instance, ticket, and reply token through
+//! `inbound::routing`'s `+tag` stripping and `inbound::resolution`'s tag
+//! parsing (step 7). [`tests::reply_to_address_round_trips_through_inbound_routing`]
 //! is that promise, pinned. If it ever breaks, a reply silently becomes a
 //! new ticket instead of threading onto the existing one.
+//!
+//! **Tag format: `+t{ticket_id}.{reply_token}`, not the originally-planned
+//! `+t{reply_token}`.** The build plan specified the reply tag as bare
+//! `+t{reply_token}`, looked up by scanning for a ticket with that token —
+//! but `reply_token` has no GSI, and adding one would make resolution depend
+//! on an *eventually consistent* index: an auto-reply arriving a second
+//! after a ticket is created could race the index and wrongly open a second
+//! ticket instead of threading onto the first. Carrying `ticket_id` in the
+//! tag turns resolution into a strongly-consistent `GetItem` on the ticket's
+//! primary key, with no GSI and no consistency window, followed by a
+//! constant-time comparison of `reply_token` (`inbound::resolution::constant_time_eq`)
+//! — which remains the actual security boundary: without it, anyone able to
+//! guess or enumerate a 12-char ticket id could email into someone else's
+//! ticket. See `CLAUDE.md` and `SCHEMA.md` for the same note.
 
 use anyhow::{Context, Result, anyhow, bail};
 use mail_builder::MessageBuilder;
@@ -87,7 +102,7 @@ pub fn threading_for(messages: &[db::TicketMessage]) -> Threading {
 /// (`*@domain`), there is no literal deliverable address configured for it
 /// at all; by convention this synthesizes `support@{domain}` on the
 /// earliest-created wildcard's domain. That is not an arbitrary made-up
-/// address: `support+t{token}@{domain}` still round-trips correctly through
+/// address: `support+t{ticket_id}.{token}@{domain}` still round-trips correctly through
 /// `inbound::routing` (no exact match, falls through to the `*@domain`
 /// wildcard row), so a reply sent from it threads back exactly as if a real
 /// `support@{domain}` row existed. An instance with no inbound addresses at
@@ -108,15 +123,15 @@ pub fn primary_inbound_address(addresses: &[db::InboundAddress]) -> Option<Strin
     Some(format!("support@{domain}"))
 }
 
-/// `{local}+t{reply_token}@{domain}`, built from a concrete `from_address`
-/// (as returned by [`primary_inbound_address`]) — the `Reply-To` every
-/// outbound message carries, and the step 6/7 contract this module's doc
-/// comment describes.
-pub fn reply_to_address(from_address: &str, reply_token: &str) -> Result<String> {
+/// `{local}+t{ticket_id}.{reply_token}@{domain}`, built from a concrete
+/// `from_address` (as returned by [`primary_inbound_address`]) — the
+/// `Reply-To` every outbound message carries, and the step 6/7 contract this
+/// module's doc comment describes.
+pub fn reply_to_address(from_address: &str, ticket_id: &str, reply_token: &str) -> Result<String> {
     let (local, domain) = from_address
         .split_once('@')
         .ok_or_else(|| anyhow!("{from_address:?} is not a valid address (missing '@')"))?;
-    Ok(format!("{local}+t{reply_token}@{domain}"))
+    Ok(format!("{local}+t{ticket_id}.{reply_token}@{domain}"))
 }
 
 /// Whether `candidate` is one of this instance's own inbound addresses —
@@ -139,14 +154,31 @@ fn is_own_address(addresses: &[db::InboundAddress], candidate: &str) -> bool {
 /// slug (`[#ridge-line-42]`) still parses as slug `ridge-line`, number `42`
 /// rather than failing or splitting in the wrong place.
 pub fn parse_subject_tag(subject: &str) -> Option<(String, u64)> {
-    let inner = subject.trim_start().strip_prefix("[#")?;
-    let (tag, _rest) = inner.split_once(']')?;
-    let (slug, number) = tag.rsplit_once('-')?;
-    if slug.is_empty() {
-        return None;
+    // The tag is searched for *anywhere* in the subject, not just at the
+    // start. A customer's reply almost never keeps it leading: mail clients
+    // prepend `Re:`, `Fwd:`, `AW:`, `Re[2]:` and worse, and a human editing a
+    // subject line will happily leave the tag mid-string. Anchoring this to
+    // the start would mean the subject-tag fallback never fired for the most
+    // common shape of reply there is, silently, with replies opening
+    // duplicate tickets instead of threading.
+    //
+    // A false positive (a subject that merely happens to contain something
+    // shaped like a tag) is bounded: the number still has to match a real
+    // ticket in the resolved instance, and a tag naming another tenant's
+    // ticket is rejected by the caller.
+    let mut rest = subject;
+    while let Some(start) = rest.find("[#") {
+        let inner = &rest[start + 2..];
+        if let Some((tag, _)) = inner.split_once(']')
+            && let Some((slug, number)) = tag.rsplit_once('-')
+            && !slug.is_empty()
+            && let Ok(number) = number.parse()
+        {
+            return Some((slug.to_string(), number));
+        }
+        rest = inner;
     }
-    let number = number.parse().ok()?;
-    Some((slug.to_string(), number))
+    None
 }
 
 /// `Subject: [#{slug}-{number}] {subject}` — without double-tagging. If
@@ -261,7 +293,7 @@ pub fn build_outbound(
             instance.id
         )
     })?;
-    let reply_to = reply_to_address(&from_address, &ticket.reply_token)?;
+    let reply_to = reply_to_address(&from_address, &ticket.id, &ticket.reply_token)?;
 
     let to: Vec<String> = requester_emails
         .iter()
@@ -403,9 +435,14 @@ mod tests {
     /// onto the one it replied to.
     #[test]
     fn reply_to_address_round_trips_through_inbound_routing() {
+        use crate::inbound::resolution;
+
         let from = "support@acme.microticket.test";
-        let reply_to = reply_to_address(from, "abc123token").unwrap();
-        assert_eq!(reply_to, "support+tabc123token@acme.microticket.test");
+        let reply_to = reply_to_address(from, "TickET12345A", "abc123TOKEN").unwrap();
+        assert_eq!(
+            reply_to,
+            "support+tTickET12345A.abc123TOKEN@acme.microticket.test"
+        );
 
         let n = routing::normalize_recipient(&reply_to);
         assert_eq!(
@@ -414,11 +451,13 @@ mod tests {
         );
         assert_eq!(
             n.tag.as_deref(),
-            Some("tabc123token"),
-            "the tag must carry the reply token behind a 't' marker"
+            Some("tTickET12345A.abc123TOKEN"),
+            "the tag must carry the ticket id and reply token behind a 't' marker, case intact"
         );
-        let recovered_token = n.tag.as_deref().and_then(|t| t.strip_prefix('t'));
-        assert_eq!(recovered_token, Some("abc123token"));
+        let parsed = resolution::parse_reply_tag(n.tag.as_deref().unwrap())
+            .expect("tag must parse as a reply tag");
+        assert_eq!(parsed.ticket_id, "TickET12345A");
+        assert_eq!(parsed.reply_token, "abc123TOKEN");
 
         // And it must resolve through the real routing table, not just
         // parse cleanly: build a matcher over exactly the address we sent
@@ -440,7 +479,7 @@ mod tests {
         let from = primary_inbound_address(&addresses).unwrap();
         assert_eq!(from, "support@ridgeline.microticket.test");
 
-        let reply_to = reply_to_address(&from, "tok").unwrap();
+        let reply_to = reply_to_address(&from, "tick1", "tok").unwrap();
         let known: std::collections::HashSet<&str> =
             ["*@ridgeline.microticket.test"].into_iter().collect();
         let hit = routing::resolve(&[reply_to.as_str()], |k| known.contains(k));
@@ -494,6 +533,46 @@ mod tests {
     }
 
     // ── subject tag round trip ───────────────────────────────────────────
+
+    #[test]
+    fn subject_tag_is_found_after_a_reply_prefix() {
+        // The shape that actually arrives from a customer's mail client. This
+        // is the regression test for the fallback having been anchored to the
+        // start of the subject, where it never matched a real reply.
+        for subject in [
+            "Re: [#acme-42] Printer on fire",
+            "RE: [#acme-42] Printer on fire",
+            "Fwd: [#acme-42] Printer on fire",
+            "Re[2]: [#acme-42] Printer on fire",
+            "AW: Re: [#acme-42] Printer on fire",
+            "   Re: [#acme-42] Printer on fire",
+        ] {
+            assert_eq!(
+                parse_subject_tag(subject),
+                Some(("acme".to_string(), 42)),
+                "failed to find the tag in {subject:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subject_tag_skips_a_malformed_candidate_and_finds_a_later_one() {
+        assert_eq!(
+            parse_subject_tag("Re: [#nonsense] and [#acme-42] Printer on fire"),
+            Some(("acme".to_string(), 42))
+        );
+    }
+
+    #[test]
+    fn subject_with_no_tag_anywhere_is_none() {
+        assert_eq!(parse_subject_tag("Re: Printer on fire [not a tag]"), None);
+    }
+
+    #[test]
+    fn tag_subject_does_not_double_tag_a_reply_that_kept_its_tag() {
+        let already = "Re: [#acme-42] Printer on fire";
+        assert_eq!(tag_subject("acme", 42, already), already);
+    }
 
     #[test]
     fn subject_tag_round_trips() {
@@ -697,7 +776,7 @@ mod tests {
         let reply_to = msg.reply_to().unwrap().first().unwrap();
         assert_eq!(
             reply_to.address(),
-            Some("support+tabc123token@acme.microticket.test")
+            Some("support+ttick1.abc123token@acme.microticket.test")
         );
 
         let to = msg.to().unwrap().first().unwrap();
