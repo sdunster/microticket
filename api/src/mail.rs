@@ -23,8 +23,40 @@ use std::future::Future;
 /// inbound address}>`, `Reply-To` carrying the ticket's reply token) via
 /// [`crate::outbound`] and `send_raw`, computed fresh per send rather than
 /// living behind a crate-wide constant.
-pub const FROM: &str = "no-reply@microticket.test";
-pub const REPLY_TO: &str = "support@microticket.test";
+/// Fallback sender for system mail — login codes and anything else not tied to
+/// a particular instance. `.test` is reserved (RFC 6761) and can never be
+/// registered or verified with a mail provider, which is deliberate: it makes a
+/// deployment that forgot to configure [`MAIL_FROM_VAR`] fail loudly at the
+/// provider instead of quietly sending from a domain someone else owns.
+pub const FROM_FALLBACK: &str = "no-reply@microticket.test";
+pub const REPLY_TO_FALLBACK: &str = "support@microticket.test";
+
+/// Env var naming the address system mail is sent from. Set it to an address on
+/// a domain verified with the mail provider — in a deployed environment that is
+/// the same domain inbound mail arrives on.
+///
+/// Instance-scoped mail (ticket replies, notifications) does NOT use this: it
+/// sends from the instance's own inbound address so replies thread back to the
+/// right tenant. See `outbound::primary_inbound_address`.
+pub const MAIL_FROM_VAR: &str = "MAIL_FROM";
+pub const MAIL_REPLY_TO_VAR: &str = "MAIL_REPLY_TO";
+
+/// The address system mail is sent from, or the reserved-domain fallback.
+pub fn system_from() -> String {
+    std::env::var(MAIL_FROM_VAR)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| FROM_FALLBACK.to_string())
+}
+
+/// Reply-To for system mail. Defaults to the sender, so a reply goes somewhere
+/// real rather than to a second unconfigured placeholder.
+pub fn system_reply_to() -> String {
+    std::env::var(MAIL_REPLY_TO_VAR)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(system_from)
+}
 
 /// Redirect every outgoing email to this address instead of its real recipient.
 ///
@@ -106,6 +138,16 @@ pub trait Handler: Sync {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn system_from_falls_back_to_the_reserved_domain_when_unset() {
+        // Guarded by the same mutex the other env-touching tests use; see
+        // below. The point of the assertion is that the fallback is on a
+        // domain that cannot be registered, so an unconfigured deployment is
+        // rejected by the provider rather than sending as someone else.
+        assert!(super::FROM_FALLBACK.ends_with(".test"));
+        assert!(super::REPLY_TO_FALLBACK.ends_with(".test"));
+    }
+
     use super::*;
 
     // These tests share the process-global `MAIL_OVERRIDE_TO` env var (as does

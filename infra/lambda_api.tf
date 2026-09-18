@@ -12,6 +12,10 @@ resource "aws_lambda_function" "api" {
       {
         DB_PREFIX = var.db_prefix
         # api/src/s3storage.rs: bucket for presigned attachment upload/download.
+        # System mail (login codes) sends from here. Instance-scoped mail — ticket
+        # replies and notifications — sends from the instance's own inbound
+        # address instead, so replies thread back to the right tenant.
+        MAIL_FROM   = "no-reply@${var.support_domain}"
         MAIL_BUCKET = aws_s3_bucket.mail.id
         # api/src/app.rs: WebAuthn relying-party id/origin. Both default to
         # localhost values meant only for `make dev`, so both must be set

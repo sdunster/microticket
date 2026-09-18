@@ -26,7 +26,7 @@ use aws_sdk_sesv2::Client;
 use aws_sdk_sesv2::primitives::Blob;
 use aws_sdk_sesv2::types::{Body, Content, Destination, EmailContent, Message, RawMessage};
 
-use crate::mail::{self, FROM, REPLY_TO};
+use crate::mail;
 
 pub struct Mailer {
     client: Client,
@@ -69,10 +69,10 @@ impl Mailer {
         let content = EmailContent::builder().simple(message).build();
         self.client
             .send_email()
-            .from_email_address(FROM)
+            .from_email_address(mail::system_from())
             .destination(destination)
             .content(content)
-            .reply_to_addresses(REPLY_TO.to_string())
+            .reply_to_addresses(mail::system_reply_to().to_string())
             .send()
             .await
             .with_context(|| format!("failed to send email to {}", to))?;
