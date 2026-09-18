@@ -36,9 +36,12 @@ make dev-local   # DynamoDB Local + mocked SES/SQS, API :8000, Relay watch, web 
 Prerequisites: Rust (via [rustup](https://rustup.rs)), Node.js >= 22, and — for `make dev`
 only — AWS credentials.
 
-> **Known gap:** bounce and complaint handling for outbound mail is not yet implemented. SES
-> bounce/complaint notifications are not consumed, so a bad address will not currently be flagged
-> or suppressed.
+> **Known gaps.** Bounce and complaint handling for outbound mail is not implemented — SES
+> notifications are not consumed, so a bad address is not flagged or suppressed
+> ([#6](../../issues/6)). Ticket message threads are unpaged ([#1](../../issues/1)), there is no
+> ticket search ([#8](../../issues/8)), and adding a member needs CLI access rather than an invite
+> ([#7](../../issues/7)). The full list is in the
+> [issue tracker](../../issues); `SCHEMA.md` carries the data-model-level register.
 
 ---
 

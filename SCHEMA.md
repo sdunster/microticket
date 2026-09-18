@@ -382,6 +382,13 @@ and does not close.
 
 ## Known issues and risks
 
+> Each entry below that is worth acting on has a GitHub issue: [#4](../../issues/4) message
+> ordering within a second, [#9](../../issues/9) inbound mark-before-work, [#10](../../issues/10)
+> slug uniqueness, [#12](../../issues/12) ticket-number gaps. This register is the technical
+> detail; the issues are where the decision to act gets made. Keep them in step — an entry that
+> gets fixed should be struck through here rather than deleted, so the record of what was once
+> wrong survives.
+
 This section covers correctness bugs, race conditions, and consistency gaps that follow from the
 design above, called out ahead of the code that would trigger them landing (steps 5–7 of the
 build plan). Update it as steps land, rather than leaving it purely speculative.

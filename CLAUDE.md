@@ -56,9 +56,63 @@ local setup, and `SCHEMA.md` for the data model.
     the time mail is attempted. See `reply_to_ticket`'s doc comment in `graphql/mutations.rs` for
     the full reasoning.
 
+- **Rows reference an instance by `id`, never by `slug`.** Slugs are editable and exist for
+  humans; `id` is the foreign key every other table stores. Anything taking an instance from user
+  input (the CLI's `--instance`, an argument, a path segment) must resolve it through
+  `db::resolve_instance_id`, which accepts either and always returns the id. Skipping that step
+  does not fail anywhere: the row is written, listings that look up by the same wrong string find
+  it again, and mail still routes — it only surfaces later as an owner whose membership exists but
+  who sees no instances, because a resolver looked the instance up by id and found nothing. There
+  is a regression test in `tests/inbound_routing_dynamodb_local.rs`.
+
+- **Two senders, deliberately.** System mail (login codes — anything not scoped to an instance)
+  sends from `MAIL_FROM`. Instance mail (replies, notifications) sends from that instance's own
+  primary inbound address, which is what makes a reply thread back to the right tenant. The
+  `FROM_FALLBACK` constant is on a reserved `.test` domain on purpose: a deployment that forgets to
+  set `MAIL_FROM` should be refused by the provider rather than quietly send from a domain someone
+  else owns.
+
+- **The reply tag carries both ids: `+t{ticket_id}.{reply_token}`.** Not the token alone. The
+  token has no index, so resolving by it would need a GSI — and a GSI is eventually consistent, so
+  an autoresponder arriving a second after a ticket is created would miss it and open a duplicate.
+  Ticket id first makes it a strongly consistent `GetItem`; the token is then compared in constant
+  time, and is what stops someone emailing into an arbitrary ticket by guessing a short id.
+  `outbound.rs` generates this address and `inbound/routing.rs` parses it — a test asserts the
+  round trip, and it is the contract between the two halves of the mail pipeline.
+
+- **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
+  every `.await`.** The process environment is global and tests run in parallel, so a test that
+  sets a var, releases its lock, and only then awaits leaves a window for another test to change
+  it underneath. That failure is invisible locally and shows up in CI. `clippy::await_holding_lock`
+  objects to holding a *std* guard across an await — the answer is a tokio mutex, not a shorter
+  critical section. See `mail::OVERRIDE_TO_ENV_LOCK` and `turnstile`'s `ENV_LOCK`.
+
+## Deployment notes
+
+- **DNS is not managed by Terraform.** The parent zone lives in a different AWS account, so
+  `infra/dns.tf` computes every record that must exist and exposes them as the
+  `dns_records_required` output for manual creation. Consequence: the first apply blocks on
+  `aws_acm_certificate_validation` waiting for a record it cannot create. That is a documented
+  two-phase sequence, not a hang — see `DEVELOPMENT.md` §9.
+- **Terraform owns the Lambda functions; CI owns their code.** Each function points at
+  `placeholder.zip` with `ignore_changes = [filename, source_code_hash]`, so an apply never fights
+  a deploy and the deploy role needs neither `iam:PassRole` nor `lambda:CreateFunction`.
+- **The GitHub OIDC subject may be immutable.** GitHub can issue
+  `repo:owner@<owner_id>/name@<repo_id>:ref:...` instead of `repo:owner/name:ref:...`, and which
+  you get is a repository setting. The trust policy accepts both. If a deploy ever fails with
+  `Not authorized to perform sts:AssumeRoleWithWebIdentity` while the policy looks correct, read
+  the actual `sub` out of the CloudTrail `AssumeRoleWithWebIdentity` event rather than guessing —
+  that is how this was found. Never widen it to a `StringLike` wildcard to make a deploy pass.
+- **The Terraform state bucket is created by hand**, not by Terraform — it has to exist before
+  `init` can store state in it. `DEVELOPMENT.md` §9.2 has the commands.
+- **`make check` validates Terraform under a throwaway `TF_DATA_DIR`.** Once an operator has run a
+  real `init` against the S3 backend, a plain `init -backend=false` does not undo it and `validate`
+  starts demanding credentials it has no business needing for a static check.
+
 ## Scope note
 
-This repo is being built in the numbered steps described in the project's build plan (scaffold →
-API foundations → auth → instances/memberships → tickets → outbound mail → inbound mail → web →
-infra/deploy). Don't reach ahead into a later step's business logic while working on an earlier
-one — check what's already in the tree before assuming something doesn't exist yet.
+The build plan's numbered steps (scaffold → API foundations → auth → instances/memberships →
+tickets → outbound mail → inbound mail → web → infra/deploy) are all complete and deployed.
+`SCHEMA.md`'s "Known issues and risks" register is the live list of things known to be imperfect;
+open GitHub issues track the rest. Check what is already in the tree before assuming something
+does not exist.
