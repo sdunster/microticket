@@ -39,6 +39,10 @@ variable "allowed_origins" {
 variable "alert_email" {
   description = "Email address subscribed to the operational alert SNS topic"
   type        = string
+
+  # Optional: leave empty to create the alerts topic and alarms with no
+  # subscriber yet. See monitoring.tf.
+  default = ""
 }
 
 variable "inbound_retention_days" {

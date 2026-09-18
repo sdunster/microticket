@@ -2,7 +2,13 @@ resource "aws_sns_topic" "alerts" {
   name = "microticket-alerts"
 }
 
+# Optional, so the stack can be stood up before anyone has decided where alerts
+# should land. An email subscription is outward-facing — AWS mails the address a
+# confirmation the moment it is created — so pointing it at a placeholder is
+# worse than not creating it. Set alert_email later and re-apply; the topic and
+# every alarm already exist, so nothing else changes.
 resource "aws_sns_topic_subscription" "alerts_email" {
+  count     = var.alert_email == "" ? 0 : 1
   topic_arn = aws_sns_topic.alerts.arn
   protocol  = "email"
   endpoint  = var.alert_email
