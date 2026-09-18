@@ -636,6 +636,22 @@ async fn attachment_is_stored_and_recorded_on_the_message() {
     let messages = db.list_ticket_messages(&ticket_id).await.unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].attachments.len(), 1);
+
+    // The denormalised flag the ticket list's paperclip reads. Without it a
+    // list row has to fetch every message of every ticket on the page just to
+    // decide whether to draw an icon.
+    let ticket = db
+        .get_tickets(&[ticket_id.as_str()])
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("ticket exists");
+    assert!(
+        ticket.has_attachments,
+        "storing an attachment must mark the ticket"
+    );
     let attachment = &messages[0].attachments[0];
     assert_eq!(attachment.filename, "screenshot.png");
     assert!(

@@ -448,6 +448,12 @@ pub struct Ticket {
     pub created_at: u64,
     pub updated_at: u64,
     pub last_activity_at: u64,
+    /// Denormalised: true once any message on this ticket carries an
+    /// attachment. Exists so a list row can show a paperclip without reading
+    /// every message of every ticket on the page — which is one extra query
+    /// per row, on the screen agents look at most. Never cleared: an
+    /// attachment that existed is a fact about the thread's history.
+    pub has_attachments: bool,
 }
 
 impl HasID for Ticket {
@@ -503,6 +509,9 @@ pub enum TicketUpdateShape<'a> {
     Touch {
         now: u64,
     },
+    /// Record that this ticket has at least one attachment somewhere in its
+    /// thread. Idempotent, and one-way: see [`Ticket::has_attachments`].
+    MarkHasAttachments,
 }
 
 /// Keyset pagination cursor for a ticket listing: `{last_activity_at}:{id}`,

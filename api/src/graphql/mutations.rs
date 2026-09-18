@@ -1013,6 +1013,12 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
                     },
                 )
                 .await?;
+            // Denormalise onto the ticket so a list row can show a paperclip
+            // without reading every message of every ticket on the page.
+            self.app
+                .db()
+                .update_ticket(&ticket.id, db::TicketUpdateShape::MarkHasAttachments)
+                .await?;
         }
 
         // From here on, the row exists no matter what happens next — see

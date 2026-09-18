@@ -664,6 +664,16 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> Ticket<A> {
         self.rec.last_activity_at as i64
     }
 
+    /// Whether any message in this ticket's thread carries an attachment.
+    ///
+    /// Denormalised onto the ticket precisely so a list row can show a
+    /// paperclip without fetching `messages { attachments }` for every row on
+    /// the page — that is one extra query per ticket, on the screen agents
+    /// spend their day on.
+    async fn has_attachments(&self) -> bool {
+        self.rec.has_attachments
+    }
+
     /// Every message on this ticket, oldest first — the thread view's data
     /// source. **Internal notes (`kind: NOTE`) are filtered out for anyone
     /// but a member of this ticket's instance** — enforced here, not only in
@@ -972,6 +982,7 @@ mod ticket_cursor_tests {
             created_at: 1_000,
             updated_at: 1_000,
             last_activity_at: 1_234_567,
+            has_attachments: false,
         };
         let cursor = encode_ticket_cursor(&t);
         assert_eq!(cursor, "1234567:tick0000001");

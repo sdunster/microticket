@@ -16,12 +16,7 @@ const ticketRowFragment = graphql`
       id
       name
     }
-    messages {
-      id
-      attachments {
-        filename
-      }
-    }
+    hasAttachments
   }
 `;
 
@@ -48,18 +43,13 @@ function AttachmentPaperclip() {
  * One row of a ticket list: what an agent triages on — number, subject,
  * requester, assignee, status, last activity, and an attachment indicator.
  *
- * `messages { attachments { filename } }` is the only way the schema
- * exposes "does this ticket have an attachment" — `Ticket` has no
- * lightweight `hasAttachments` field, so this fetches every message's
- * attachment list (not bodies) for every row on the page. Acceptable for a
- * helpdesk queue's page sizes, but it is one extra DynamoDB query per row;
- * see the step 8b report for the tradeoff.
+ * The paperclip reads `hasAttachments`, a denormalised flag on the ticket
+ * itself. Deriving it from `messages { attachments }` instead would cost one
+ * extra DynamoDB query per row per page — on the screen agents spend their
+ * day on.
  */
 export function TicketRow({ ticket }: { ticket: TicketRow_ticket$key }) {
   const data = useFragment(ticketRowFragment, ticket);
-  const attachmentFilenames = data.messages.flatMap((m) =>
-    m.attachments.map((a) => a.filename),
-  );
   const [primaryRequester, ...moreRequesters] = data.requesterEmails;
 
   return (
@@ -75,8 +65,8 @@ export function TicketRow({ ticket }: { ticket: TicketRow_ticket$key }) {
         <span className="truncate font-medium text-ink-strong">
           {data.subject}
         </span>
-        {attachmentFilenames.length > 0 && (
-          <span title={`Attachments: ${attachmentFilenames.join(", ")}`}>
+        {data.hasAttachments && (
+          <span title="Has attachments">
             <AttachmentPaperclip />
           </span>
         )}

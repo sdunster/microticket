@@ -402,6 +402,7 @@ mod tests {
             created_at: 1_000,
             updated_at: 1_000,
             last_activity_at: 1_000,
+            has_attachments: false,
         }
     }
 

@@ -442,6 +442,15 @@ type Ticket {
 	updatedAt: Int!
 	lastActivityAt: Int!
 	"""
+	Whether any message in this ticket's thread carries an attachment.
+	
+	Denormalised onto the ticket precisely so a list row can show a
+	paperclip without fetching `messages { attachments }` for every row on
+	the page — that is one extra query per ticket, on the screen agents
+	spend their day on.
+	"""
+	hasAttachments: Boolean!
+	"""
 	Every message on this ticket, oldest first — the thread view's data
 	source. **Internal notes (`kind: NOTE`) are filtered out for anyone
 	but a member of this ticket's instance** — enforced here, not only in

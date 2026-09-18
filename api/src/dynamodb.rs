@@ -414,6 +414,7 @@ impl TryInto<db::Ticket> for Item {
                 .i64_field("last_activity_at")?
                 .ok_or_else(|| anyhow!("Ticket missing last_activity_at"))?
                 as u64,
+            has_attachments: self.bool_field("has_attachments")?.unwrap_or(false),
         })
     }
 }
@@ -1700,6 +1701,7 @@ impl db::Handler for Handler {
             created_at: now,
             updated_at: now,
             last_activity_at: now,
+            has_attachments: false,
         })
     }
 
@@ -1891,6 +1893,28 @@ impl db::Handler for Handler {
                     .map_err(|e| map_update_err(e, format!("Ticket {id}")))?;
                 record_capacity(
                     "update_ticket_remove_cc",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::TicketUpdateShape::MarkHasAttachments => {
+                // Written only when true, never as `false` — the project's
+                // omit-don't-null rule. A ticket with no attachments simply has
+                // no such attribute, and hydration reads that as false.
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET has_attachments = :t")
+                    .expression_attribute_values(":t", AttributeValue::Bool(true))
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Ticket {id}")))?;
+                record_capacity(
+                    "update_ticket_mark_has_attachments",
                     resp.consumed_capacity(),
                     CapKind::Write,
                 );

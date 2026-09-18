@@ -332,6 +332,10 @@ where
                 },
             )
             .await?;
+        // Denormalise onto the ticket — see Ticket::has_attachments.
+        app.db()
+            .update_ticket(&ticket.id, db::TicketUpdateShape::MarkHasAttachments)
+            .await?;
     }
 
     // 9. Notify — forward this activity to every requester/CC who wasn't
