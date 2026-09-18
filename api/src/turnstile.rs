@@ -116,15 +116,26 @@ pub async fn verify(token: Option<&str>, remote_ip: Option<&str>) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     // These tests share process-global env vars, so they must not run
     // concurrently with each other (`cargo test` runs tests in the same process
     // on multiple threads by default).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// `tokio::sync::Mutex`, not `std::sync::Mutex`, for the same reason
+    /// `mail::OVERRIDE_TO_ENV_LOCK` is one: the async tests below must hold the
+    /// guard **across** their `.await`, which a std guard must never do (see
+    /// `clippy::await_holding_lock`) but a tokio guard is built for.
+    ///
+    /// Releasing the lock before the await — which is what this used to do, to
+    /// satisfy that lint — left a window in which a parallel test could set
+    /// `TURNSTILE_SECRET_KEY` between the reset and `verify` reading it, so
+    /// `enabled()` came back true and the assertion failed. It passed locally
+    /// and failed in CI, which is the usual way an env-var race announces
+    /// itself. `blocking_lock()` is safe in the synchronous `#[test]`s here
+    /// because none of them run inside a tokio runtime.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn with_env<T>(disabled: Option<&str>, secret: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.blocking_lock();
         // SAFETY: serialized by ENV_LOCK; this test binary doesn't read these
         // vars concurrently elsewhere.
         unsafe {
@@ -175,17 +186,14 @@ mod tests {
 
     #[tokio::test]
     async fn verify_skips_the_network_when_disabled() {
-        // The lock is scoped to just the env mutation, not held across the
-        // `.await` below (clippy's `await_holding_lock`) — safe here because
-        // `verify` itself makes no further env reads once `enabled()` (called
-        // synchronously, before any await point) has returned `false`.
-        {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK.
-            unsafe {
-                std::env::remove_var("TURNSTILE_DISABLED");
-                std::env::remove_var("TURNSTILE_SECRET_KEY");
-            }
+        // The guard is held across the `.await` deliberately. Releasing it
+        // after the env mutation leaves a window in which another test can set
+        // TURNSTILE_SECRET_KEY before `verify` reads it.
+        let _guard = ENV_LOCK.lock().await;
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TURNSTILE_DISABLED");
+            std::env::remove_var("TURNSTILE_SECRET_KEY");
         }
         let result = verify(None, None).await;
         assert!(result.unwrap());
@@ -197,21 +205,16 @@ mod tests {
         // verification just because the argument was omitted. `verify` returns
         // before any network access when `token` is `None`, so this never
         // depends on TURNSTILE_SECRET_KEY still being set once it's read.
-        {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK.
-            unsafe {
-                std::env::remove_var("TURNSTILE_DISABLED");
-                std::env::set_var("TURNSTILE_SECRET_KEY", "secret");
-            }
+        let _guard = ENV_LOCK.lock().await;
+        // SAFETY: serialized by ENV_LOCK, held across the await below.
+        unsafe {
+            std::env::remove_var("TURNSTILE_DISABLED");
+            std::env::set_var("TURNSTILE_SECRET_KEY", "secret");
         }
         let result = verify(None, None).await;
-        {
-            let _guard = ENV_LOCK.lock().unwrap();
-            // SAFETY: serialized by ENV_LOCK.
-            unsafe {
-                std::env::remove_var("TURNSTILE_SECRET_KEY");
-            }
+        // SAFETY: still holding ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TURNSTILE_SECRET_KEY");
         }
         assert!(!result.unwrap());
     }
