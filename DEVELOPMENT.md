@@ -215,7 +215,25 @@ cp infra/terraform.tfvars.example infra/terraform.tfvars   # gitignored — neve
 | `inbound_retention_days` | How long raw inbound MIME is kept in S3 before lifecycle expiry |
 | `turnstile_secret_key` | Optional — leave blank to skip Cloudflare Turnstile verification entirely |
 
-### 9.4 Apply
+### 9.4 Import anything that already exists
+
+Terraform assumes it is creating everything. If someone has already set part of this up by hand —
+an SES domain identity verified through the console, say — `apply` fails with `AlreadyExists`
+rather than adopting it. Check first, and import what is already there:
+
+```bash
+aws sesv2 list-email-identities --profile <profile> --query 'EmailIdentities[].IdentityName'
+
+# If the domain identity already exists:
+terraform import aws_sesv2_email_identity.main <support domain>
+terraform import aws_sesv2_email_identity_mail_from_attributes.main <support domain>
+```
+
+After importing, `terraform plan` will show what it wants to *change* about them rather than
+create — typically attaching its own configuration set in place of whatever the console made.
+Read that diff before applying it.
+
+### 9.5 Apply
 
 ```bash
 aws sso login --profile <profile>   # or however your profile authenticates
@@ -227,14 +245,28 @@ terraform apply
 This creates the DynamoDB tables, the mail/web S3 buckets, the two Lambda functions (pointed at
 `infra/placeholder.zip` — Terraform owns their configuration, not their code; see the
 `ignore_changes` lifecycle block on each), the SES domain identity and receipt rule, the
-CloudFront distribution, DNS records, monitoring alarms, and the GitHub OIDC deploy role.
+CloudFront distribution, monitoring alarms, and the GitHub OIDC deploy role.
+
+**The first apply blocks part-way through, on purpose.** DNS is not managed by Terraform (see
+`infra/dns.tf`: the parent zone lives in a different AWS account), so `aws_acm_certificate_validation`
+sits waiting for a certificate that cannot issue until you create its validation record by hand.
+The sequence is:
+
+1. `terraform apply` — it mints the certificate, prints the `dns_records_required` output, then
+   waits. Let it wait, or interrupt it; nothing is lost either way.
+2. Create the records that output lists in the parent zone. The **ACM validation** record is the
+   one blocking you; the MX record is the one that makes inbound mail work at all.
+3. `terraform apply` again. The certificate validates, CloudFront comes up, and the rest follows.
+
+To see the records without waiting: `terraform apply -target=aws_acm_certificate.web` then
+`terraform output dns_records_required`.
 
 **Before applying against an account that might already receive mail elsewhere**, check
 `aws ses describe-active-receipt-rule-set --profile <profile>` — an account has exactly one active
 receipt rule set per region, and `aws_ses_active_receipt_rule_set` in `infra/ses.tf` will make
 microticket's the one that's active.
 
-### 9.5 Wire up GitHub
+### 9.6 Wire up GitHub
 
 `terraform output` after a successful apply prints the values below — each output's own
 `description` (in `infra/outputs.tf`) names exactly which repo variable to paste it into. Set them
@@ -256,7 +288,7 @@ roles), then `deploy_web` (builds the frontend with `VITE_CLIENT_VERSION` pinned
 syncs to S3 in three passes so a client mid-navigation never 404s, then invalidates
 `/index.html`).
 
-### 9.6 SES production access — do this before real use
+### 9.7 SES production access — do this before real use
 
 A fresh SES identity starts in the **sandbox**: inbound receiving is unaffected, but *outbound* is
 capped at 200 messages/24h, 1/sec, and can only be sent to addresses you've separately verified. In
@@ -272,7 +304,7 @@ waiting. Confirm you're clear with:
 aws sesv2 get-account --profile <profile>   # ProductionAccessEnabled: true
 ```
 
-### 9.7 Verifying the real thing
+### 9.8 Verifying the real thing
 
 ```bash
 dig MX support.<your domain>                                      # 10 inbound-smtp.ap-southeast-2.amazonaws.com

@@ -14,11 +14,6 @@ variable "aws_profile" {
   type        = string
 }
 
-variable "parent_zone_name" {
-  description = "Name of the existing Route53 hosted zone microticket's DNS records are added to (e.g. the apex domain whose zone already exists in this account)"
-  type        = string
-}
-
 variable "support_domain" {
   description = "Domain that serves both the web app and inbound mail (e.g. support.example.com); A/AAAA aliases, the MX record, and the web distribution all live on this one name"
   type        = string

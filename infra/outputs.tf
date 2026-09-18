@@ -18,7 +18,3 @@ output "web_bucket_name" {
   value       = aws_s3_bucket.web.id
 }
 
-output "route53_name_servers" {
-  description = "Informational only — the parent zone is looked up (data \"aws_route53_zone\"), not created, so nothing needs to be pasted anywhere unless the zone itself is new to its registrar."
-  value       = data.aws_route53_zone.parent.name_servers
-}
