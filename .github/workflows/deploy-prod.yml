@@ -1,0 +1,140 @@
+name: Deploy (prod)
+
+on:
+  push:
+    branches:
+      - prod
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-2
+
+jobs:
+  api_check:
+    uses: ./.github/workflows/_check-api.yml
+
+  web_check:
+    uses: ./.github/workflows/_check-web.yml
+
+  infra_check:
+    uses: ./.github/workflows/_check-infra.yml
+
+  local_check:
+    uses: ./.github/workflows/_check-local.yml
+
+  deploy_lambdas:
+    needs: [api_check, web_check, infra_check, local_check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain (pinned by api/rust-toolchain.toml)
+        run: |
+          channel=$(sed -nE 's/^channel *= *"(.*)"/\1/p' api/rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: api
+
+      - name: Install cargo-lambda
+        run: pip install cargo-lambda
+
+      # Both binaries in one invocation so they share a single compilation —
+      # and, more importantly, this step has no AWS access at all: OIDC
+      # credentials aren't configured until after it finishes, so a
+      # compromised dependency in this build can't reach AWS.
+      - name: Build lambda binaries
+        working-directory: ./api
+        run: cargo lambda build --release --bin api-lambda --bin inbound-mail-lambda
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Functions already exist (Terraform-managed, with their execution
+      # roles and env vars — see infra/lambda_api.tf and
+      # infra/lambda_inbound.tf's ignore_changes lifecycle blocks). Update
+      # code only — no --role, so the deploy role never needs iam:PassRole.
+      - name: Deploy microticket-api
+        working-directory: ./api
+        run: cargo lambda deploy --binary-name api-lambda microticket-api
+
+      - name: Deploy microticket-inbound-mail
+        working-directory: ./api
+        run: cargo lambda deploy --binary-name inbound-mail-lambda microticket-inbound-mail
+
+  # Runs after deploy_lambdas (not in parallel) so the frontend is never
+  # newer than the schema it queries — a web deploy that outran the API
+  # deploy could ship a client expecting fields the running API doesn't
+  # serve yet.
+  deploy_web:
+    needs: deploy_lambdas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./web
+        run: npm ci
+
+      - name: Run relay compiler
+        working-directory: ./web
+        run: npm run relay
+
+      - name: Build web app
+        working-directory: ./web
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          VITE_CLIENT_VERSION: ${{ github.sha }}
+        run: npm run build
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Three passes so a client mid-navigation can never 404 partway
+      # through a deploy:
+      #   1. New hashed assets land first, without --delete — nothing that
+      #      an in-flight page load might still reference disappears.
+      #   2. index.html (and any other top-level file) updates only once
+      #      every asset it could reference already exists.
+      #   3. A final --delete-only pass prunes anything from a previous
+      #      build that's no longer referenced, now that it's safe to.
+      - name: Sync new assets to S3 (no delete)
+        run: >
+          aws s3 sync ./web/dist s3://${{ vars.WEB_BUCKET_NAME }}
+          --exclude "index.html"
+          --cache-control "public,max-age=31536000,immutable"
+
+      - name: Sync index.html
+        run: >
+          aws s3 cp ./web/dist/index.html s3://${{ vars.WEB_BUCKET_NAME }}/index.html
+          --cache-control "public,max-age=0,must-revalidate"
+
+      - name: Prune stale assets
+        run: >
+          aws s3 sync ./web/dist s3://${{ vars.WEB_BUCKET_NAME }}
+          --delete
+          --exclude "index.html"
+
+      - name: Invalidate CloudFront (index.html only)
+        run: >
+          aws cloudfront create-invalidation
+          --distribution-id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+          --paths "/index.html"

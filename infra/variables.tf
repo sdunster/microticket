@@ -10,9 +10,8 @@ variable "aws_account_id" {
 }
 
 variable "aws_profile" {
-  description = "AWS CLI/SSO profile Terraform uses for all providers"
+  description = "AWS CLI/SSO profile Terraform uses for all providers (no default — there is no account to point at until you set one up)"
   type        = string
-  default     = "sdunster"
 }
 
 variable "parent_zone_name" {
@@ -51,4 +50,19 @@ variable "inbound_retention_days" {
   description = "Days raw inbound MIME objects are retained in S3 before lifecycle expiry"
   type        = number
   default     = 30
+}
+
+# microticket has no application secret at all: sessions are opaque `mtu_`
+# tokens stored only as a sha256 in DynamoDB (see api/src/auth.rs), so there
+# is no signing key to provision. Turnstile is the one optional exception —
+# verification is skipped whenever this is unset (api/src/turnstile.rs), so a
+# fork works with no Cloudflare account. Passed straight through to the API
+# Lambda's environment (lambda_api.tf) rather than via SSM: with only one
+# optional value in the entire system, a SecureString parameter plus its own
+# IAM read policy would be more machinery than the secret it protects.
+variable "turnstile_secret_key" {
+  description = "Cloudflare Turnstile secret key for the API Lambda (optional — leave unset to skip CAPTCHA verification entirely)"
+  type        = string
+  default     = ""
+  sensitive   = true
 }

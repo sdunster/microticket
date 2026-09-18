@@ -44,9 +44,9 @@ endef
 # clear message instead of a confusing error.
 NOT_YET = @echo "==> $@: not implemented yet (see local/README.md / DEVELOPMENT.md)"; exit 0
 
-# Against real AWS DynamoDB tables — needs AWS credentials and `.env.secret`
-# (JWT_SECRET; see .env.secret.example). No tables exist until `infra/` is applied
-# (a later step), so this is real but not yet useful against a fresh checkout.
+# Against real AWS DynamoDB tables — needs AWS credentials (an AWS_PROFILE
+# with SSO or equivalent). No tables exist until `infra/` is applied — see
+# DEVELOPMENT.md's "Deploying to AWS" section.
 dev:
 	$(call run_dev,poem)
 

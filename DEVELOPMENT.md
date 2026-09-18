@@ -1,9 +1,5 @@
 # Development setup
 
-> **Status:** this file is a skeleton written during the scaffold step of the build. Sections
-> marked _(later step)_ describe things that don't exist in the tree yet — fill them in as the
-> corresponding step lands, rather than writing ahead of the code.
-
 ## 1. Install the toolchain
 
 ### Rust
@@ -32,10 +28,13 @@ cd web && npm i
 ## 2. Environment
 
 Copy `web/.env.local.example` to `web/.env.local`. The repo-root `.env` (committed, non-secret)
-sets sane local defaults (`DB_PREFIX`, WebAuthn RP id/origin, `TURNSTILE_DISABLED=1`). Secrets —
-`JWT_SECRET` and, optionally, `TURNSTILE_SECRET_KEY` — go in `.env.secret`, copied from
-`.env.secret.example` and never committed. _(The auth step wires these up; they aren't consumed by
-anything yet.)_
+sets sane local defaults (`DB_PREFIX`, WebAuthn RP id/origin, `TURNSTILE_DISABLED=1`).
+
+microticket has no application secret to speak of — sessions are opaque `mtu_` tokens whose sha256
+is stored in DynamoDB, so there's no signing key anywhere. The one optional value, Cloudflare
+Turnstile's `TURNSTILE_SECRET_KEY`, goes in `.env.secret` (copied from `.env.secret.example`, never
+committed) and is only needed if you want to exercise the CAPTCHA path locally instead of relying
+on `TURNSTILE_DISABLED=1`.
 
 ## 3. Run it
 
@@ -47,8 +46,10 @@ make dev         # against real AWS DynamoDB tables — needs AWS credentials
 Both build the API, wait for it to answer on `:8000`, then start the Relay compiler in watch
 mode and the Vite dev server on `:5173`. See the `run_dev` macro in the `Makefile`.
 
-_(later step: AWS credential setup / SSO profile instructions, once `infra/` is applied and there
-is a real account to point at.)_
+`make dev` needs AWS credentials for the real DynamoDB tables `infra/` creates — export the usual
+`AWS_PROFILE`/SSO environment before running it (`aws sso login --profile <profile>` if you're
+using an SSO profile), and see [Deploying to AWS](#9-deploying-to-aws) below for how those tables
+get created in the first place.
 
 ## 4. Everyday commands
 
@@ -99,8 +100,15 @@ minted by a real login, WebAuthn credentials, submit codes/tokens) without touch
 themselves, so a re-`local-seed` afterward is a clean overwrite rather than a pile-up. `make
 local-reset` is the blunter tool: it destroys and rebuilds every table, discarding the seed too.
 
-_(later step: feeding a raw `.eml` fixture through the inbound pipeline (`make local-mail
-FILE=...`), and reading mocked outbound mail back out of `local/mail-out/`.)_
+`make local-mail FILE=local/mail/new-ticket.eml` feeds a raw `.eml` fixture straight into the same
+parse/route/store pipeline the deployed inbound-mail Lambda uses, with no AWS involved — the
+fixtures under `local/mail/` cover a plain new ticket, a reply via `+tag`, a reply via
+`In-Reply-To`, a reply from an unknown sender, an autoresponder (must be dropped), a message
+addressed to a wildcard address, and a cross-tenant reply attempt. Add `FRESH=1` to replay a
+fixture as a brand-new delivery — without it, the idempotency key is the file's own sha256, so a
+second run of the same fixture is correctly a no-op. Outbound mail sent as a result (a reply
+notification, for instance) lands as a `.eml` under `MOCK_MAIL_DIR` if you've set it (see
+`local/local.env`), or is just logged if you haven't.
 
 ## 6. The admin CLI and bootstrapping an organisation
 
@@ -150,7 +158,134 @@ CLI to read the flag from in the first place, so it is unreachable there by cons
 
 ## 8. Troubleshooting
 
-_(later step — fill in as real issues come up; don't invent hypothetical ones.)_
+_(fill in as real issues come up; don't invent hypothetical ones.)_
+
+## 9. Deploying to AWS
+
+`infra/` is a flat Terraform root module (`ap-southeast-2`, plus a `us-east-1` alias used only for
+CloudFront's certificate). Nothing in it is hardcoded — no account id, domain, zone, or profile —
+so a fork can `terraform apply` into its own account. Terraform is applied by hand; CI never gets
+Terraform credentials (see `deploy-prod.yml`'s OIDC role, which is scoped to Lambda code updates,
+the web bucket, and CloudFront invalidation only).
+
+### 9.1 Prerequisites
+
+- An AWS account, and a Route53 hosted zone for the domain you'll point `support_domain` at
+  already existing in it (Terraform looks it up with `data "aws_route53_zone"`; it does not create
+  one). If the zone is new, delegate it from its registrar before applying — DNS validation for the
+  ACM certificate and the SES DKIM records both need it resolvable.
+- An AWS CLI profile (SSO or otherwise) with enough privilege to create the resources in
+  `infra/*.tf` (IAM roles/policies, Lambda, DynamoDB, S3, CloudFront, ACM, Route53, SES, SQS, SNS,
+  AWS Backup).
+- Terraform >= 1.9.
+- A GitHub repository to push `prod` to (`your-org/microticket` — becomes `var.github_repo`, which
+  scopes the OIDC deploy role's trust policy to `repo:<github_repo>:ref:refs/heads/prod`).
+
+### 9.2 Create the state backend
+
+`infra/backend.tf` declares an S3 backend with **partial configuration** — no bucket name is
+committed. Create (or reuse) an S3 bucket for Terraform state by hand, then:
+
+```bash
+cd infra
+terraform init \
+  -backend-config="bucket=<your state bucket>" \
+  -backend-config="key=microticket/terraform.tfstate" \
+  -backend-config="region=<your region>" \
+  -backend-config="profile=<your profile>"
+```
+
+### 9.3 Fill in tfvars
+
+```bash
+cp infra/terraform.tfvars.example infra/terraform.tfvars   # gitignored — never commit this
+```
+
+| Variable | What it is |
+| --- | --- |
+| `aws_account_id` | The target account's 12-digit id (constructs ARNs; has no default on purpose) |
+| `aws_profile` | The AWS CLI/SSO profile Terraform runs as (no default — there's no account to assume one for until you set this up) |
+| `aws_region` | Defaults to `ap-southeast-2`; only change this if you've confirmed SES email receiving is supported in the region you pick |
+| `parent_zone_name` | The already-existing Route53 zone's name (e.g. `example.com`) |
+| `support_domain` | Serves **both** the web app and inbound mail (e.g. `support.example.com`) — an A/AAAA alias and an MX record coexist on this one name |
+| `github_repo` | `"owner/name"` — scopes the GitHub OIDC deploy role |
+| `db_prefix` | Table name prefix; default `"prod"` is normally fine |
+| `allowed_origins` | CORS origins for the API Lambda Function URL — normally just `["https://<support_domain>"]` |
+| `alert_email` | Subscribed to the operational alert SNS topic (`monitoring.tf`) — verify you can receive at this address before applying, or the SNS subscription sits unconfirmed |
+| `inbound_retention_days` | How long raw inbound MIME is kept in S3 before lifecycle expiry |
+| `turnstile_secret_key` | Optional — leave blank to skip Cloudflare Turnstile verification entirely |
+
+### 9.4 Apply
+
+```bash
+aws sso login --profile <profile>   # or however your profile authenticates
+cd infra
+terraform plan
+terraform apply
+```
+
+This creates the DynamoDB tables, the mail/web S3 buckets, the two Lambda functions (pointed at
+`infra/placeholder.zip` — Terraform owns their configuration, not their code; see the
+`ignore_changes` lifecycle block on each), the SES domain identity and receipt rule, the
+CloudFront distribution, DNS records, monitoring alarms, and the GitHub OIDC deploy role.
+
+**Before applying against an account that might already receive mail elsewhere**, check
+`aws ses describe-active-receipt-rule-set --profile <profile>` — an account has exactly one active
+receipt rule set per region, and `aws_ses_active_receipt_rule_set` in `infra/ses.tf` will make
+microticket's the one that's active.
+
+### 9.5 Wire up GitHub
+
+`terraform output` after a successful apply prints the values below — each output's own
+`description` (in `infra/outputs.tf`) names exactly which repo variable to paste it into. Set them
+under the repository's Settings → Secrets and variables → Actions → **Variables** tab (not
+Secrets — none of these are sensitive on their own):
+
+| Repo variable | From output |
+| --- | --- |
+| `AWS_DEPLOY_ROLE_ARN` | `github_deploy_role_arn` |
+| `VITE_API_URL` | `api_function_url` |
+| `WEB_BUCKET_NAME` | `web_bucket_name` |
+| `CLOUDFRONT_DISTRIBUTION_ID` | `cloudfront_distribution_id` |
+
+Pushing to the `prod` branch (after these are set) runs `deploy-prod.yml`: all four `_check-*.yml`
+gates, then `deploy_lambdas` (builds both binaries with `cargo lambda build`, assumes the OIDC role
+only *after* the build finishes, then `cargo lambda deploy`s each — no AWS access during the build
+itself, and no `iam:PassRole` since the functions already have their Terraform-managed execution
+roles), then `deploy_web` (builds the frontend with `VITE_CLIENT_VERSION` pinned to the commit SHA,
+syncs to S3 in three passes so a client mid-navigation never 404s, then invalidates
+`/index.html`).
+
+### 9.6 SES production access — do this before real use
+
+A fresh SES identity starts in the **sandbox**: inbound receiving is unaffected, but *outbound* is
+capped at 200 messages/24h, 1/sec, and can only be sent to addresses you've separately verified. In
+practice this means tickets will arrive fine, but reply notifications will silently fail to reach
+anyone except your own verified test address.
+
+Request production access from the SES console (or `aws sesv2 put-account-details`) — it's a
+one-off support-case-style request, usually approved within a day. Verify your own address in the
+meantime (SES console → Identities → Create identity) so you can test the outbound round-trip while
+waiting. Confirm you're clear with:
+
+```bash
+aws sesv2 get-account --profile <profile>   # ProductionAccessEnabled: true
+```
+
+### 9.7 Verifying the real thing
+
+```bash
+dig MX support.<your domain>                                      # 10 inbound-smtp.ap-southeast-2.amazonaws.com
+aws ses describe-active-receipt-rule-set --profile <profile>      # microticket's rule set is active
+aws sesv2 get-account --profile <profile>                         # ProductionAccessEnabled: true
+```
+
+Send a real email to one of an instance's inbound addresses — the ticket should appear in the
+queue within seconds (`aws logs tail /aws/lambda/microticket-inbound-mail --follow --profile
+<profile>` if it doesn't). Reply from the web UI and confirm the reply arrives threaded in the
+original mail client, and that replying to *that* lands back on the same ticket. Check the DLQ
+alarm (`monitoring.tf`) is `OK`, and that a deliberately malformed message lands in the DLQ rather
+than looping.
 
 ## Where to go next
 
