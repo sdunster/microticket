@@ -20,11 +20,16 @@ fn unauthenticated(message: &str) -> async_graphql::Error {
     async_graphql::Error::new(message).extend_with(|_, e| e.set("code", "UNAUTHENTICATED"))
 }
 
-fn is_member(memberships: &[Membership], instance_id: &str) -> bool {
+/// `pub(crate)`, not private: `query`/`mutations` need the same "is this
+/// caller a member of this instance" check for ticket resolvers, whose
+/// authorization has to happen inside the resolver body (per-record, after
+/// fetching the ticket) rather than in a static `#[graphql(guard)]` — see
+/// `graphql::mutations`' `require_ticket_member` doc comment.
+pub(crate) fn is_member(memberships: &[Membership], instance_id: &str) -> bool {
     memberships.iter().any(|m| m.instance_id == instance_id)
 }
 
-fn is_owner(memberships: &[Membership], instance_id: &str) -> bool {
+pub(crate) fn is_owner(memberships: &[Membership], instance_id: &str) -> bool {
     memberships
         .iter()
         .any(|m| m.instance_id == instance_id && m.is_owner)

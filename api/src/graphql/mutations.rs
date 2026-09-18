@@ -18,9 +18,9 @@ use crate::db::Handler as _;
 use crate::inbound::routing;
 use crate::mail::Handler as _;
 
-use super::auth::{AuthGuard, AuthRequirement};
+use super::auth::{AuthGuard, AuthRequirement, is_member};
 use super::error::ApiError;
-use super::query::{InboundAddressInfo, PasskeyInfo};
+use super::query::{InboundAddressInfo, PasskeyInfo, Ticket, TicketMessage, TicketStatusType};
 
 /// One code per address per this many seconds — cheap anti-spam for
 /// `requestAuthCode`, independent of the code's own 10-minute validity.
@@ -50,6 +50,60 @@ fn require_user_id(ctx: &Context<'_>) -> Result<String> {
         Some(AuthInfo::User { id, .. }) => Ok(id.clone()),
         _ => Err(ApiError::forbidden("Must be authenticated as a user").into()),
     }
+}
+
+/// The per-ticket authorization check every ticket mutation uses: fetch the
+/// ticket by id, then verify the caller is a member of *its* `instance_id`.
+///
+/// This is deliberately not "check the caller is a member of an `instanceId`
+/// argument" — these mutations take only `ticketId`, and a ticket's instance
+/// is a fact of the record, not something the caller gets to assert. Checking
+/// an `instanceId` argument instead (or trusting one, if a resolver even had
+/// one to check) would let a member of instance A act on instance B's ticket
+/// simply by passing B's ticket id; fetching the record and checking *its*
+/// `instance_id` closes that off structurally. A ticket that doesn't exist,
+/// and a ticket that exists but belongs to an instance the caller isn't a
+/// member of, are reported identically — `NOT_FOUND` — so this can't be used
+/// to probe which ticket ids exist in another instance.
+async fn require_ticket_member<A: App + HasDb + HasMail + Send + Sync>(
+    ctx: &Context<'_>,
+    app: &A,
+    ticket_id: &str,
+) -> Result<db::Ticket> {
+    let ticket = app
+        .db()
+        .get_tickets(&[ticket_id])
+        .await?
+        .into_iter()
+        .next()
+        .flatten()
+        .ok_or_else(|| ApiError::not_found("Ticket", ticket_id))?;
+    let Some(AuthInfo::User { memberships, .. }) = ctx.data_opt::<AuthInfo>() else {
+        return Err(ApiError::forbidden("Must be authenticated as a user").into());
+    };
+    if !is_member(memberships, &ticket.instance_id) {
+        return Err(ApiError::not_found("Ticket", ticket_id).into());
+    }
+    Ok(ticket)
+}
+
+/// Trim, lowercase, and sanity-check an email address supplied to
+/// `addTicketRequester`/`addTicketCc` — a minimal shape check (one `@`,
+/// non-empty local/domain parts), not full RFC 5321 validation, matching how
+/// little validation `inbound::routing::classify_for_storage` does for the
+/// same reason: perfect email validation is famously not worth attempting,
+/// and DynamoDB/SES will reject anything that matters more than this does.
+fn normalize_ticket_email(raw: &str) -> Result<String> {
+    let lower = raw.trim().to_lowercase();
+    let Some((local, domain)) = lower.split_once('@') else {
+        return Err(anyhow!(
+            "{raw:?} is not a valid email address (missing '@')"
+        ));
+    };
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return Err(anyhow!("{raw:?} is not a valid email address"));
+    }
+    Ok(lower)
 }
 
 pub struct MutationRoot<A: App + HasDb + HasMail + Send + Sync> {
@@ -528,6 +582,395 @@ impl<A: App + HasDb + HasMail + Send + Sync + 'static> MutationRoot<A> {
             .delete_inbound_address(&existing.address)
             .await?;
         Ok(true)
+    }
+
+    // ── Ticket mutations ─────────────────────────────────────────────────────
+
+    /// Open a new ticket from the public submit form. **Requester-token
+    /// only** — the instance and the requester's email come from the token
+    /// (`AuthInfo::Requester`), never from an argument, so this can't be used
+    /// to open a ticket in someone else's name or in an instance the token
+    /// wasn't scoped to. The requester's own submission becomes the ticket's
+    /// first message, stored as `kind: INBOUND` with `fromEmail` set (never
+    /// `authorUserId` — no staff member wrote it).
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Requester)")]
+    async fn submit_ticket(
+        &self,
+        ctx: &Context<'_>,
+        subject: String,
+        body: String,
+    ) -> Result<Ticket<A>> {
+        let Some(AuthInfo::Requester { email, instance_id }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must hold a requester submit token").into());
+        };
+        let subject = subject.trim();
+        if subject.is_empty() {
+            return Err(anyhow!("subject cannot be empty"));
+        }
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(anyhow!("body cannot be empty"));
+        }
+
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[instance_id])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .filter(|i| !i.deleted)
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id))?;
+
+        let number = self.app.db().increment_ticket_counter(&instance.id).await?;
+        let ticket = self
+            .app
+            .db()
+            .create_ticket(
+                &instance.id,
+                number,
+                subject,
+                std::slice::from_ref(email),
+                &[],
+            )
+            .await?;
+
+        self.app
+            .db()
+            .create_ticket_message(
+                &ticket.id,
+                db::TicketMessageKind::Inbound,
+                None,
+                Some(email),
+                &[],
+                &[],
+                Some(body),
+                None,
+                None,
+            )
+            .await?;
+
+        info!(
+            "Ticket submitted: instance={} ticket={} number={}",
+            instance.id, ticket.id, ticket.number
+        );
+        Ok(Ticket::new(ticket))
+    }
+
+    /// Reply to a ticket as a member (agent/owner). Creates the `ticket_message`
+    /// row (`kind: REPLY`) and bumps the ticket's activity — **does not
+    /// actually send the email**. `TODO(step 6)`: build the outbound MIME
+    /// message (`mail-builder`) and send it via SESv2 with the `Reply-To`
+    /// threading token; this step only persists the reply and updates the
+    /// ticket, which is why `rfc_message_id` is absent on the returned
+    /// message (there is no real one yet). Attachments are similarly
+    /// `TODO(step 7)` — no `attachmentKeys` argument exists yet.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn reply_to_ticket(
+        &self,
+        ctx: &Context<'_>,
+        ticket_id: ID,
+        body: String,
+    ) -> Result<TicketMessage<A>> {
+        let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let user_id = require_user_id(ctx)?;
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(anyhow!("body cannot be empty"));
+        }
+
+        let msg = self
+            .app
+            .db()
+            .create_ticket_message(
+                &ticket.id,
+                db::TicketMessageKind::Reply,
+                Some(&user_id),
+                None,
+                &ticket.requester_emails,
+                &ticket.cc_emails,
+                Some(body),
+                None,
+                None,
+            )
+            .await?;
+
+        self.app
+            .db()
+            .update_ticket(
+                &ticket.id,
+                db::TicketUpdateShape::Touch {
+                    now: crate::clock::now_sec(),
+                },
+            )
+            .await?;
+
+        Ok(TicketMessage::new(msg))
+    }
+
+    /// Add an internal note to a ticket. Member-only, same per-ticket
+    /// authorization as every other ticket mutation. Stored as `kind: NOTE`,
+    /// which `Ticket.messages` filters out for anyone but a member of this
+    /// ticket's instance — see that field's doc comment. Never emailed, now
+    /// or ever: the outbound-mail path (step 6) only ever sends `REPLY`
+    /// messages.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn add_internal_note(
+        &self,
+        ctx: &Context<'_>,
+        ticket_id: ID,
+        body: String,
+    ) -> Result<TicketMessage<A>> {
+        let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let user_id = require_user_id(ctx)?;
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(anyhow!("body cannot be empty"));
+        }
+
+        let msg = self
+            .app
+            .db()
+            .create_ticket_message(
+                &ticket.id,
+                db::TicketMessageKind::Note,
+                Some(&user_id),
+                None,
+                &[],
+                &[],
+                Some(body),
+                None,
+                None,
+            )
+            .await?;
+
+        self.app
+            .db()
+            .update_ticket(
+                &ticket.id,
+                db::TicketUpdateShape::Touch {
+                    now: crate::clock::now_sec(),
+                },
+            )
+            .await?;
+
+        Ok(TicketMessage::new(msg))
+    }
+
+    /// Change a ticket's status — `OPEN`/`CLOSED`/`DELETED`. Deleting and
+    /// restoring a ticket are just this mutation with `DELETED`/`OPEN`: see
+    /// `db::TicketUpdateShape::SetStatusAndAssignee`'s doc comment for why
+    /// that one variant, not a bespoke delete/restore code path, is what
+    /// keeps the three composite marker attributes consistent. A no-op
+    /// transition (already at the requested status) still succeeds, returning
+    /// the ticket unchanged, rather than erroring — idempotent by design.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn set_ticket_status(
+        &self,
+        ctx: &Context<'_>,
+        ticket_id: ID,
+        status: TicketStatusType,
+    ) -> Result<Ticket<A>> {
+        let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let new_status: db::TicketStatus = status.into();
+        if new_status == ticket.status {
+            return Ok(Ticket::new(ticket));
+        }
+        let now = crate::clock::now_sec();
+        self.app
+            .db()
+            .update_ticket(
+                &ticket.id,
+                db::TicketUpdateShape::SetStatusAndAssignee {
+                    instance_id: &ticket.instance_id,
+                    status: new_status,
+                    assignee_user_id: ticket.assignee_user_id.as_deref(),
+                    now,
+                },
+            )
+            .await?;
+        Ok(Ticket::new(db::Ticket {
+            status: new_status,
+            updated_at: now,
+            last_activity_at: now,
+            ..ticket
+        }))
+    }
+
+    /// Assign (or, with `userId: null`, unassign) a ticket. The target user,
+    /// when assigning, must themselves be a member of this ticket's
+    /// instance — assigning to an outsider would be silently useless (they
+    /// could never see it via the "assigned to me" filter, which is itself
+    /// instance-scoped).
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn assign_ticket(
+        &self,
+        ctx: &Context<'_>,
+        ticket_id: ID,
+        user_id: Option<ID>,
+    ) -> Result<Ticket<A>> {
+        let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        if let Some(uid) = &user_id {
+            let target_memberships = self.app.db().list_memberships_by_user(uid.as_str()).await?;
+            if !target_memberships
+                .iter()
+                .any(|m| m.instance_id == ticket.instance_id)
+            {
+                return Err(
+                    ApiError::forbidden("Assignee must be a member of this instance").into(),
+                );
+            }
+        }
+        let now = crate::clock::now_sec();
+        let assignee_user_id = user_id.as_ref().map(|id| id.as_str());
+        self.app
+            .db()
+            .update_ticket(
+                &ticket.id,
+                db::TicketUpdateShape::SetStatusAndAssignee {
+                    instance_id: &ticket.instance_id,
+                    status: ticket.status,
+                    assignee_user_id,
+                    now,
+                },
+            )
+            .await?;
+        Ok(Ticket::new(db::Ticket {
+            assignee_user_id: user_id.map(|id| id.to_string()),
+            updated_at: now,
+            last_activity_at: now,
+            ..ticket
+        }))
+    }
+
+    /// Add a requester (a "To" recipient) to a ticket.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn add_ticket_requester(
+        &self,
+        ctx: &Context<'_>,
+        ticket_id: ID,
+        email: String,
+    ) -> Result<Ticket<A>> {
+        let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let email = normalize_ticket_email(&email)?;
+        let now = crate::clock::now_sec();
+        self.app
+            .db()
+            .update_ticket(
+                &ticket.id,
+                db::TicketUpdateShape::AddRequester { email: &email, now },
+            )
+            .await?;
+        let mut requester_emails = ticket.requester_emails.clone();
+        if !requester_emails.contains(&email) {
+            requester_emails.push(email);
+        }
+        Ok(Ticket::new(db::Ticket {
+            requester_emails,
+            updated_at: now,
+            last_activity_at: now,
+            ..ticket
+        }))
+    }
+
+    /// Remove a requester from a ticket. Refuses to remove the last one — a
+    /// ticket must always have someone to reply to.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn remove_ticket_requester(
+        &self,
+        ctx: &Context<'_>,
+        ticket_id: ID,
+        email: String,
+    ) -> Result<Ticket<A>> {
+        let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let email = normalize_ticket_email(&email)?;
+        if ticket.requester_emails.len() <= 1 && ticket.requester_emails.contains(&email) {
+            return Err(ApiError::conflict("A ticket must keep at least one requester").into());
+        }
+        let now = crate::clock::now_sec();
+        self.app
+            .db()
+            .update_ticket(
+                &ticket.id,
+                db::TicketUpdateShape::RemoveRequester { email: &email, now },
+            )
+            .await?;
+        let requester_emails = ticket
+            .requester_emails
+            .iter()
+            .filter(|e| **e != email)
+            .cloned()
+            .collect();
+        Ok(Ticket::new(db::Ticket {
+            requester_emails,
+            updated_at: now,
+            last_activity_at: now,
+            ..ticket
+        }))
+    }
+
+    /// Add a CC recipient to a ticket.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn add_ticket_cc(
+        &self,
+        ctx: &Context<'_>,
+        ticket_id: ID,
+        email: String,
+    ) -> Result<Ticket<A>> {
+        let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let email = normalize_ticket_email(&email)?;
+        let now = crate::clock::now_sec();
+        self.app
+            .db()
+            .update_ticket(
+                &ticket.id,
+                db::TicketUpdateShape::AddCc { email: &email, now },
+            )
+            .await?;
+        let mut cc_emails = ticket.cc_emails.clone();
+        if !cc_emails.contains(&email) {
+            cc_emails.push(email);
+        }
+        Ok(Ticket::new(db::Ticket {
+            cc_emails,
+            updated_at: now,
+            last_activity_at: now,
+            ..ticket
+        }))
+    }
+
+    /// Remove a CC recipient from a ticket. Unlike requesters, CCs may go to
+    /// zero — there is no "must keep at least one" rule for them.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn remove_ticket_cc(
+        &self,
+        ctx: &Context<'_>,
+        ticket_id: ID,
+        email: String,
+    ) -> Result<Ticket<A>> {
+        let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let email = normalize_ticket_email(&email)?;
+        let now = crate::clock::now_sec();
+        self.app
+            .db()
+            .update_ticket(
+                &ticket.id,
+                db::TicketUpdateShape::RemoveCc { email: &email, now },
+            )
+            .await?;
+        let cc_emails = ticket
+            .cc_emails
+            .iter()
+            .filter(|e| **e != email)
+            .cloned()
+            .collect();
+        Ok(Ticket::new(db::Ticket {
+            cc_emails,
+            updated_at: now,
+            last_activity_at: now,
+            ..ticket
+        }))
     }
 
     /// Revoke the calling token, if there is one to revoke (a `Requester`

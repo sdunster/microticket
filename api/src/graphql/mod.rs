@@ -34,6 +34,17 @@ pub use query::{PasskeyInfo, QueryRoot, User};
 
 use self::dataloader::DatabaseLoader;
 
+/// DataLoader keys. `Ticket.assignee`/`Ticket.instance` are the first fields
+/// that need batching — a page of tickets resolving both per-node would
+/// otherwise N+1 on `user`/`instance` `GetItem`s. Named/shaped exactly like
+/// seslogin's `graphql/mod.rs` (`UserId(pub ID)`, etc.) — see
+/// `graphql::dataloader`'s module doc.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UserId(pub async_graphql::ID);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InstanceId(pub async_graphql::ID);
+
 /// Client IP for the current request, threaded from the HTTP layer so resolvers
 /// (e.g. a future Turnstile verification) can forward it to external services.
 /// `None` when the transport didn't supply one.

@@ -158,14 +158,19 @@ fn load_tables(path: &Path) -> Result<Map<String, Value>> {
 /// seslogin's; only `local-reset` (which rebuilds every table) is guaranteed
 /// to remove it.
 ///
-/// `ticket`/`ticket_message`/`counter` join this list once step 5 lands and
-/// `synthetic.json` starts seeding tickets — keep this in step with
-/// `local-tables.rs`.
+/// `ticket`/`ticket_message`/`counter` are here too: once the running app
+/// creates a ticket (e.g. `submitTicket` exercised from the UI), those rows
+/// (and the per-instance counter it bumped) aren't owned by any fixture row,
+/// so they'd otherwise survive a reseed and drift the counter out of step
+/// with `synthetic.json`'s seeded ticket numbers.
 const TRANSIENT_TABLES: &[&str] = &[
     "login_code",
     "webauthn_credential",
     "ephemeral_state",
     "processed_message",
+    "ticket",
+    "ticket_message",
+    "counter",
 ];
 
 async fn clear() -> Result<()> {

@@ -109,6 +109,86 @@ fn synthetic_references_resolve() {
             id(token)
         );
     }
+
+    for ticket in rows(&doc, "ticket") {
+        let instance_id = s(ticket, "instance_id").expect("ticket.instance_id");
+        assert!(
+            instances.contains(&instance_id),
+            "ticket {} points at missing instance {instance_id}",
+            id(ticket)
+        );
+        if let Some(assignee) = s(ticket, "assignee_user_id") {
+            assert!(
+                users.contains(&assignee),
+                "ticket {} points at missing assignee {assignee}",
+                id(ticket)
+            );
+        }
+    }
+
+    let tickets: HashSet<String> = rows(&doc, "ticket").iter().map(id).collect();
+    for message in rows(&doc, "ticket_message") {
+        let ticket_id = s(message, "ticket_id").expect("ticket_message.ticket_id");
+        assert!(
+            tickets.contains(&ticket_id),
+            "ticket_message {} points at missing ticket {ticket_id}",
+            id(message)
+        );
+    }
+
+    for counter in rows(&doc, "counter") {
+        assert!(
+            instances.contains(&id(counter)),
+            "counter {} (row id doubles as instance id) points at a missing instance",
+            id(counter)
+        );
+    }
+}
+
+/// The specific ticket states the build plan asks the fixture to cover:
+/// open, closed, deleted, assigned, unassigned, multiple requesters+CC, and
+/// (via `ticket_message`) an internal note — see `SCHEMA.md`/the step-5 task.
+#[test]
+fn synthetic_tickets_cover_every_required_state() {
+    let doc = synthetic();
+    let tickets = rows(&doc, "ticket");
+
+    let statuses: HashSet<String> = tickets.iter().filter_map(|t| s(t, "status")).collect();
+    for want in ["open", "closed", "deleted"] {
+        assert!(
+            statuses.contains(want),
+            "expected at least one seeded ticket with status {want:?}"
+        );
+    }
+
+    assert!(
+        tickets.iter().any(|t| s(t, "assignee_user_id").is_some()),
+        "expected at least one assigned ticket"
+    );
+    assert!(
+        tickets.iter().any(|t| s(t, "assignee_user_id").is_none()),
+        "expected at least one unassigned ticket"
+    );
+    assert!(
+        tickets.iter().any(|t| {
+            t.get("requester_emails")
+                .and_then(|v| v["SS"].as_array())
+                .is_some_and(|a| a.len() > 1)
+        }),
+        "expected at least one ticket with multiple requesters"
+    );
+    assert!(
+        tickets.iter().any(|t| t.get("cc_emails").is_some()),
+        "expected at least one ticket with a CC"
+    );
+
+    let note_exists = rows(&doc, "ticket_message")
+        .iter()
+        .any(|m| s(m, "kind").as_deref() == Some("note"));
+    assert!(
+        note_exists,
+        "expected at least one seeded ticket_message with kind: note"
+    );
 }
 
 #[test]

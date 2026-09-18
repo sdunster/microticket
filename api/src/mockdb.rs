@@ -192,6 +192,64 @@ impl db::Handler for Handler {
         Self::unsupported()
     }
 
+    // ── ticket ────────────────────────────────────────────────────────────
+
+    async fn get_tickets<T: AsRef<str> + Sync>(
+        &self,
+        _ids: &[T],
+    ) -> db::Result<Vec<Option<db::Ticket>>> {
+        Self::unsupported()
+    }
+
+    async fn increment_ticket_counter(&self, _instance_id: &str) -> db::Result<u64> {
+        Self::unsupported()
+    }
+
+    async fn create_ticket(
+        &self,
+        _instance_id: &str,
+        _number: u64,
+        _subject: &str,
+        _requester_emails: &[String],
+        _cc_emails: &[String],
+    ) -> db::Result<db::Ticket> {
+        Self::unsupported()
+    }
+
+    async fn update_ticket(&self, _id: &str, _change: db::TicketUpdateShape<'_>) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    async fn list_tickets(
+        &self,
+        _instance_id: &str,
+        _filter: db::TicketListFilter,
+        _page: db::ListTicketsPage,
+    ) -> db::Result<Vec<db::Ticket>> {
+        Self::unsupported()
+    }
+
+    // ── ticket_message ───────────────────────────────────────────────────
+
+    async fn create_ticket_message(
+        &self,
+        _ticket_id: &str,
+        _kind: db::TicketMessageKind,
+        _author_user_id: Option<&str>,
+        _from_email: Option<&str>,
+        _to_emails: &[String],
+        _cc_emails: &[String],
+        _body_text: Option<&str>,
+        _body_html: Option<&str>,
+        _in_reply_to: Option<&str>,
+    ) -> db::Result<db::TicketMessage> {
+        Self::unsupported()
+    }
+
+    async fn list_ticket_messages(&self, _ticket_id: &str) -> db::Result<Vec<db::TicketMessage>> {
+        Self::unsupported()
+    }
+
     // ── webauthn_credential ───────────────────────────────────────────────
 
     async fn create_webauthn_credential(

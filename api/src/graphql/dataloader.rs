@@ -1,24 +1,80 @@
 //! Per-request batching [`DataLoader`](async_graphql::dataloader::DataLoader) shell.
 //!
-//! No entities to batch yet — steps 4/5 add `impl Loader<XId> for
-//! DatabaseLoader<A>` blocks here (following seslogin's `graphql/dataloader.rs`
-//! shape: a small `XId(pub ID)` newtype per entity, and a `load` that calls
-//! `self.app.db().get_xs(...)` and zips the results back onto the requested keys).
-//! [`get_dataloader`](super::get_dataloader) wires one of these into the request
-//! context per request.
+//! Step 5 adds the first two `impl Loader<XId> for DatabaseLoader<A>` blocks —
+//! `UserId`/`InstanceId`, needed because a page of tickets resolves
+//! `Ticket.assignee`/`Ticket.instance` once per node. Follows seslogin's
+//! `graphql/dataloader.rs` shape exactly: a small `XId(pub ID)` newtype per
+//! entity (defined in `graphql::mod`), and a `load` that calls
+//! `self.app.db().get_xs(...)` and zips the results back onto the requested
+//! keys. [`get_dataloader`](super::get_dataloader) wires one of these into the
+//! request context per request.
 
+use std::collections::HashMap;
+use std::iter::zip;
 use std::sync::Arc;
 
+use anyhow::anyhow;
+use async_graphql::dataloader::Loader;
+
 use crate::app::{App, HasDb};
+use crate::db;
+use crate::db::Handler as _;
+
+use super::{InstanceId, UserId};
 
 pub struct DatabaseLoader<A: App + HasDb + Send + Sync> {
-    /// Read by the `impl Loader<...>` blocks steps 4/5 add.
-    #[allow(dead_code)]
     app: Arc<A>,
 }
 
 impl<A: App + HasDb + Send + Sync> DatabaseLoader<A> {
     pub fn new(app: Arc<A>) -> Self {
         DatabaseLoader { app }
+    }
+}
+
+impl<A: App + HasDb + Send + Sync + 'static> Loader<UserId> for DatabaseLoader<A> {
+    type Value = db::User;
+    type Error = Arc<anyhow::Error>;
+
+    async fn load(
+        &self,
+        keys: &[UserId],
+    ) -> std::result::Result<HashMap<UserId, db::User>, Arc<anyhow::Error>> {
+        let str_keys = keys.iter().map(|k| k.0.as_str()).collect::<Vec<&str>>();
+        let recs = self
+            .app
+            .db()
+            .get_users(&str_keys)
+            .await
+            .map_err(|e| Arc::new(anyhow!("DB error: {:?}", e)))?;
+        // A dataloader reports what exists; ids with no row are simply absent
+        // from the map, which is how async-graphql signals "not found" to the
+        // resolver (`load_one` returns `Ok(None)` for a missing key).
+        let map = zip(keys.iter().cloned(), recs)
+            .filter_map(|(key, rec)| rec.map(|r| (key, r)))
+            .collect();
+        Ok(map)
+    }
+}
+
+impl<A: App + HasDb + Send + Sync + 'static> Loader<InstanceId> for DatabaseLoader<A> {
+    type Value = db::Instance;
+    type Error = Arc<anyhow::Error>;
+
+    async fn load(
+        &self,
+        keys: &[InstanceId],
+    ) -> std::result::Result<HashMap<InstanceId, db::Instance>, Arc<anyhow::Error>> {
+        let str_keys = keys.iter().map(|k| k.0.as_str()).collect::<Vec<&str>>();
+        let recs = self
+            .app
+            .db()
+            .get_instances(&str_keys)
+            .await
+            .map_err(|e| Arc::new(anyhow!("DB error: {:?}", e)))?;
+        let map = zip(keys.iter().cloned(), recs)
+            .filter_map(|(key, rec)| rec.map(|r| (key, r)))
+            .collect();
+        Ok(map)
     }
 }

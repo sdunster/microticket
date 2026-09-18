@@ -217,6 +217,253 @@
           "N": "4070908800"
         }
       }
+    ],
+    "ticket": [
+      {
+        "_comment": "Acme #1: open, unassigned, single requester. The plain, common case.",
+        "id": { "S": "SeedTick0001" },
+        "instance_id": { "S": "SeedAcme0001" },
+        "number": { "N": "1" },
+        "subject": { "S": "Login button does nothing on Safari" },
+        "status": { "S": "open" },
+        "instance_status": { "S": "SeedAcme0001#open" },
+        "instance_visible": { "S": "SeedAcme0001" },
+        "instance_number": { "S": "SeedAcme0001#1" },
+        "requester_emails": { "SS": ["requester1@example.com"] },
+        "reply_token": { "S": "SeedReplyTokA001" },
+        "created_at": { "N": "1735689600" },
+        "updated_at": { "N": "1735689600" },
+        "last_activity_at": { "N": "1735689600" }
+      },
+      {
+        "_comment": "Acme #2: open, assigned to the seeded agent, multiple requesters and a CC.",
+        "id": { "S": "SeedTick0002" },
+        "instance_id": { "S": "SeedAcme0001" },
+        "number": { "N": "2" },
+        "subject": { "S": "Billing discrepancy on invoice #221" },
+        "status": { "S": "open" },
+        "instance_status": { "S": "SeedAcme0001#open" },
+        "instance_visible": { "S": "SeedAcme0001" },
+        "instance_assignee": { "S": "SeedAcme0001#SeedAgentUsr" },
+        "instance_number": { "S": "SeedAcme0001#2" },
+        "requester_emails": {
+          "SS": ["requester2@example.com", "requester2b@example.com"]
+        },
+        "cc_emails": { "SS": ["manager2@example.com"] },
+        "assignee_user_id": { "S": "SeedAgentUsr" },
+        "reply_token": { "S": "SeedReplyTokA002" },
+        "created_at": { "N": "1735693200" },
+        "updated_at": { "N": "1735695000" },
+        "last_activity_at": { "N": "1735695000" }
+      },
+      {
+        "_comment": "Acme #3: closed, assigned to the seeded owner.",
+        "id": { "S": "SeedTick0003" },
+        "instance_id": { "S": "SeedAcme0001" },
+        "number": { "N": "3" },
+        "subject": { "S": "Feature request: dark mode for admin panel" },
+        "status": { "S": "closed" },
+        "instance_status": { "S": "SeedAcme0001#closed" },
+        "instance_visible": { "S": "SeedAcme0001" },
+        "instance_assignee": { "S": "SeedAcme0001#SeedOwnerUsr" },
+        "instance_number": { "S": "SeedAcme0001#3" },
+        "requester_emails": { "SS": ["requester3@example.com"] },
+        "assignee_user_id": { "S": "SeedOwnerUsr" },
+        "reply_token": { "S": "SeedReplyTokA003" },
+        "created_at": { "N": "1735696800" },
+        "updated_at": { "N": "1735698600" },
+        "last_activity_at": { "N": "1735698600" }
+      },
+      {
+        "_comment": "Acme #4: soft-deleted. instance_visible and instance_assignee are absent (per the omit-optional-attributes house rule), instance_status carries the #deleted suffix — the ticket is still readable by id/instance_number but dropped out of every normal list.",
+        "id": { "S": "SeedTick0004" },
+        "instance_id": { "S": "SeedAcme0001" },
+        "number": { "N": "4" },
+        "subject": { "S": "asdf test please ignore" },
+        "status": { "S": "deleted" },
+        "instance_status": { "S": "SeedAcme0001#deleted" },
+        "instance_number": { "S": "SeedAcme0001#4" },
+        "requester_emails": { "SS": ["requester4@example.com"] },
+        "reply_token": { "S": "SeedReplyTokA004" },
+        "created_at": { "N": "1735700400" },
+        "updated_at": { "N": "1735700400" },
+        "last_activity_at": { "N": "1735700400" }
+      },
+      {
+        "_comment": "Acme #5: open, unassigned, has an internal note (see ticket_message SeedMsg00008) — exercises the requester-must-never-see-notes rule.",
+        "id": { "S": "SeedTick0005" },
+        "instance_id": { "S": "SeedAcme0001" },
+        "number": { "N": "5" },
+        "subject": { "S": "Password reset email never arrives" },
+        "status": { "S": "open" },
+        "instance_status": { "S": "SeedAcme0001#open" },
+        "instance_visible": { "S": "SeedAcme0001" },
+        "instance_number": { "S": "SeedAcme0001#5" },
+        "requester_emails": { "SS": ["requester5@example.com"] },
+        "reply_token": { "S": "SeedReplyTokA005" },
+        "created_at": { "N": "1735704000" },
+        "updated_at": { "N": "1735704600" },
+        "last_activity_at": { "N": "1735704600" }
+      },
+      {
+        "_comment": "Ridgeline #1: open, assigned to the seeded owner (the only member of Ridgeline).",
+        "id": { "S": "SeedTick0006" },
+        "instance_id": { "S": "SeedRidge001" },
+        "number": { "N": "1" },
+        "subject": { "S": "Trail map missing waypoints near summit" },
+        "status": { "S": "open" },
+        "instance_status": { "S": "SeedRidge001#open" },
+        "instance_visible": { "S": "SeedRidge001" },
+        "instance_assignee": { "S": "SeedRidge001#SeedOwnerUsr" },
+        "instance_number": { "S": "SeedRidge001#1" },
+        "requester_emails": { "SS": ["hiker1@example.com"] },
+        "assignee_user_id": { "S": "SeedOwnerUsr" },
+        "reply_token": { "S": "SeedReplyTokR001" },
+        "created_at": { "N": "1735707600" },
+        "updated_at": { "N": "1735709400" },
+        "last_activity_at": { "N": "1735709400" }
+      },
+      {
+        "_comment": "Ridgeline #2: closed, unassigned.",
+        "id": { "S": "SeedTick0007" },
+        "instance_id": { "S": "SeedRidge001" },
+        "number": { "N": "2" },
+        "subject": { "S": "Permit renewal question for group hike" },
+        "status": { "S": "closed" },
+        "instance_status": { "S": "SeedRidge001#closed" },
+        "instance_visible": { "S": "SeedRidge001" },
+        "instance_number": { "S": "SeedRidge001#2" },
+        "requester_emails": { "SS": ["hiker2@example.com"] },
+        "reply_token": { "S": "SeedReplyTokR002" },
+        "created_at": { "N": "1735711200" },
+        "updated_at": { "N": "1735711200" },
+        "last_activity_at": { "N": "1735711200" }
+      }
+    ],
+    "ticket_message": [
+      {
+        "_comment": "Acme #1's opening message — kind inbound, from_email set, no author_user_id.",
+        "id": { "S": "SeedMsg00001" },
+        "ticket_id": { "S": "SeedTick0001" },
+        "kind": { "S": "inbound" },
+        "from_email": { "S": "requester1@example.com" },
+        "to_emails": { "SS": ["support@acme.microticket.test"] },
+        "body_text": { "S": "Hi, the login button does nothing when I click it on Safari. Can you help?" },
+        "created_at": { "N": "1735689600" }
+      },
+      {
+        "_comment": "Acme #2's opening message, with a CC.",
+        "id": { "S": "SeedMsg00002" },
+        "ticket_id": { "S": "SeedTick0002" },
+        "kind": { "S": "inbound" },
+        "from_email": { "S": "requester2@example.com" },
+        "to_emails": { "SS": ["billing@acme.microticket.test"] },
+        "cc_emails": { "SS": ["manager2@example.com"] },
+        "body_text": { "S": "Invoice #221 shows an extra $50 charge we don't recognize." },
+        "created_at": { "N": "1735693200" }
+      },
+      {
+        "_comment": "The assigned agent's reply on Acme #2 — kind reply, author_user_id set, no from_email.",
+        "id": { "S": "SeedMsg00003" },
+        "ticket_id": { "S": "SeedTick0002" },
+        "kind": { "S": "reply" },
+        "author_user_id": { "S": "SeedAgentUsr" },
+        "to_emails": { "SS": ["requester2@example.com", "requester2b@example.com"] },
+        "cc_emails": { "SS": ["manager2@example.com"] },
+        "body_text": { "S": "Thanks for flagging this — looking into it now." },
+        "created_at": { "N": "1735695000" }
+      },
+      {
+        "_comment": "Acme #3's opening message.",
+        "id": { "S": "SeedMsg00004" },
+        "ticket_id": { "S": "SeedTick0003" },
+        "kind": { "S": "inbound" },
+        "from_email": { "S": "requester3@example.com" },
+        "to_emails": { "SS": ["support@acme.microticket.test"] },
+        "body_text": { "S": "Any chance of a dark mode for the admin panel?" },
+        "created_at": { "N": "1735696800" }
+      },
+      {
+        "_comment": "The owner's reply that closed Acme #3.",
+        "id": { "S": "SeedMsg00005" },
+        "ticket_id": { "S": "SeedTick0003" },
+        "kind": { "S": "reply" },
+        "author_user_id": { "S": "SeedOwnerUsr" },
+        "to_emails": { "SS": ["requester3@example.com"] },
+        "body_text": { "S": "Added to our roadmap — thanks for the suggestion!" },
+        "created_at": { "N": "1735698600" }
+      },
+      {
+        "_comment": "Acme #4's (deleted ticket) opening message.",
+        "id": { "S": "SeedMsg00006" },
+        "ticket_id": { "S": "SeedTick0004" },
+        "kind": { "S": "inbound" },
+        "from_email": { "S": "requester4@example.com" },
+        "to_emails": { "SS": ["support@acme.microticket.test"] },
+        "body_text": { "S": "asdf" },
+        "created_at": { "N": "1735700400" }
+      },
+      {
+        "_comment": "Acme #5's opening message.",
+        "id": { "S": "SeedMsg00007" },
+        "ticket_id": { "S": "SeedTick0005" },
+        "kind": { "S": "inbound" },
+        "from_email": { "S": "requester5@example.com" },
+        "to_emails": { "SS": ["support@acme.microticket.test"] },
+        "body_text": { "S": "I never received the password reset email, can you check?" },
+        "created_at": { "N": "1735704000" }
+      },
+      {
+        "_comment": "An internal note on Acme #5 — kind note, author_user_id set, never emailed, never visible to a requester. The ticket_message.kind that api/tests exercises the requester-visibility rule against.",
+        "id": { "S": "SeedMsg00008" },
+        "ticket_id": { "S": "SeedTick0005" },
+        "kind": { "S": "note" },
+        "author_user_id": { "S": "SeedAgentUsr" },
+        "body_text": { "S": "Checked the SES suppression list — their address bounced last month; may need a manual reset link." },
+        "created_at": { "N": "1735704600" }
+      },
+      {
+        "_comment": "Ridgeline #1's opening message.",
+        "id": { "S": "SeedMsg00009" },
+        "ticket_id": { "S": "SeedTick0006" },
+        "kind": { "S": "inbound" },
+        "from_email": { "S": "hiker1@example.com" },
+        "to_emails": { "SS": ["support@ridgeline.microticket.test"] },
+        "body_text": { "S": "The trail map for the summit route is missing a couple of waypoints." },
+        "created_at": { "N": "1735707600" }
+      },
+      {
+        "_comment": "The owner's reply on Ridgeline #1.",
+        "id": { "S": "SeedMsg00010" },
+        "ticket_id": { "S": "SeedTick0006" },
+        "kind": { "S": "reply" },
+        "author_user_id": { "S": "SeedOwnerUsr" },
+        "to_emails": { "SS": ["hiker1@example.com"] },
+        "body_text": { "S": "Thanks for the heads up, we'll get the map updated this week." },
+        "created_at": { "N": "1735709400" }
+      },
+      {
+        "_comment": "Ridgeline #2's opening (and only) message — closed without a reply.",
+        "id": { "S": "SeedMsg00011" },
+        "ticket_id": { "S": "SeedTick0007" },
+        "kind": { "S": "inbound" },
+        "from_email": { "S": "hiker2@example.com" },
+        "to_emails": { "SS": ["support@ridgeline.microticket.test"] },
+        "body_text": { "S": "Do we need a new permit if our group size changes?" },
+        "created_at": { "N": "1735711200" }
+      }
+    ],
+    "counter": [
+      {
+        "_comment": "Acme's next-ticket-number counter, in step with the 5 tickets seeded above.",
+        "id": { "S": "SeedAcme0001" },
+        "next_ticket_number": { "N": "5" }
+      },
+      {
+        "_comment": "Ridgeline's counter, in step with the 2 tickets seeded above.",
+        "id": { "S": "SeedRidge001" },
+        "next_ticket_number": { "N": "2" }
+      }
     ]
   }
 }

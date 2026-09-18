@@ -7,6 +7,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use async_graphql::connection::{Connection, EmptyFields};
+use async_graphql::dataloader::DataLoader;
 use async_graphql::{Context, Enum, ID, Object, SimpleObject};
 
 use crate::app::{App, HasDb};
@@ -14,8 +16,11 @@ use crate::auth::AuthInfo;
 use crate::db;
 use crate::db::Handler as _;
 
-use super::auth::{AuthGuard, AuthRequirement};
+use super::auth::{AuthGuard, AuthRequirement, is_member, is_owner};
+use super::dataloader::DatabaseLoader;
 use super::error::ApiError;
+use super::pagination::{build_connection, pagination_args};
+use super::{InstanceId, UserId};
 
 /// Metadata for a stored passkey credential — never the credential itself (no
 /// private key material, no raw `passkey_json`).
@@ -363,6 +368,318 @@ impl<A: App + HasDb + Send + Sync + 'static> User<A> {
     }
 }
 
+// ── Tickets ──────────────────────────────────────────────────────────────────
+
+/// `ticket.status`, exposed over GraphQL. Also `setTicketStatus`'s argument
+/// type — deleting/restoring a ticket is just `setTicketStatus(DELETED)` /
+/// `setTicketStatus(OPEN)`, not a separate mutation, since the three states
+/// are exactly `TicketStatus`'s three variants.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum TicketStatusType {
+    Open,
+    Closed,
+    Deleted,
+}
+
+impl From<db::TicketStatus> for TicketStatusType {
+    fn from(s: db::TicketStatus) -> Self {
+        match s {
+            db::TicketStatus::Open => Self::Open,
+            db::TicketStatus::Closed => Self::Closed,
+            db::TicketStatus::Deleted => Self::Deleted,
+        }
+    }
+}
+
+impl From<TicketStatusType> for db::TicketStatus {
+    fn from(s: TicketStatusType) -> Self {
+        match s {
+            TicketStatusType::Open => Self::Open,
+            TicketStatusType::Closed => Self::Closed,
+            TicketStatusType::Deleted => Self::Deleted,
+        }
+    }
+}
+
+/// `tickets(status:)`'s filter — a superset of [`TicketStatusType`] with
+/// `ALL` (every non-deleted ticket, the `instance_visible` GSI). `DELETED` is
+/// the explicit, owner-only way to reach deleted tickets — enforced in the
+/// `tickets` resolver, not by the schema.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum TicketStatusFilterType {
+    Open,
+    Closed,
+    All,
+    Deleted,
+}
+
+/// `ticket_message.kind`, exposed over GraphQL.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum TicketMessageKindType {
+    Inbound,
+    Reply,
+    Note,
+    System,
+}
+
+impl From<db::TicketMessageKind> for TicketMessageKindType {
+    fn from(k: db::TicketMessageKind) -> Self {
+        match k {
+            db::TicketMessageKind::Inbound => Self::Inbound,
+            db::TicketMessageKind::Reply => Self::Reply,
+            db::TicketMessageKind::Note => Self::Note,
+            db::TicketMessageKind::System => Self::System,
+        }
+    }
+}
+
+/// A `ticket_message` row, exposed over GraphQL. Reachable only through
+/// [`Ticket::messages`] (never listed independently), which is where the
+/// internal-note visibility rule is enforced.
+///
+/// **`attachments` is deliberately not exposed yet** — no write path in this
+/// step populates `ticket_message.attachments` (see `db::Attachment`'s doc
+/// comment), and shipping a field that always returns an empty list would
+/// misleadingly suggest attachments are supported. That, and
+/// `createAttachmentUpload`, are `TODO(step 7)`.
+#[derive(Debug, PartialEq)]
+pub struct TicketMessage<A: App + HasDb + Send + Sync> {
+    _marker: PhantomData<A>,
+    rec: db::TicketMessage,
+}
+
+impl<A: App + HasDb + Send + Sync> TicketMessage<A> {
+    pub fn new(rec: db::TicketMessage) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec,
+        }
+    }
+}
+
+impl<A: App + HasDb + Send + Sync> Clone for TicketMessage<A> {
+    fn clone(&self) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec: self.rec.clone(),
+        }
+    }
+}
+
+#[Object]
+impl<A: App + HasDb + Send + Sync + 'static> TicketMessage<A> {
+    async fn id(&self) -> ID {
+        ID(self.rec.id.clone())
+    }
+    async fn ticket_id(&self) -> ID {
+        ID(self.rec.ticket_id.clone())
+    }
+    async fn kind(&self) -> TicketMessageKindType {
+        self.rec.kind.into()
+    }
+    async fn author_user_id(&self) -> Option<ID> {
+        self.rec.author_user_id.clone().map(ID)
+    }
+    /// The message's author, for `reply`/`note` messages — `null` for
+    /// `inbound`/`system`. Dataloaded (see `graphql::dataloader`): a thread
+    /// with several staff replies resolves every author in one `BatchGetItem`,
+    /// not one per message.
+    async fn author(&self, ctx: &Context<'_>) -> Result<Option<User<A>>> {
+        let Some(uid) = &self.rec.author_user_id else {
+            return Ok(None);
+        };
+        let loader = ctx.data_unchecked::<DataLoader<DatabaseLoader<A>>>();
+        let rec = loader
+            .load_one(UserId(ID(uid.clone())))
+            .await
+            .map_err(|e| anyhow!("Failed to load author via DataLoader: {}", e))?;
+        Ok(rec.map(User::new))
+    }
+    async fn from_email(&self) -> Option<&str> {
+        self.rec.from_email.as_deref()
+    }
+    async fn to_emails(&self) -> &[String] {
+        &self.rec.to_emails
+    }
+    async fn cc_emails(&self) -> &[String] {
+        &self.rec.cc_emails
+    }
+    async fn body_text(&self) -> Option<&str> {
+        self.rec.body_text.as_deref()
+    }
+    async fn body_html(&self) -> Option<&str> {
+        self.rec.body_html.as_deref()
+    }
+    async fn rfc_message_id(&self) -> Option<&str> {
+        self.rec.rfc_message_id.as_deref()
+    }
+    async fn in_reply_to(&self) -> Option<&str> {
+        self.rec.in_reply_to.as_deref()
+    }
+    async fn created_at(&self) -> i64 {
+        self.rec.created_at as i64
+    }
+}
+
+/// A `ticket` row, exposed over GraphQL to its instance's members — and, for
+/// exactly the fields resolvable off `self.rec` plus [`Ticket::messages`]'s
+/// filtered view, to the requester who opened it (see [`QueryRoot::ticket`]'s
+/// doc comment for why a `Requester` principal can reach a `Ticket` at all,
+/// given the build plan's "a Requester token can only call submitTicket,
+/// never read anything" — this is the one documented exception, needed to
+/// give a requester any way to see their own ticket's thread, and it never
+/// weakens the internal-note rule).
+#[derive(Debug, PartialEq)]
+pub struct Ticket<A: App + HasDb + Send + Sync> {
+    _marker: PhantomData<A>,
+    rec: db::Ticket,
+}
+
+impl<A: App + HasDb + Send + Sync> Ticket<A> {
+    pub fn new(rec: db::Ticket) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec,
+        }
+    }
+}
+
+impl<A: App + HasDb + Send + Sync> Clone for Ticket<A> {
+    fn clone(&self) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec: self.rec.clone(),
+        }
+    }
+}
+
+#[Object]
+impl<A: App + HasDb + Send + Sync + 'static> Ticket<A> {
+    async fn id(&self) -> ID {
+        ID(self.rec.id.clone())
+    }
+    async fn instance_id(&self) -> ID {
+        ID(self.rec.instance_id.clone())
+    }
+    /// Dataloaded — see [`TicketMessage::author`]'s doc comment for why this
+    /// matters on a list page (a page of tickets across several instances,
+    /// once cross-instance views exist, would otherwise N+1).
+    async fn instance(&self, ctx: &Context<'_>) -> Result<Instance<A>> {
+        let loader = ctx.data_unchecked::<DataLoader<DatabaseLoader<A>>>();
+        loader
+            .load_one(InstanceId(ID(self.rec.instance_id.clone())))
+            .await
+            .map_err(|e| anyhow!("Failed to load instance via DataLoader: {}", e))?
+            .map(Instance::new)
+            .ok_or_else(|| anyhow!("Instance with ID {} missing", self.rec.instance_id))
+    }
+    async fn number(&self) -> i64 {
+        self.rec.number as i64
+    }
+    async fn subject(&self) -> &str {
+        &self.rec.subject
+    }
+    async fn status(&self) -> TicketStatusType {
+        self.rec.status.into()
+    }
+    async fn requester_emails(&self) -> &[String] {
+        &self.rec.requester_emails
+    }
+    async fn cc_emails(&self) -> &[String] {
+        &self.rec.cc_emails
+    }
+    async fn assignee_user_id(&self) -> Option<ID> {
+        self.rec.assignee_user_id.clone().map(ID)
+    }
+    /// Dataloaded — see [`TicketMessage::author`]'s doc comment.
+    async fn assignee(&self, ctx: &Context<'_>) -> Result<Option<User<A>>> {
+        let Some(uid) = &self.rec.assignee_user_id else {
+            return Ok(None);
+        };
+        let loader = ctx.data_unchecked::<DataLoader<DatabaseLoader<A>>>();
+        let rec = loader
+            .load_one(UserId(ID(uid.clone())))
+            .await
+            .map_err(|e| anyhow!("Failed to load assignee via DataLoader: {}", e))?;
+        Ok(rec.map(User::new))
+    }
+    async fn created_at(&self) -> i64 {
+        self.rec.created_at as i64
+    }
+    async fn updated_at(&self) -> i64 {
+        self.rec.updated_at as i64
+    }
+    async fn last_activity_at(&self) -> i64 {
+        self.rec.last_activity_at as i64
+    }
+
+    /// Every message on this ticket, oldest first — the thread view's data
+    /// source. **Internal notes (`kind: NOTE`) are filtered out for anyone
+    /// but a member of this ticket's instance** — enforced here, not only in
+    /// the web UI, per the build plan's hard requirement that a note must
+    /// never be visible to a requester. A caller who is neither a member of
+    /// this instance nor the requester who opened this specific ticket gets
+    /// `FORBIDDEN`, not a filtered (possibly empty) list — this field must
+    /// not become a way to probe whether a ticket id exists.
+    async fn messages(&self, ctx: &Context<'_>) -> Result<Vec<TicketMessage<A>>> {
+        let show_notes = match ctx.data_opt::<AuthInfo>() {
+            Some(AuthInfo::User { memberships, .. }) => {
+                if !is_member(memberships, &self.rec.instance_id) {
+                    return Err(
+                        ApiError::forbidden("Not a member of this ticket's instance").into(),
+                    );
+                }
+                true
+            }
+            Some(AuthInfo::Requester { email, instance_id }) => {
+                if instance_id != &self.rec.instance_id
+                    || !self.rec.requester_emails.iter().any(|e| e == email)
+                {
+                    return Err(ApiError::forbidden("Not authorized to view this ticket").into());
+                }
+                false
+            }
+            None => return Err(ApiError::forbidden("Must be authenticated").into()),
+        };
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let msgs = app.db().list_ticket_messages(&self.rec.id).await?;
+        Ok(msgs
+            .into_iter()
+            .filter(|m| show_notes || m.kind != db::TicketMessageKind::Note)
+            .map(TicketMessage::new)
+            .collect())
+    }
+}
+
+/// Default/max page size for `tickets`, matching seslogin's periods
+/// convention (small default so a queue page render stays cheap; a generous
+/// but bounded max so a client can't force an unbounded scan).
+const DEFAULT_TICKET_PAGE_SIZE: usize = 25;
+const MAX_TICKET_PAGE_SIZE: usize = 100;
+
+/// `{last_activity_at}:{id}` — see `db::TicketCursor`'s doc comment. Mirrors
+/// seslogin's `encode_period_cursor`.
+fn encode_ticket_cursor(t: &db::Ticket) -> String {
+    format!("{}:{}", t.last_activity_at, t.id)
+}
+
+fn decode_ticket_cursor(cursor: &str) -> Result<db::TicketCursor> {
+    let mut parts = cursor.splitn(2, ':');
+    let last_activity_at = parts
+        .next()
+        .ok_or_else(|| anyhow!("Invalid cursor"))?
+        .parse::<u64>()
+        .map_err(|_| anyhow!("Invalid cursor"))?;
+    let id = parts.next().ok_or_else(|| anyhow!("Invalid cursor"))?;
+    if id.is_empty() {
+        return Err(anyhow!("Invalid cursor"));
+    }
+    Ok(db::TicketCursor {
+        last_activity_at,
+        id: id.to_string(),
+    })
+}
+
 pub struct QueryRoot<A: App + HasDb + Send + Sync> {
     _marker: PhantomData<A>,
 }
@@ -455,5 +772,190 @@ impl<A: App + HasDb + Send + Sync + 'static> QueryRoot<A> {
             .filter(|i| i.public_submission_enabled && !i.deleted)
             .map(PublicInstance::from)
             .collect())
+    }
+
+    /// One of the four ticket listing views, as a Relay connection ordered
+    /// newest-activity-first. `status` defaults to `OPEN`; `DELETED` is
+    /// owner-only (the explicit way to reach a soft-deleted ticket) —
+    /// checked here, not by a static guard, since it depends on the `status`
+    /// argument's value. `assignedTo`, when given, takes priority over
+    /// `status`'s usual GSI choice and queries `instance_assignee` instead,
+    /// narrowed by `status` via a `FilterExpression` when it isn't `ALL` (see
+    /// `db::TicketListFilter`'s doc comment).
+    ///
+    /// **No `search` argument.** The build plan's schema sketch shows one,
+    /// but DynamoDB cannot do a text search without a table scan, and a
+    /// bounded post-filter (fetch a page, then filter in memory) would look
+    /// like search while silently missing matches outside that page — worse
+    /// than not having it. Left out of the schema; see `SCHEMA.md` for the
+    /// same note next to the `ticket` table.
+    #[allow(clippy::too_many_arguments)]
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Member(instance_id.to_string()))")]
+    async fn tickets(
+        &self,
+        ctx: &Context<'_>,
+        instance_id: ID,
+        #[graphql(default_with = "TicketStatusFilterType::Open")] status: TicketStatusFilterType,
+        assigned_to: Option<ID>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<Connection<String, Ticket<A>, EmptyFields, EmptyFields>> {
+        let Some(AuthInfo::User { memberships, .. }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        };
+        if status == TicketStatusFilterType::Deleted && !is_owner(memberships, instance_id.as_str())
+        {
+            return Err(ApiError::forbidden("Only an owner can list deleted tickets").into());
+        }
+
+        let after_cursor = after.as_deref().map(decode_ticket_cursor).transpose()?;
+        let before_cursor = before.as_deref().map(decode_ticket_cursor).transpose()?;
+        let has_after = after_cursor.is_some();
+        let has_before = before_cursor.is_some();
+        let (page_size, is_last_mode) =
+            pagination_args(first, last, DEFAULT_TICKET_PAGE_SIZE, MAX_TICKET_PAGE_SIZE)?;
+        let fetch_limit = i32::try_from(page_size.saturating_add(1))
+            .map_err(|_| anyhow!("Requested page is too large"))?;
+
+        let filter = match &assigned_to {
+            Some(uid) => db::TicketListFilter::AssignedTo {
+                user_id: uid.to_string(),
+                status: match status {
+                    TicketStatusFilterType::Open => Some(db::TicketStatus::Open),
+                    TicketStatusFilterType::Closed => Some(db::TicketStatus::Closed),
+                    TicketStatusFilterType::All => None,
+                    TicketStatusFilterType::Deleted => Some(db::TicketStatus::Deleted),
+                },
+            },
+            None => match status {
+                TicketStatusFilterType::Open => {
+                    db::TicketListFilter::Status(db::TicketStatus::Open)
+                }
+                TicketStatusFilterType::Closed => {
+                    db::TicketListFilter::Status(db::TicketStatus::Closed)
+                }
+                TicketStatusFilterType::All => db::TicketListFilter::Visible,
+                TicketStatusFilterType::Deleted => {
+                    db::TicketListFilter::Status(db::TicketStatus::Deleted)
+                }
+            },
+        };
+
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let items = app
+            .db()
+            .list_tickets(
+                instance_id.as_str(),
+                filter,
+                db::ListTicketsPage {
+                    after: after_cursor,
+                    before: before_cursor,
+                    limit: fetch_limit,
+                    descending: !is_last_mode,
+                },
+            )
+            .await?;
+
+        Ok(build_connection(
+            items,
+            page_size,
+            is_last_mode,
+            has_after,
+            has_before,
+            |t| (encode_ticket_cursor(t), Ticket::new(t.clone())),
+        ))
+    }
+
+    /// Fetch a single ticket by id. Reachable by a member of its instance, or
+    /// by the `Requester` who opened it (matching `instance_id` *and*
+    /// `requester_emails`) — see [`Ticket`]'s doc comment for why a
+    /// `Requester` can reach this at all. Anyone else — including a member of
+    /// a *different* instance, or a requester who isn't on this ticket —
+    /// gets `null`, identically to a nonexistent id, so this can't be used to
+    /// probe which ticket ids exist in another instance.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn ticket(&self, ctx: &Context<'_>, id: ID) -> Result<Option<Ticket<A>>> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let Some(rec) = app
+            .db()
+            .get_tickets(&[id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let visible = match ctx.data_opt::<AuthInfo>() {
+            Some(AuthInfo::User { memberships, .. }) => is_member(memberships, &rec.instance_id),
+            Some(AuthInfo::Requester { email, instance_id }) => {
+                instance_id == &rec.instance_id && rec.requester_emails.iter().any(|e| e == email)
+            }
+            None => false,
+        };
+        if !visible {
+            return Ok(None);
+        }
+        Ok(Some(Ticket::new(rec)))
+    }
+}
+
+#[cfg(test)]
+mod ticket_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn ticket_cursor_round_trips() {
+        let t = db::Ticket {
+            id: "tick0000001".into(),
+            instance_id: "inst1".into(),
+            number: 7,
+            subject: "Help".into(),
+            status: db::TicketStatus::Open,
+            requester_emails: vec!["a@example.com".into()],
+            cc_emails: vec![],
+            assignee_user_id: None,
+            reply_token: "0123456789abcdef".into(),
+            created_at: 1_000,
+            updated_at: 1_000,
+            last_activity_at: 1_234_567,
+        };
+        let cursor = encode_ticket_cursor(&t);
+        assert_eq!(cursor, "1234567:tick0000001");
+        let decoded = decode_ticket_cursor(&cursor).unwrap();
+        assert_eq!(decoded.last_activity_at, 1_234_567);
+        assert_eq!(decoded.id, "tick0000001");
+    }
+
+    #[test]
+    fn decode_ticket_cursor_rejects_missing_separator() {
+        assert!(decode_ticket_cursor("nosep").is_err());
+    }
+
+    #[test]
+    fn decode_ticket_cursor_rejects_non_numeric_timestamp() {
+        assert!(decode_ticket_cursor("notanumber:tick1").is_err());
+    }
+
+    #[test]
+    fn decode_ticket_cursor_rejects_empty_id() {
+        assert!(decode_ticket_cursor("1234567:").is_err());
+    }
+
+    #[test]
+    fn decode_ticket_cursor_rejects_empty_string() {
+        assert!(decode_ticket_cursor("").is_err());
+    }
+
+    #[test]
+    fn decode_ticket_cursor_accepts_an_id_containing_a_colon() {
+        // splitn(2, ':') means only the first colon splits — an id (unlikely
+        // in practice, since ids are nanoids, but not schema-forbidden)
+        // containing a colon must not truncate.
+        let decoded = decode_ticket_cursor("42:abc:def").unwrap();
+        assert_eq!(decoded.last_activity_at, 42);
+        assert_eq!(decoded.id, "abc:def");
     }
 }

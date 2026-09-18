@@ -116,6 +116,72 @@ type MutationRoot {
 	"""
 	removeInboundAddress(instanceId: ID!, address: String!): Boolean!
 	"""
+	Open a new ticket from the public submit form. **Requester-token
+	only** — the instance and the requester's email come from the token
+	(`AuthInfo::Requester`), never from an argument, so this can't be used
+	to open a ticket in someone else's name or in an instance the token
+	wasn't scoped to. The requester's own submission becomes the ticket's
+	first message, stored as `kind: INBOUND` with `fromEmail` set (never
+	`authorUserId` — no staff member wrote it).
+	"""
+	submitTicket(subject: String!, body: String!): Ticket!
+	"""
+	Reply to a ticket as a member (agent/owner). Creates the `ticket_message`
+	row (`kind: REPLY`) and bumps the ticket's activity — **does not
+	actually send the email**. `TODO(step 6)`: build the outbound MIME
+	message (`mail-builder`) and send it via SESv2 with the `Reply-To`
+	threading token; this step only persists the reply and updates the
+	ticket, which is why `rfc_message_id` is absent on the returned
+	message (there is no real one yet). Attachments are similarly
+	`TODO(step 7)` — no `attachmentKeys` argument exists yet.
+	"""
+	replyToTicket(ticketId: ID!, body: String!): TicketMessage!
+	"""
+	Add an internal note to a ticket. Member-only, same per-ticket
+	authorization as every other ticket mutation. Stored as `kind: NOTE`,
+	which `Ticket.messages` filters out for anyone but a member of this
+	ticket's instance — see that field's doc comment. Never emailed, now
+	or ever: the outbound-mail path (step 6) only ever sends `REPLY`
+	messages.
+	"""
+	addInternalNote(ticketId: ID!, body: String!): TicketMessage!
+	"""
+	Change a ticket's status — `OPEN`/`CLOSED`/`DELETED`. Deleting and
+	restoring a ticket are just this mutation with `DELETED`/`OPEN`: see
+	`db::TicketUpdateShape::SetStatusAndAssignee`'s doc comment for why
+	that one variant, not a bespoke delete/restore code path, is what
+	keeps the three composite marker attributes consistent. A no-op
+	transition (already at the requested status) still succeeds, returning
+	the ticket unchanged, rather than erroring — idempotent by design.
+	"""
+	setTicketStatus(ticketId: ID!, status: TicketStatusType!): Ticket!
+	"""
+	Assign (or, with `userId: null`, unassign) a ticket. The target user,
+	when assigning, must themselves be a member of this ticket's
+	instance — assigning to an outsider would be silently useless (they
+	could never see it via the "assigned to me" filter, which is itself
+	instance-scoped).
+	"""
+	assignTicket(ticketId: ID!, userId: ID): Ticket!
+	"""
+	Add a requester (a "To" recipient) to a ticket.
+	"""
+	addTicketRequester(ticketId: ID!, email: String!): Ticket!
+	"""
+	Remove a requester from a ticket. Refuses to remove the last one — a
+	ticket must always have someone to reply to.
+	"""
+	removeTicketRequester(ticketId: ID!, email: String!): Ticket!
+	"""
+	Add a CC recipient to a ticket.
+	"""
+	addTicketCc(ticketId: ID!, email: String!): Ticket!
+	"""
+	Remove a CC recipient from a ticket. Unlike requesters, CCs may go to
+	zero — there is no "must keep at least one" rule for them.
+	"""
+	removeTicketCc(ticketId: ID!, email: String!): Ticket!
+	"""
 	Revoke the calling token, if there is one to revoke (a `Requester`
 	capability token, or an impersonated dev-auth session, has none — this is
 	still a harmless `true` for either).
@@ -155,6 +221,28 @@ type MutationRoot {
 	"not found" as [`Self::rename_passkey`].
 	"""
 	deletePasskey(id: String!): Boolean!
+}
+
+"""
+Information about pagination in a connection
+"""
+type PageInfo {
+	"""
+	When paginating backwards, are there more items?
+	"""
+	hasPreviousPage: Boolean!
+	"""
+	When paginating forwards, are there more items?
+	"""
+	hasNextPage: Boolean!
+	"""
+	When paginating backwards, the cursor to continue.
+	"""
+	startCursor: String
+	"""
+	When paginating forwards, the cursor to continue.
+	"""
+	endCursor: String
 }
 
 type PasskeyChallenge {
@@ -216,6 +304,155 @@ type QueryRoot {
 	comment for why nothing else about a tenant may leak here.
 	"""
 	publicInstances: [PublicInstance!]!
+	"""
+	One of the four ticket listing views, as a Relay connection ordered
+	newest-activity-first. `status` defaults to `OPEN`; `DELETED` is
+	owner-only (the explicit way to reach a soft-deleted ticket) —
+	checked here, not by a static guard, since it depends on the `status`
+	argument's value. `assignedTo`, when given, takes priority over
+	`status`'s usual GSI choice and queries `instance_assignee` instead,
+	narrowed by `status` via a `FilterExpression` when it isn't `ALL` (see
+	`db::TicketListFilter`'s doc comment).
+	
+	**No `search` argument.** The build plan's schema sketch shows one,
+	but DynamoDB cannot do a text search without a table scan, and a
+	bounded post-filter (fetch a page, then filter in memory) would look
+	like search while silently missing matches outside that page — worse
+	than not having it. Left out of the schema; see `SCHEMA.md` for the
+	same note next to the `ticket` table.
+	"""
+	tickets(instanceId: ID!, status: TicketStatusFilterType! = OPEN, assignedTo: ID, after: String, before: String, first: Int, last: Int): TicketConnection!
+	"""
+	Fetch a single ticket by id. Reachable by a member of its instance, or
+	by the `Requester` who opened it (matching `instance_id` *and*
+	`requester_emails`) — see [`Ticket`]'s doc comment for why a
+	`Requester` can reach this at all. Anyone else — including a member of
+	a *different* instance, or a requester who isn't on this ticket —
+	gets `null`, identically to a nonexistent id, so this can't be used to
+	probe which ticket ids exist in another instance.
+	"""
+	ticket(id: ID!): Ticket
+}
+
+type Ticket {
+	id: ID!
+	instanceId: ID!
+	"""
+	Dataloaded — see [`TicketMessage::author`]'s doc comment for why this
+	matters on a list page (a page of tickets across several instances,
+	once cross-instance views exist, would otherwise N+1).
+	"""
+	instance: Instance!
+	number: Int!
+	subject: String!
+	status: TicketStatusType!
+	requesterEmails: [String!]!
+	ccEmails: [String!]!
+	assigneeUserId: ID
+	"""
+	Dataloaded — see [`TicketMessage::author`]'s doc comment.
+	"""
+	assignee: User
+	createdAt: Int!
+	updatedAt: Int!
+	lastActivityAt: Int!
+	"""
+	Every message on this ticket, oldest first — the thread view's data
+	source. **Internal notes (`kind: NOTE`) are filtered out for anyone
+	but a member of this ticket's instance** — enforced here, not only in
+	the web UI, per the build plan's hard requirement that a note must
+	never be visible to a requester. A caller who is neither a member of
+	this instance nor the requester who opened this specific ticket gets
+	`FORBIDDEN`, not a filtered (possibly empty) list — this field must
+	not become a way to probe whether a ticket id exists.
+	"""
+	messages: [TicketMessage!]!
+}
+
+type TicketConnection {
+	"""
+	Information to aid in pagination.
+	"""
+	pageInfo: PageInfo!
+	"""
+	A list of edges.
+	"""
+	edges: [TicketEdge!]!
+	"""
+	A list of nodes.
+	"""
+	nodes: [Ticket!]!
+}
+
+"""
+An edge in a connection.
+"""
+type TicketEdge {
+	"""
+	The item at the end of the edge
+	"""
+	node: Ticket!
+	"""
+	A cursor for use in pagination
+	"""
+	cursor: String!
+}
+
+type TicketMessage {
+	id: ID!
+	ticketId: ID!
+	kind: TicketMessageKindType!
+	authorUserId: ID
+	"""
+	The message's author, for `reply`/`note` messages — `null` for
+	`inbound`/`system`. Dataloaded (see `graphql::dataloader`): a thread
+	with several staff replies resolves every author in one `BatchGetItem`,
+	not one per message.
+	"""
+	author: User
+	fromEmail: String
+	toEmails: [String!]!
+	ccEmails: [String!]!
+	bodyText: String
+	bodyHtml: String
+	rfcMessageId: String
+	inReplyTo: String
+	createdAt: Int!
+}
+
+"""
+`ticket_message.kind`, exposed over GraphQL.
+"""
+enum TicketMessageKindType {
+	INBOUND
+	REPLY
+	NOTE
+	SYSTEM
+}
+
+"""
+`tickets(status:)`'s filter — a superset of [`TicketStatusType`] with
+`ALL` (every non-deleted ticket, the `instance_visible` GSI). `DELETED` is
+the explicit, owner-only way to reach deleted tickets — enforced in the
+`tickets` resolver, not by the schema.
+"""
+enum TicketStatusFilterType {
+	OPEN
+	CLOSED
+	ALL
+	DELETED
+}
+
+"""
+`ticket.status`, exposed over GraphQL. Also `setTicketStatus`'s argument
+type — deleting/restoring a ticket is just `setTicketStatus(DELETED)` /
+`setTicketStatus(OPEN)`, not a separate mutation, since the three states
+are exactly `TicketStatus`'s three variants.
+"""
+enum TicketStatusType {
+	OPEN
+	CLOSED
+	DELETED
 }
 
 type User {

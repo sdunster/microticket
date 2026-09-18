@@ -20,7 +20,9 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_dynamodb::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_dynamodb::operation::query::builders::QueryFluentBuilder;
 use aws_sdk_dynamodb::operation::scan::builders::ScanFluentBuilder;
-use aws_sdk_dynamodb::types::{ConsumedCapacity, KeysAndAttributes, ReturnConsumedCapacity};
+use aws_sdk_dynamodb::types::{
+    ConsumedCapacity, KeysAndAttributes, ReturnConsumedCapacity, ReturnValue,
+};
 use aws_sdk_dynamodb::{Client, types::AttributeValue};
 use nanoid::nanoid;
 use std::collections::HashMap;
@@ -156,6 +158,43 @@ impl Item {
         } else {
             Ok(vec![])
         }
+    }
+
+    /// `ticket_message.attachments`: a list of `{s3_key, filename,
+    /// content_type, size}` maps. Missing is empty — no write path in this
+    /// step ever populates this (see [`db::Attachment`]'s doc comment), but
+    /// the parser is written correctly now so a future (step 7) write doesn't
+    /// need a matching hydration change.
+    pub fn attachment_list_field(&self, field: &str) -> anyhow::Result<Vec<db::Attachment>> {
+        let Some(v) = self.0.get(field) else {
+            return Ok(vec![]);
+        };
+        let list = v
+            .as_l()
+            .map_err(|_| anyhow!("Item had attachments field of wrong type: {}", field))?;
+        list.iter()
+            .map(|entry| {
+                let m = entry
+                    .as_m()
+                    .map_err(|_| anyhow!("attachments entry in {} is not a map", field))?;
+                let item = Item(m.clone());
+                Ok(db::Attachment {
+                    s3_key: item
+                        .string_field("s3_key")?
+                        .ok_or_else(|| anyhow!("attachment missing s3_key"))?,
+                    filename: item
+                        .string_field("filename")?
+                        .ok_or_else(|| anyhow!("attachment missing filename"))?,
+                    content_type: item
+                        .string_field("content_type")?
+                        .ok_or_else(|| anyhow!("attachment missing content_type"))?,
+                    size: item
+                        .i64_field("size")?
+                        .ok_or_else(|| anyhow!("attachment missing size"))?
+                        as u64,
+                })
+            })
+            .collect()
     }
 }
 
@@ -332,6 +371,81 @@ impl TryInto<db::EphemeralState> for Item {
             expires_at: self
                 .i64_field("expires_at")?
                 .ok_or_else(|| anyhow!("EphemeralState missing expires_at"))?
+                as u64,
+        })
+    }
+}
+
+impl TryInto<db::Ticket> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::Ticket, Self::Error> {
+        let status_str = self
+            .string_field("status")?
+            .ok_or_else(|| anyhow!("Ticket missing status"))?;
+        let status = db::TicketStatus::parse(&status_str)
+            .ok_or_else(|| anyhow!("Ticket has unrecognized status: {status_str}"))?;
+        Ok(db::Ticket {
+            id: self.id()?,
+            instance_id: self
+                .string_field("instance_id")?
+                .ok_or_else(|| anyhow!("Ticket missing instance_id"))?,
+            number: self
+                .i64_field("number")?
+                .ok_or_else(|| anyhow!("Ticket missing number"))? as u64,
+            subject: self
+                .string_field("subject")?
+                .ok_or_else(|| anyhow!("Ticket missing subject"))?,
+            status,
+            requester_emails: self.string_set_field("requester_emails")?,
+            cc_emails: self.string_set_field("cc_emails")?,
+            assignee_user_id: self.string_field("assignee_user_id")?,
+            reply_token: self
+                .string_field("reply_token")?
+                .ok_or_else(|| anyhow!("Ticket missing reply_token"))?,
+            created_at: self
+                .i64_field("created_at")?
+                .ok_or_else(|| anyhow!("Ticket missing created_at"))?
+                as u64,
+            updated_at: self
+                .i64_field("updated_at")?
+                .ok_or_else(|| anyhow!("Ticket missing updated_at"))?
+                as u64,
+            last_activity_at: self
+                .i64_field("last_activity_at")?
+                .ok_or_else(|| anyhow!("Ticket missing last_activity_at"))?
+                as u64,
+        })
+    }
+}
+
+impl TryInto<db::TicketMessage> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::TicketMessage, Self::Error> {
+        let kind_str = self
+            .string_field("kind")?
+            .ok_or_else(|| anyhow!("TicketMessage missing kind"))?;
+        let kind = db::TicketMessageKind::parse(&kind_str)
+            .ok_or_else(|| anyhow!("TicketMessage has unrecognized kind: {kind_str}"))?;
+        Ok(db::TicketMessage {
+            id: self.id()?,
+            ticket_id: self
+                .string_field("ticket_id")?
+                .ok_or_else(|| anyhow!("TicketMessage missing ticket_id"))?,
+            kind,
+            author_user_id: self.string_field("author_user_id")?,
+            from_email: self.string_field("from_email")?,
+            to_emails: self.string_set_field("to_emails")?,
+            cc_emails: self.string_set_field("cc_emails")?,
+            body_text: self.string_field("body_text")?,
+            body_html: self.string_field("body_html")?,
+            rfc_message_id: self.string_field("rfc_message_id")?,
+            in_reply_to: self.string_field("in_reply_to")?,
+            references: self.string_field("references")?,
+            attachments: self.attachment_list_field("attachments")?,
+            raw_s3_key: self.string_field("raw_s3_key")?,
+            created_at: self
+                .i64_field("created_at")?
+                .ok_or_else(|| anyhow!("TicketMessage missing created_at"))?
                 as u64,
         })
     }
@@ -781,6 +895,24 @@ where
     Item: TryInto<T, Error = HydrationError>,
 {
     Ok(hydrate_items(Some(scan_all_items(op, build).await?))?)
+}
+
+/// Which direction to scan a keyset-paginated GSI query, and whether the
+/// fetched page needs reversing before it is returned. Ported from seslogin's
+/// `dynamodb.rs` (same name, same signature) — see that file's periods
+/// listing for the reference implementation this mirrors.
+///
+/// `descending` is the list's natural order (newest-activity-first for
+/// tickets). `has_after`/`has_before` name which cursor the caller supplied
+/// (at most one — `pagination_args` rejects both `first`/`after` combined
+/// with `last`/`before` before this is ever called with both true).
+fn page_scan_direction(has_after: bool, has_before: bool, descending: bool) -> (bool, bool) {
+    let scan_forward = match (has_after, has_before) {
+        (true, _) => !descending,
+        (false, true) => descending,
+        (false, false) => !descending,
+    };
+    (scan_forward, has_before && !has_after)
 }
 
 impl db::Handler for Handler {
@@ -1441,6 +1573,534 @@ impl db::Handler for Handler {
         Ok(())
     }
 
+    // ── ticket ────────────────────────────────────────────────────────────
+
+    async fn get_tickets<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> db::Result<Vec<Option<db::Ticket>>> {
+        self.get_records("ticket", ids).await
+    }
+
+    async fn increment_ticket_counter(&self, instance_id: &str) -> db::Result<u64> {
+        self.ensure_writable()?;
+        let resp = self
+            .client
+            .update_item()
+            .table_name(self.table_name("counter"))
+            .key("id", AttributeValue::S(instance_id.to_string()))
+            .update_expression("ADD next_ticket_number :one")
+            .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
+            .return_values(ReturnValue::UpdatedNew)
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "increment_ticket_counter",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+        let attrs = resp.attributes.ok_or_else(|| {
+            db::Error::Infrastructure("counter update returned no attributes".into())
+        })?;
+        let n = attrs
+            .get("next_ticket_number")
+            .and_then(|v| v.as_n().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| {
+                db::Error::Infrastructure("counter update missing next_ticket_number".into())
+            })?;
+        Ok(n)
+    }
+
+    async fn create_ticket(
+        &self,
+        instance_id: &str,
+        number: u64,
+        subject: &str,
+        requester_emails: &[String],
+        cc_emails: &[String],
+    ) -> db::Result<db::Ticket> {
+        self.ensure_writable()?;
+        let id = new_id();
+        let now = crate::clock::now_sec();
+        let reply_token = nanoid!(16, &NANOID_ALPHABET);
+        // A freshly created ticket is always Open and unassigned — the only
+        // caller of compute_ticket_markers that doesn't come from
+        // TicketUpdateShape::SetStatusAndAssignee, since there is no prior
+        // marker state to reconcile against yet.
+        let markers = db::compute_ticket_markers(instance_id, db::TicketStatus::Open, None);
+
+        let mut req = self
+            .client
+            .put_item()
+            .table_name(self.table_name("ticket"))
+            .item("id", AttributeValue::S(id.clone()))
+            .item("instance_id", AttributeValue::S(instance_id.to_string()))
+            .item("number", AttributeValue::N(number.to_string()))
+            .item("subject", AttributeValue::S(subject.to_string()))
+            .item(
+                "status",
+                AttributeValue::S(db::TicketStatus::Open.as_str().to_string()),
+            )
+            .item(
+                "instance_status",
+                AttributeValue::S(markers.instance_status.clone()),
+            )
+            .item(
+                "instance_number",
+                AttributeValue::S(format!("{instance_id}#{number}")),
+            )
+            .item("reply_token", AttributeValue::S(reply_token.clone()))
+            .item("created_at", AttributeValue::N(now.to_string()))
+            .item("updated_at", AttributeValue::N(now.to_string()))
+            .item("last_activity_at", AttributeValue::N(now.to_string()))
+            // Guards against an astronomically unlikely nanoid collision, same
+            // convention as create_instance/create_user_token.
+            .condition_expression("attribute_not_exists(id)")
+            .return_consumed_capacity(ReturnConsumedCapacity::Total);
+        if let Some(v) = &markers.instance_visible {
+            req = req.item("instance_visible", AttributeValue::S(v.clone()));
+        }
+        // instance_assignee is never written at creation — a new ticket is
+        // always unassigned, so compute_ticket_markers(.., None) already
+        // omits it.
+        if !requester_emails.is_empty() {
+            req = req.item(
+                "requester_emails",
+                AttributeValue::Ss(requester_emails.to_vec()),
+            );
+        }
+        if !cc_emails.is_empty() {
+            req = req.item("cc_emails", AttributeValue::Ss(cc_emails.to_vec()));
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity("create_ticket", resp.consumed_capacity(), CapKind::Write);
+
+        Ok(db::Ticket {
+            id,
+            instance_id: instance_id.to_string(),
+            number,
+            subject: subject.to_string(),
+            status: db::TicketStatus::Open,
+            requester_emails: requester_emails.to_vec(),
+            cc_emails: cc_emails.to_vec(),
+            assignee_user_id: None,
+            reply_token,
+            created_at: now,
+            updated_at: now,
+            last_activity_at: now,
+        })
+    }
+
+    async fn update_ticket(&self, id: &str, change: db::TicketUpdateShape<'_>) -> db::Result<()> {
+        self.ensure_writable()?;
+        match change {
+            db::TicketUpdateShape::SetStatusAndAssignee {
+                instance_id,
+                status,
+                assignee_user_id,
+                now,
+            } => {
+                let markers = db::compute_ticket_markers(instance_id, status, assignee_user_id);
+
+                let mut sets = vec![
+                    "#status = :status".to_string(),
+                    "updated_at = :now".to_string(),
+                    "last_activity_at = :now".to_string(),
+                    "instance_status = :instance_status".to_string(),
+                ];
+                let mut removes: Vec<&str> = Vec::new();
+
+                let mut req = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .expression_attribute_names("#status", "status")
+                    .expression_attribute_values(
+                        ":status",
+                        AttributeValue::S(status.as_str().to_string()),
+                    )
+                    .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                    .expression_attribute_values(
+                        ":instance_status",
+                        AttributeValue::S(markers.instance_status),
+                    );
+
+                // assignee_user_id (the plain field, not the instance_assignee
+                // GSI marker) always reflects the caller's desired assignee,
+                // independent of status — a deleted-but-assigned ticket keeps
+                // its assignee_user_id so a restore doesn't lose it, even
+                // though instance_assignee is dropped below.
+                match assignee_user_id {
+                    Some(assignee) => {
+                        sets.push("assignee_user_id = :assignee".to_string());
+                        req = req.expression_attribute_values(
+                            ":assignee",
+                            AttributeValue::S(assignee.to_string()),
+                        );
+                    }
+                    None => removes.push("assignee_user_id"),
+                }
+
+                match markers.instance_visible {
+                    Some(v) => {
+                        sets.push("instance_visible = :instance_visible".to_string());
+                        req = req
+                            .expression_attribute_values(":instance_visible", AttributeValue::S(v));
+                    }
+                    None => removes.push("instance_visible"),
+                }
+                match markers.instance_assignee {
+                    Some(v) => {
+                        sets.push("instance_assignee = :instance_assignee".to_string());
+                        req = req.expression_attribute_values(
+                            ":instance_assignee",
+                            AttributeValue::S(v),
+                        );
+                    }
+                    None => removes.push("instance_assignee"),
+                }
+
+                let mut update_expr = format!("SET {}", sets.join(", "));
+                if !removes.is_empty() {
+                    update_expr.push_str(&format!(" REMOVE {}", removes.join(", ")));
+                }
+
+                let resp = req
+                    .update_expression(update_expr)
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Ticket {id}")))?;
+                record_capacity(
+                    "update_ticket_status_assignee",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::TicketUpdateShape::AddRequester { email, now } => {
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression(
+                        "SET updated_at = :now, last_activity_at = :now ADD requester_emails :emails",
+                    )
+                    .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                    .expression_attribute_values(
+                        ":emails",
+                        AttributeValue::Ss(vec![email.to_string()]),
+                    )
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Ticket {id}")))?;
+                record_capacity(
+                    "update_ticket_add_requester",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::TicketUpdateShape::RemoveRequester { email, now } => {
+                // DynamoDB removes a String Set attribute entirely once its
+                // last element is DELETEd — exactly the omit-don't-null
+                // behaviour the house rule wants, with no extra code needed
+                // here.
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression(
+                        "SET updated_at = :now, last_activity_at = :now DELETE requester_emails :emails",
+                    )
+                    .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                    .expression_attribute_values(
+                        ":emails",
+                        AttributeValue::Ss(vec![email.to_string()]),
+                    )
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Ticket {id}")))?;
+                record_capacity(
+                    "update_ticket_remove_requester",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::TicketUpdateShape::AddCc { email, now } => {
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression(
+                        "SET updated_at = :now, last_activity_at = :now ADD cc_emails :emails",
+                    )
+                    .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                    .expression_attribute_values(
+                        ":emails",
+                        AttributeValue::Ss(vec![email.to_string()]),
+                    )
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Ticket {id}")))?;
+                record_capacity(
+                    "update_ticket_add_cc",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::TicketUpdateShape::RemoveCc { email, now } => {
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression(
+                        "SET updated_at = :now, last_activity_at = :now DELETE cc_emails :emails",
+                    )
+                    .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                    .expression_attribute_values(
+                        ":emails",
+                        AttributeValue::Ss(vec![email.to_string()]),
+                    )
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Ticket {id}")))?;
+                record_capacity(
+                    "update_ticket_remove_cc",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::TicketUpdateShape::Touch { now } => {
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("ticket"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET updated_at = :now, last_activity_at = :now")
+                    .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Ticket {id}")))?;
+                record_capacity(
+                    "update_ticket_touch",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_tickets(
+        &self,
+        instance_id: &str,
+        filter: db::TicketListFilter,
+        page: db::ListTicketsPage,
+    ) -> db::Result<Vec<db::Ticket>> {
+        let fetch_limit = page.limit as usize;
+        let (scan_forward, reverse_output) =
+            page_scan_direction(page.after.is_some(), page.before.is_some(), page.descending);
+
+        let (index_name, key_attr, key_value, status_filter_value): (
+            &str,
+            &str,
+            String,
+            Option<String>,
+        ) = match &filter {
+            db::TicketListFilter::Status(status) => (
+                "instance_status-last_activity_at-index",
+                "instance_status",
+                format!("{instance_id}#{}", status.as_str()),
+                None,
+            ),
+            db::TicketListFilter::Visible => (
+                "instance_visible-last_activity_at-index",
+                "instance_visible",
+                instance_id.to_string(),
+                None,
+            ),
+            db::TicketListFilter::AssignedTo { user_id, status } => (
+                "instance_assignee-last_activity_at-index",
+                "instance_assignee",
+                format!("{instance_id}#{user_id}"),
+                status.as_ref().map(|s| s.as_str().to_string()),
+            ),
+        };
+
+        // Initial ExclusiveStartKey from the caller's cursor. Must carry the
+        // table hash key (id) *and* both GSI keys (the queried GSI's hash
+        // attribute + last_activity_at) — see the seslogin periods reference
+        // this mirrors; omitting either silently truncates the page instead
+        // of erroring.
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> =
+            page.after.as_ref().or(page.before.as_ref()).map(|c| {
+                HashMap::from([
+                    ("id".to_string(), AttributeValue::S(c.id.clone())),
+                    (key_attr.to_string(), AttributeValue::S(key_value.clone())),
+                    (
+                        "last_activity_at".to_string(),
+                        AttributeValue::N(c.last_activity_at.to_string()),
+                    ),
+                ])
+            });
+
+        let mut tickets: Vec<db::Ticket> = Vec::new();
+        loop {
+            let mut builder = self
+                .client
+                .query()
+                .table_name(self.table_name("ticket"))
+                .index_name(index_name)
+                .key_condition_expression(format!("{key_attr} = :key_value"))
+                .expression_attribute_values(":key_value", AttributeValue::S(key_value.clone()))
+                .limit(page.limit)
+                .scan_index_forward(scan_forward)
+                .return_consumed_capacity(ReturnConsumedCapacity::Total);
+            if let Some(status_value) = &status_filter_value {
+                builder = builder
+                    .filter_expression("#status = :status_value")
+                    .expression_attribute_names("#status", "status")
+                    .expression_attribute_values(
+                        ":status_value",
+                        AttributeValue::S(status_value.clone()),
+                    );
+            }
+            if let Some(esk) = exclusive_start_key.take() {
+                builder = builder.set_exclusive_start_key(Some(esk));
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+            record_capacity("list_tickets", resp.consumed_capacity(), CapKind::Read);
+            tickets.extend(hydrate_items::<db::Ticket>(resp.items)?);
+            exclusive_start_key = resp.last_evaluated_key;
+
+            if tickets.len() >= fetch_limit || exclusive_start_key.is_none() {
+                break;
+            }
+        }
+
+        if reverse_output {
+            tickets.reverse();
+        }
+        Ok(tickets)
+    }
+
+    // ── ticket_message ───────────────────────────────────────────────────
+
+    async fn create_ticket_message(
+        &self,
+        ticket_id: &str,
+        kind: db::TicketMessageKind,
+        author_user_id: Option<&str>,
+        from_email: Option<&str>,
+        to_emails: &[String],
+        cc_emails: &[String],
+        body_text: Option<&str>,
+        body_html: Option<&str>,
+        in_reply_to: Option<&str>,
+    ) -> db::Result<db::TicketMessage> {
+        self.ensure_writable()?;
+        let id = new_id();
+        let now = crate::clock::now_sec();
+
+        let mut req = self
+            .client
+            .put_item()
+            .table_name(self.table_name("ticket_message"))
+            .item("id", AttributeValue::S(id.clone()))
+            .item("ticket_id", AttributeValue::S(ticket_id.to_string()))
+            .item("kind", AttributeValue::S(kind.as_str().to_string()))
+            .item("created_at", AttributeValue::N(now.to_string()))
+            .condition_expression("attribute_not_exists(id)")
+            .return_consumed_capacity(ReturnConsumedCapacity::Total);
+        if let Some(uid) = author_user_id {
+            req = req.item("author_user_id", AttributeValue::S(uid.to_string()));
+        }
+        if let Some(email) = from_email {
+            req = req.item("from_email", AttributeValue::S(email.to_string()));
+        }
+        if !to_emails.is_empty() {
+            req = req.item("to_emails", AttributeValue::Ss(to_emails.to_vec()));
+        }
+        if !cc_emails.is_empty() {
+            req = req.item("cc_emails", AttributeValue::Ss(cc_emails.to_vec()));
+        }
+        if let Some(t) = body_text {
+            req = req.item("body_text", AttributeValue::S(t.to_string()));
+        }
+        if let Some(h) = body_html {
+            req = req.item("body_html", AttributeValue::S(h.to_string()));
+        }
+        if let Some(irt) = in_reply_to {
+            req = req.item("in_reply_to", AttributeValue::S(irt.to_string()));
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "create_ticket_message",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+
+        Ok(db::TicketMessage {
+            id,
+            ticket_id: ticket_id.to_string(),
+            kind,
+            author_user_id: author_user_id.map(String::from),
+            from_email: from_email.map(String::from),
+            to_emails: to_emails.to_vec(),
+            cc_emails: cc_emails.to_vec(),
+            body_text: body_text.map(String::from),
+            body_html: body_html.map(String::from),
+            rfc_message_id: None,
+            in_reply_to: in_reply_to.map(String::from),
+            references: None,
+            attachments: vec![],
+            raw_s3_key: None,
+            created_at: now,
+        })
+    }
+
+    async fn list_ticket_messages(&self, ticket_id: &str) -> db::Result<Vec<db::TicketMessage>> {
+        query_all("list_ticket_messages", || {
+            self.client
+                .query()
+                .table_name(self.table_name("ticket_message"))
+                .index_name("ticket_id-created_at-index")
+                .key_condition_expression("ticket_id = :ticket_id")
+                .expression_attribute_values(":ticket_id", AttributeValue::S(ticket_id.to_string()))
+        })
+        .await
+    }
+
     // ── webauthn_credential ───────────────────────────────────────────────
 
     async fn create_webauthn_credential(
@@ -1876,5 +2536,28 @@ mod tests {
     fn hydrate_items_lenient_of_empty_input_is_empty() {
         let results: Vec<HydrationResult<TestRow>> = hydrate_items_lenient(None);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn page_scan_direction_no_cursor_scans_in_the_list_order() {
+        // descending=true (the default, newest-first list): no cursor scans
+        // backward through the index (scan_forward=false) to get the newest
+        // items first, and there's no "previous page" boundary to speak of.
+        assert_eq!(page_scan_direction(false, false, true), (false, false));
+        assert_eq!(page_scan_direction(false, false, false), (true, false));
+    }
+
+    #[test]
+    fn page_scan_direction_after_cursor_continues_forward_in_list_order() {
+        assert_eq!(page_scan_direction(true, false, true), (false, false));
+        assert_eq!(page_scan_direction(true, false, false), (true, false));
+    }
+
+    #[test]
+    fn page_scan_direction_before_cursor_scans_backward_and_flags_reverse() {
+        // `before` means "give me the page ending just before this cursor" —
+        // scanned against the list's order, then reversed back for output.
+        assert_eq!(page_scan_direction(false, true, true), (true, true));
+        assert_eq!(page_scan_direction(false, true, false), (false, true));
     }
 }
