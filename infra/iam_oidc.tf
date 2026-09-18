@@ -27,6 +27,20 @@ resource "aws_iam_role" "github_deploy" {
   # (`ref:refs/heads/prod`), not `repo:...:*`. A PR against prod, a tag, or
   # any other branch cannot assume this role — only deploy-prod.yml's own
   # trigger can.
+  #
+  # Two accepted subjects, because GitHub issues the claim in two shapes and
+  # which one you get is a repository setting, not something the workflow
+  # controls:
+  #
+  #   repo:owner/name:ref:refs/heads/prod                    (name-based)
+  #   repo:owner@<owner_id>/name@<repo_id>:ref:refs/heads/prod  (immutable)
+  #
+  # The immutable form embeds GitHub's numeric owner and repository ids, so
+  # trust does not survive a repo being deleted and recreated under the same
+  # name — strictly better, and worth preferring where available. StringEquals
+  # against a list matches if ANY element matches, so listing both keeps the
+  # deploy working whichever shape the repo is configured to emit, without
+  # resorting to a wildcard that would widen what can assume this role.
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -36,7 +50,10 @@ resource "aws_iam_role" "github_deploy" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:ref:refs/heads/prod"
+          "token.actions.githubusercontent.com:sub" = compact([
+            "repo:${var.github_repo}:ref:refs/heads/prod",
+            var.github_repo_immutable == "" ? "" : "repo:${var.github_repo_immutable}:ref:refs/heads/prod",
+          ])
         }
       }
     }]

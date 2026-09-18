@@ -65,3 +65,16 @@ variable "turnstile_secret_key" {
   default     = ""
   sensitive   = true
 }
+
+variable "github_repo_immutable" {
+  description = <<-EOT
+    The immutable form of github_repo -- "owner@<owner_id>/name@<repo_id>" --
+    if the repository emits immutable OIDC subjects. Find the ids with
+    `gh api repos/<owner>/<name> --jq '{o:.owner.id,r:.id}'`, or read the
+    actual claim out of a failed AssumeRoleWithWebIdentity event in CloudTrail.
+    Leave empty if the repository uses name-based subjects; both are accepted
+    when set, so filling it in is never wrong.
+  EOT
+  type        = string
+  default     = ""
+}
