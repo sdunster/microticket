@@ -147,6 +147,29 @@ where
         ));
     };
 
+    // A recipient can resolve to an instance that has since been
+    // soft-deleted — the `inbound_address` row itself isn't touched by
+    // `setInstanceDeleted`, only `instance.deleted`. Mirror the "no matching
+    // inbound address" path exactly: log it, drop the message, create no
+    // ticket, send no mail. The alternative (keep opening tickets against a
+    // deleted instance) is silently wrong in a way nobody would notice until
+    // someone finally looks at that instance's ticket queue again.
+    let instance = app
+        .db()
+        .get_instances(&[instance_id.as_str()])
+        .await?
+        .into_iter()
+        .next()
+        .flatten();
+    if instance.is_none_or(|i| i.deleted) {
+        tracing::info!(
+            ses_message_id,
+            instance_id,
+            "resolved instance is deleted; dropping"
+        );
+        return Ok(Outcome::dropped("resolved instance is deleted"));
+    }
+
     // Loop prevention, part 4: From is one of our own inbound addresses —
     // this needs a DB lookup (see mailloop's module doc), so it happens
     // here rather than in the structural check above.

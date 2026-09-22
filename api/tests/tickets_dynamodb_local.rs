@@ -132,6 +132,7 @@ fn user_auth(user_id: &str, memberships: &[(&str, bool)]) -> AuthInfo {
                 is_owner: *is_owner,
             })
             .collect(),
+        is_superuser: false,
         token_id: None,
     }
 }

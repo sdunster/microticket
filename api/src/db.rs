@@ -91,6 +91,15 @@ pub struct User {
     /// Absent until the user's first authenticated request. Touched at most once
     /// per minute (see `auth::fetch_update_user_auth_info`) to bound write volume.
     pub access_time: Option<u64>,
+    /// Grants admin access to every instance's settings/membership/inbound
+    /// addresses via the `Superuser`/`InstanceOwnerOrSuperuser` GraphQL guards —
+    /// and, per the house rule in `CLAUDE.md`, **nothing else**: a superuser does
+    /// not pass `Member`/`InstanceOwner` and has no implicit ticket access.
+    /// Same omit-optional-attributes convention as `Instance::deleted`: only
+    /// ever written as `true`; absent means `false`. Grantable only via
+    /// `bin/cli.rs`'s `user set-superuser` — no GraphQL mutation constructs
+    /// [`UserUpdateShape::SetSuperuser`].
+    pub superuser: bool,
 }
 
 impl HasID for User {
@@ -112,6 +121,20 @@ pub enum UserUpdateShape<'a> {
     /// Throttled touch of `access_time` on a successful authenticated request;
     /// see [`crate::auth`].
     AccessTime,
+    /// Grant (`true`) or revoke (`false`) superuser. `true` SETs the
+    /// `superuser` attribute; `false` REMOVEs it — never written as
+    /// `Bool(false)`, per the omit-optional-attributes house rule.
+    /// **CLI-only**: `bin/cli.rs`'s `user set-superuser` is the only caller
+    /// that constructs this — no GraphQL mutation may (see
+    /// [`User::superuser`]'s doc comment).
+    SetSuperuser(bool),
+    /// Change a user's email. The taken-address pre-check (mirroring
+    /// [`Handler::create_user`]'s caller-side check) is the caller's job —
+    /// this variant does not re-check, the same division of labour as
+    /// `create_instance`'s slug check.
+    SetEmail {
+        email: &'a str,
+    },
 }
 
 /// A pending email login code. Hash key is `email` itself (see `SCHEMA.md`) — at
@@ -705,6 +728,38 @@ pub async fn resolve_instance_id(db: &impl Handler, slug_or_id: &str) -> Result<
     )))
 }
 
+/// Validate a candidate instance slug's *format*: lowercase ASCII letters,
+/// digits and hyphens only, non-empty, no leading/trailing hyphen, capped at
+/// a sane length (DNS-label-sized, since a slug also has to look reasonable
+/// in a URL path segment and in a `[#{slug}-{number}]` subject tag).
+///
+/// This checks format only — whether the slug is already *taken* is a
+/// separate, deliberately racy pre-check (`get_instance_id_by_slug`; see
+/// [`Handler::create_instance`]'s doc comment for why). Shared by
+/// `bin/cli.rs`'s `instance create` and the `createInstance` GraphQL
+/// mutation so the two can never disagree about what counts as a valid
+/// slug — the CLI had no format check before this function existed, so this
+/// also tightens what `instance create` itself accepts.
+pub fn validate_slug(slug: &str) -> std::result::Result<(), String> {
+    const MAX_LEN: usize = 63;
+    if slug.is_empty() {
+        return Err("slug cannot be empty".to_string());
+    }
+    if slug.len() > MAX_LEN {
+        return Err(format!("slug cannot be longer than {MAX_LEN} characters"));
+    }
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("slug may only contain lowercase letters, digits, and hyphens".to_string());
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        return Err("slug cannot start or end with a hyphen".to_string());
+    }
+    Ok(())
+}
+
 pub trait Handler: Sync {
     // ── instance ──────────────────────────────────────────────────────────
     fn get_instances<T: AsRef<str> + Sync>(
@@ -726,7 +781,8 @@ pub trait Handler: Sync {
     /// concurrent pair of callers that both pass that pre-check can still both
     /// succeed here, leaving two instances that share a slug. That race is
     /// documented (not fixed) in `SCHEMA.md`'s known-issues register: instance
-    /// creation is a rare, operator-driven action (CLI bootstrap), not a
+    /// creation is a rare, operator/admin-driven action (CLI bootstrap, or
+    /// the superuser-only `createInstance` GraphQL mutation), not a
     /// high-concurrency user-facing path, so the explicit pre-check plus a
     /// documented race was chosen over a deterministic-id-from-slug scheme
     /// (which would break if a slug is ever renamed, since `id` is the stable
@@ -778,6 +834,17 @@ pub trait Handler: Sync {
         role: MembershipRole,
     ) -> impl Future<Output = Result<Membership>> + Send;
     fn delete_membership(&self, id: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Change an existing membership's role in place. Added for the
+    /// superuser-only `setMemberRole` GraphQL mutation, which needs to
+    /// change a role without disturbing the membership's `id` (a
+    /// delete-then-recreate would work too, but churns the row's identity
+    /// for no reason and briefly leaves the user with no membership row at
+    /// all if the create half failed).
+    fn update_membership_role(
+        &self,
+        id: &str,
+        role: MembershipRole,
+    ) -> impl Future<Output = Result<()>> + Send;
     fn list_memberships_by_user(
         &self,
         user_id: &str,
@@ -1146,6 +1213,43 @@ mod tests {
         assert_eq!(m.instance_status, "inst1#deleted");
         assert_eq!(m.instance_visible, None);
         assert_eq!(m.instance_assignee, None);
+    }
+
+    #[test]
+    fn validate_slug_accepts_a_normal_slug() {
+        assert!(validate_slug("acme-support").is_ok());
+        assert!(validate_slug("a1").is_ok());
+    }
+
+    #[test]
+    fn validate_slug_rejects_empty() {
+        assert!(validate_slug("").is_err());
+    }
+
+    #[test]
+    fn validate_slug_rejects_uppercase() {
+        assert!(validate_slug("Acme").is_err());
+    }
+
+    #[test]
+    fn validate_slug_rejects_leading_or_trailing_hyphen() {
+        assert!(validate_slug("-acme").is_err());
+        assert!(validate_slug("acme-").is_err());
+    }
+
+    #[test]
+    fn validate_slug_rejects_invalid_characters() {
+        assert!(validate_slug("acme_support").is_err());
+        assert!(validate_slug("acme.support").is_err());
+        assert!(validate_slug("acme support").is_err());
+    }
+
+    #[test]
+    fn validate_slug_rejects_too_long() {
+        let slug = "a".repeat(64);
+        assert!(validate_slug(&slug).is_err());
+        let ok = "a".repeat(63);
+        assert!(validate_slug(&ok).is_ok());
     }
 
     /// The case that makes `Deleted` its own branch rather than falling out of

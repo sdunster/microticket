@@ -97,7 +97,7 @@
     ],
     "user": [
       {
-        "_comment": "The seeded owner. DEVELOPMENT.md documents this email and its ready-made token.",
+        "_comment": "The seeded owner. DEVELOPMENT.md documents this email and its ready-made token. Also the seeded superuser, so a fresh local stack has an admin account ready to use without a separate CLI step.",
         "id": {
           "S": "SeedOwnerUsr"
         },
@@ -112,6 +112,9 @@
         },
         "created_at": {
           "N": "1735689600"
+        },
+        "superuser": {
+          "BOOL": true
         }
       },
       {

@@ -747,3 +747,56 @@ async fn from_our_own_address_is_dropped_as_a_loop() {
         .unwrap();
     assert!(tickets.is_empty(), "{tickets:?}");
 }
+
+/// A soft-deleted instance's inbound address still resolves (deleting an
+/// instance doesn't touch `inbound_address`), but the message must be
+/// dropped the same way mail to no known instance is: logged, no ticket, no
+/// mail sent — never silently reopening/creating tickets against an
+/// instance nobody is looking at any more. See `db::Handler` step 4 in
+/// `inbound::pipeline::process_raw_message` and `SCHEMA.md`'s instance
+/// soft-delete section.
+#[tokio::test]
+async fn mail_to_a_deleted_instance_is_dropped() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance, _domain, support_address) = setup_instance(&db, "deletedinst").await;
+    db.update_instance(&instance.id, db::InstanceUpdateShape::SetDeleted(true))
+        .await
+        .expect("update_instance");
+    let app = test_app(db.clone(), "deletedinst");
+
+    let requester = unique_email("requester");
+    let raw = build_eml(
+        &requester,
+        &[("To", &support_address)],
+        "Anybody there?",
+        "Hoping someone still reads this inbox.",
+    );
+    let outcome = pipeline::process_raw_message(&app, &ses_message_id(), &raw, None)
+        .await
+        .expect("process_raw_message");
+
+    assert!(
+        outcome.dropped_reason.is_some(),
+        "mail to a deleted instance must be dropped: {outcome:?}"
+    );
+    assert!(outcome.ticket_id.is_none());
+
+    let tickets = db
+        .list_tickets(
+            &instance.id,
+            db::TicketListFilter::Visible,
+            db::ListTicketsPage {
+                after: None,
+                before: None,
+                limit: 10,
+                descending: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        tickets.is_empty(),
+        "no ticket must be created against a deleted instance: {tickets:?}"
+    );
+}

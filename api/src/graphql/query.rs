@@ -181,13 +181,29 @@ impl<A: App + HasDb + Send + Sync + 'static> Instance<A> {
     async fn created_at(&self) -> i64 {
         self.rec.created_at as i64
     }
+    /// Soft-delete marker — see `SCHEMA.md`'s instance soft-delete section.
+    /// Reachable here (unlike most tenant data) because the admin
+    /// (`adminInstances`/`adminInstance`) queries deliberately surface
+    /// deleted instances too, so the web admin UI can show and restore
+    /// them; a plain member-facing path never reaches a deleted instance in
+    /// the first place (`instance(slug)` returns `null` for one, and
+    /// `User.memberships` filters them out), so this field is harmless
+    /// there too.
+    async fn deleted(&self) -> bool {
+        self.rec.deleted
+    }
 
-    /// Every inbound address mapped to this instance. Owner-only: per the
-    /// build plan, member invites are deferred to the CLI, and inbound
-    /// addressing is treated with the same "owner, not just any member"
-    /// sensitivity — an agent can work tickets without being able to
-    /// reconfigure where mail routes.
-    #[graphql(guard = "AuthGuard::new(AuthRequirement::InstanceOwner(self.rec.id.clone()))")]
+    /// Every inbound address mapped to this instance. Owner-or-superuser:
+    /// per the build plan, member invites are deferred to the CLI, and
+    /// inbound addressing is treated with the same "owner, not just any
+    /// member" sensitivity — an agent can work tickets without being able
+    /// to reconfigure where mail routes. A superuser can reach this too
+    /// (admin/support), but — per the superuser boundary in `CLAUDE.md` —
+    /// that is instance *settings*, not ticket access; nothing ticket-facing
+    /// grants a superuser anything here.
+    #[graphql(
+        guard = "AuthGuard::new(AuthRequirement::InstanceOwnerOrSuperuser(self.rec.id.clone()))"
+    )]
     async fn inbound_addresses(&self, ctx: &Context<'_>) -> Result<Vec<InboundAddressInfo>> {
         let app = ctx.data_unchecked::<Arc<A>>();
         let addrs = app
@@ -197,11 +213,15 @@ impl<A: App + HasDb + Send + Sync + 'static> Instance<A> {
         Ok(addrs.into_iter().map(InboundAddressInfo::from).collect())
     }
 
-    /// Every member of this instance and their role. Owner-only. There is
-    /// deliberately no way to *invite* a member over GraphQL yet — see
-    /// `bin/cli.rs`'s `member add`, which is how an owner bootstraps their
-    /// team today.
-    #[graphql(guard = "AuthGuard::new(AuthRequirement::InstanceOwner(self.rec.id.clone()))")]
+    /// Every member of this instance and their role. Owner-or-superuser —
+    /// see [`Self::inbound_addresses`]'s doc comment. Member invites
+    /// themselves now also flow through `addMember`/`removeMember`/
+    /// `setMemberRole` (superuser-only, `graphql::mutations`), which is how
+    /// the web admin UI manages membership; `bin/cli.rs`'s `member add`
+    /// remains available for operators working outside the web UI.
+    #[graphql(
+        guard = "AuthGuard::new(AuthRequirement::InstanceOwnerOrSuperuser(self.rec.id.clone()))"
+    )]
     async fn members(&self, ctx: &Context<'_>) -> Result<Vec<MemberInfo<A>>> {
         let app = ctx.data_unchecked::<Arc<A>>();
         let memberships = app.db().list_memberships_by_instance(&self.rec.id).await?;
@@ -325,14 +345,35 @@ impl<A: App + HasDb + Send + Sync + 'static> User<A> {
     async fn access_time(&self) -> Option<i64> {
         self.rec.access_time.map(|t| t as i64)
     }
+    /// Mirrors `db::User::superuser`. Readable on any `User` object (not
+    /// self-guarded like [`Self::passkeys`]) — knowing *whether* someone is
+    /// a superuser is not itself sensitive the way passkey credential
+    /// metadata is, and the admin user list needs to show it for every row.
+    /// It cannot be *set* over GraphQL either way — see
+    /// `db::User::superuser`'s doc comment.
+    #[graphql(name = "isSuperuser")]
+    async fn is_superuser(&self) -> bool {
+        self.rec.superuser
+    }
 
-    /// The caller's own registered passkeys. Guarded again even though the only
-    /// current path to a `User` object (`me`) is already guarded — defence in
-    /// depth against a future unguarded resolver that returns a `User` (e.g. an
-    /// admin-facing user lookup) accidentally leaking another user's passkey
-    /// metadata.
+    /// The caller's own registered passkeys. **Self only**: now that
+    /// `adminUser` lets a superuser look up any user's record, this can no
+    /// longer rely on the only path to a `User` object being `me` — a
+    /// superuser fetching someone else's passkey *metadata* (registration
+    /// time, credential id) would still be a real information leak, even
+    /// though it carries no private key material. `FORBIDDEN`, not an empty
+    /// list, for anyone but the user themselves (including a superuser) —
+    /// an empty list would be indistinguishable from "this user has no
+    /// passkeys" and invite exactly the kind of admin-lookup probing this
+    /// guard exists to prevent.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn passkeys(&self, ctx: &Context<'_>) -> Result<Vec<PasskeyInfo>> {
+        let Some(AuthInfo::User { id, .. }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        };
+        if id != &self.rec.id {
+            return Err(ApiError::forbidden("Cannot view another user's passkeys").into());
+        }
         let app = ctx.data_unchecked::<Arc<A>>();
         let creds = app
             .db()
@@ -341,12 +382,19 @@ impl<A: App + HasDb + Send + Sync + 'static> User<A> {
         Ok(creds.into_iter().map(PasskeyInfo::from).collect())
     }
 
-    /// Every instance this user belongs to, and their role in each — the
-    /// instance switcher's data source. Same defence-in-depth guard as
-    /// [`Self::passkeys`], and the same caveat: this reads `self.rec.id`
-    /// directly (not the caller's own id off `AuthInfo`), so it is already
-    /// correct for a future admin-facing "look up any user" query, not just
-    /// `me`.
+    /// Every (non-deleted) instance this user belongs to, and their role in
+    /// each — the instance switcher's data source, and also what the admin
+    /// user page uses to show a looked-up user's memberships (see this
+    /// field's use from `adminUser`: reusing it here, rather than adding a
+    /// superuser-only duplicate, keeps "which instances is this user a
+    /// member of" defined in exactly one resolver). Deleted instances are
+    /// filtered out — see `SCHEMA.md`'s instance soft-delete section for why
+    /// this, not a DB-level filter, is where that happens. Same
+    /// defence-in-depth guard as [`Self::passkeys`] used to be — unlike
+    /// passkeys, this is *not* self-only: reading who belongs to which
+    /// instance (not the credentials themselves) is the thing a superuser
+    /// legitimately needs `adminUser` for, and this field's own doc comment
+    /// already anticipated that before superusers existed.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn memberships(&self, ctx: &Context<'_>) -> Result<Vec<MembershipInfo<A>>> {
         let app = ctx.data_unchecked::<Arc<A>>();
@@ -360,7 +408,7 @@ impl<A: App + HasDb + Send + Sync + 'static> User<A> {
             .into_iter()
             .zip(instances)
             .filter_map(|(m, inst)| {
-                inst.map(|i| MembershipInfo {
+                inst.filter(|i| !i.deleted).map(|i| MembershipInfo {
                     instance: Instance::new(i),
                     role: m.role.into(),
                 })
@@ -808,7 +856,7 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
         if !memberships.iter().any(|m| m.instance_id == instance_id) {
             return Ok(None);
         }
-        let rec = app
+        let Some(rec) = app
             .db()
             .get_instances(&[&instance_id])
             .await?
@@ -816,7 +864,14 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
             .next()
             .flatten()
             .filter(|i| !i.deleted)
-            .ok_or_else(|| anyhow!("Instance with ID {instance_id} missing"))?;
+        else {
+            // A deleted instance is reported identically to "no such
+            // instance"/"not a member" — `Ok(None)`, never an error — for
+            // the same no-probing reason as the membership check above. A
+            // former member's slug-resolve for an instance an operator just
+            // soft-deleted should look exactly like it stopped existing.
+            return Ok(None);
+        };
         Ok(Some(Instance::new(rec)))
     }
 
@@ -960,6 +1015,69 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
             return Ok(None);
         }
         Ok(Some(Ticket::new(rec)))
+    }
+
+    // ── Admin (superuser-only) ──────────────────────────────────────────────
+
+    /// Every instance, **including soft-deleted ones**, sorted by name — the
+    /// admin instance list. Superuser-only; unlike every other way an
+    /// `Instance` is reached, this deliberately does not filter `deleted`
+    /// out, since restoring a deleted instance is exactly what this list is
+    /// for. A superuser reaching an instance this way still gets no ticket
+    /// access to it — see `CLAUDE.md`'s superuser boundary house rule; this
+    /// query and `adminInstance` expose settings-shaped data only
+    /// (`Instance`'s own fields, `inboundAddresses`, `members`), never a
+    /// `tickets`/`ticket` path, because `Instance` has none.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn admin_instances(&self, ctx: &Context<'_>) -> Result<Vec<Instance<A>>> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let mut instances = app.db().list_instances().await?;
+        instances.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(instances.into_iter().map(Instance::new).collect())
+    }
+
+    /// One instance by id, including a soft-deleted one; `null` if no
+    /// instance has that id at all. Superuser-only — see
+    /// [`Self::admin_instances`]'s doc comment.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn admin_instance(&self, ctx: &Context<'_>, id: ID) -> Result<Option<Instance<A>>> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let rec = app
+            .db()
+            .get_instances(&[id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten();
+        Ok(rec.map(Instance::new))
+    }
+
+    /// Every user, sorted by email — the admin user list. Superuser-only.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn admin_users(&self, ctx: &Context<'_>) -> Result<Vec<User<A>>> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let mut users = app.db().list_users().await?;
+        users.sort_by(|a, b| a.email.cmp(&b.email));
+        Ok(users.into_iter().map(User::new).collect())
+    }
+
+    /// One user by id; `null` if no user has that id. Superuser-only. The
+    /// returned `User`'s `memberships` field is how the admin user page
+    /// shows which instances this user belongs to and in what role — see
+    /// [`User::memberships`]'s doc comment for why that field, not a
+    /// separate superuser-only one, is reused here. `passkeys` stays
+    /// self-only even when reached this way — see that field's doc comment.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn admin_user(&self, ctx: &Context<'_>, id: ID) -> Result<Option<User<A>>> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let rec = app
+            .db()
+            .get_users(&[id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten();
+        Ok(rec.map(User::new))
     }
 }
 

@@ -22,6 +22,11 @@ const SETTINGS_NAV_ITEM = { to: "/app/settings", label: "Settings" };
 // non-owner who navigates to the URL directly still gets FORBIDDEN from the
 // server, surfaced by the page's own error boundary.
 const DELETED_NAV_ITEM = { to: "/app/tickets/deleted", label: "Deleted" };
+// Every `admin*` query/mutation is superuser-only in the API — hiding this
+// item for anyone else is convenience, the same as `DELETED_NAV_ITEM` above;
+// a non-superuser who navigates to `/app/admin/*` directly still gets
+// FORBIDDEN from the server on every field it would try to read.
+const ADMIN_NAV_ITEM = { to: "/app/admin", label: "Admin" };
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   [
@@ -45,6 +50,7 @@ export default function AppShell() {
     ...BASE_NAV_ITEMS,
     ...(selected?.role === "OWNER" ? [DELETED_NAV_ITEM] : []),
     SETTINGS_NAV_ITEM,
+    ...(user.isSuperuser ? [ADMIN_NAV_ITEM] : []),
   ];
 
   return (

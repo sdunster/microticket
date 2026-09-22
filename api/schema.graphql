@@ -44,18 +44,34 @@ type Instance {
 	signature: String!
 	createdAt: Int!
 	"""
-	Every inbound address mapped to this instance. Owner-only: per the
-	build plan, member invites are deferred to the CLI, and inbound
-	addressing is treated with the same "owner, not just any member"
-	sensitivity — an agent can work tickets without being able to
-	reconfigure where mail routes.
+	Soft-delete marker — see `SCHEMA.md`'s instance soft-delete section.
+	Reachable here (unlike most tenant data) because the admin
+	(`adminInstances`/`adminInstance`) queries deliberately surface
+	deleted instances too, so the web admin UI can show and restore
+	them; a plain member-facing path never reaches a deleted instance in
+	the first place (`instance(slug)` returns `null` for one, and
+	`User.memberships` filters them out), so this field is harmless
+	there too.
+	"""
+	deleted: Boolean!
+	"""
+	Every inbound address mapped to this instance. Owner-or-superuser:
+	per the build plan, member invites are deferred to the CLI, and
+	inbound addressing is treated with the same "owner, not just any
+	member" sensitivity — an agent can work tickets without being able
+	to reconfigure where mail routes. A superuser can reach this too
+	(admin/support), but — per the superuser boundary in `CLAUDE.md` —
+	that is instance *settings*, not ticket access; nothing ticket-facing
+	grants a superuser anything here.
 	"""
 	inboundAddresses: [InboundAddressInfo!]!
 	"""
-	Every member of this instance and their role. Owner-only. There is
-	deliberately no way to *invite* a member over GraphQL yet — see
-	`bin/cli.rs`'s `member add`, which is how an owner bootstraps their
-	team today.
+	Every member of this instance and their role. Owner-or-superuser —
+	see [`Self::inbound_addresses`]'s doc comment. Member invites
+	themselves now also flow through `addMember`/`removeMember`/
+	`setMemberRole` (superuser-only, `graphql::mutations`), which is how
+	the web admin UI manages membership; `bin/cli.rs`'s `member add`
+	remains available for operators working outside the web UI.
 	"""
 	members: [MemberInfo!]!
 }
@@ -119,20 +135,126 @@ type MutationRoot {
 	"""
 	verifySubmitCode(slug: String!, email: String!, code: String!): String
 	"""
-	Add an inbound address to an instance. Owner-only. `address` is
-	normalized and classified (exact vs. `*@domain` wildcard) by
+	Add an inbound address to an instance. Owner-or-superuser — see
+	`Instance::inbound_addresses`'s doc comment. `address` is normalized
+	and classified (exact vs. `*@domain` wildcard) by
 	`inbound::routing::classify_for_storage`, the same logic `bin/cli.rs`'s
 	`address add` uses, so the two can never disagree about what counts as
 	a valid address.
 	"""
 	addInboundAddress(instanceId: ID!, address: String!): InboundAddressInfo!
 	"""
-	Remove an inbound address from an instance. Owner-only. An address
-	that doesn't exist, or that belongs to a different instance, is
-	reported the same "not found" either way — so this can't be used to
-	probe another instance's addresses.
+	Remove an inbound address from an instance. Owner-or-superuser — see
+	`Instance::inbound_addresses`'s doc comment. An address that doesn't
+	exist, or that belongs to a different instance, is reported the same
+	"not found" either way — so this can't be used to probe another
+	instance's addresses.
 	"""
 	removeInboundAddress(instanceId: ID!, address: String!): Boolean!
+	"""
+	Create a new instance. Superuser-only — instance creation is now also
+	a web action, not only `bin/cli.rs`'s `instance create`, but stays
+	gated the same way: an operator-driven, low-frequency action, not a
+	self-serve one. Slug format (`db::validate_slug`) and the taken-slug
+	pre-check (`get_instance_id_by_slug`) mirror the CLI's `instance
+	create` exactly, so the two entry points can never disagree about
+	what counts as a valid or available slug — see `SCHEMA.md`'s
+	slug-uniqueness race entry for the pre-check-then-write window this
+	still leaves open, unchanged by this mutation existing. `fromName`
+	defaults to `name`, matching the CLI.
+	"""
+	createInstance(name: String!, slug: String!, fromName: String, signature: String, publicSubmissionEnabled: Boolean!): Instance!
+	"""
+	Update an instance's name/from-name/signature/public-submission
+	setting (`InstanceUpdateShape::Fields`). Superuser-only. There is no
+	`slug` argument — slugs are immutable once created (a rename would
+	break `[#{slug}-{number}]` subject tags already stamped on past
+	tickets and emailed to requesters). Deleting/restoring is a separate
+	mutation, [`Self::set_instance_deleted`] — matching
+	`InstanceUpdateShape` itself treating `deleted` as its own variant.
+	"""
+	updateInstance(id: ID!, name: String!, fromName: String!, signature: String!, publicSubmissionEnabled: Boolean!): Instance!
+	"""
+	Soft-delete (`deleted: true`) or restore (`deleted: false`) an
+	instance — `db::InstanceUpdateShape::SetDeleted`. Superuser-only.
+	See `SCHEMA.md`'s instance soft-delete section for what `deleted`
+	now actually hides: the instance drops out of every member's
+	`memberships` list, `instance(slug)` resolves to `null` for it (both
+	identically to "not a member"/"no such slug", not an error — no
+	probing), and inbound mail addressed to it is dropped the same way
+	mail to no known instance is (logged, no ticket, no mail sent) rather
+	than continuing to open tickets nobody will ever see. A no-op
+	transition (already at the requested state) still succeeds, mirroring
+	`setTicketStatus`'s idempotency.
+	"""
+	setInstanceDeleted(id: ID!, deleted: Boolean!): Instance!
+	"""
+	Create a new user. Does not grant any membership — pair with
+	[`Self::add_member`], mirroring `bin/cli.rs`'s `user create` +
+	`member add`. Superuser-only. Rejects an email already in use, the
+	same pre-check the CLI does. `email` is trimmed and shape-checked
+	([`validate_user_email`]) but not otherwise normalized — `bin/cli.rs`'s
+	`user create`, `request_auth_code`,
+	and `get_user_id_by_email` apply none either (case-sensitive,
+	whitespace-sensitive as stored), so inventing one here would make
+	this entry point disagree with every other one about what "the same
+	address" means.
+	"""
+	createUser(email: String!, name: String!): User!
+	"""
+	Update a user's name, email, and enabled state
+	(`UserUpdateShape::Fields` plus, when the email changed,
+	`UserUpdateShape::SetEmail`). Superuser-only. A changed email is
+	pre-checked against `get_user_id_by_email` before being written,
+	exactly like [`Self::create_user`]. Rejects `enabled: false` when
+	`id` names the caller themselves — self-lockout: `Superuser`
+	authorizes acting on users in general, not any particular one, so
+	nothing else stops a superuser from disabling their own account and
+	having no way back in short of another operator running the CLI.
+	"""
+	updateUser(id: ID!, name: String!, email: String!, enabled: Boolean!): User!
+	"""
+	**Soft delete.** Disables the user (`enabled = false`, which already
+	blocks login and every authenticated request — see
+	`auth::fetch_update_user_auth_info`, which re-checks `enabled` on
+	every request) and removes every membership they hold. Never a hard
+	delete: `ticket_message.author_user_id`/`ticket.assignee_user_id`
+	reference a user by id, so removing the row itself would leave those
+	references dangling. Superuser-only. Rejects deleting the caller's
+	own account — same self-lockout reasoning as
+	[`Self::update_user`]'s doc comment. Written to converge on a retry
+	after a partial failure: the user is disabled first, then
+	memberships are deleted one at a time, so a retry that finds the
+	user already disabled (a prior call's first write succeeded, its
+	second didn't finish) just re-attempts whatever memberships remain,
+	rather than failing on an "already disabled" precondition.
+	"""
+	deleteUser(id: ID!): User!
+	"""
+	Grant `userId` a role in `instanceId`. Superuser-only — the web
+	counterpart to `bin/cli.rs`'s `member add`. Verifies the instance and
+	the user both exist, and rejects if a membership already exists
+	(mirroring the CLI's own pre-check) — use [`Self::set_member_role`]
+	to change an existing membership's role instead.
+	"""
+	addMember(instanceId: ID!, userId: ID!, role: MembershipRoleType!): Instance!
+	"""
+	Revoke `userId`'s membership in `instanceId`. Superuser-only. A
+	membership that doesn't exist is reported `NOT_FOUND`, same as a
+	missing instance — there's no cross-tenant probing concern to hide
+	behind a uniform "not found" here the way ticket mutations do, since
+	a superuser can already see every instance/user via `adminInstances`/
+	`adminUsers`.
+	"""
+	removeMember(instanceId: ID!, userId: ID!): Instance!
+	"""
+	Change an existing membership's role in place
+	(`db::Handler::update_membership_role`), rather than a
+	remove-then-add — see that method's doc comment for why: it keeps
+	the membership row's own id stable and never leaves a window with no
+	membership row at all if a second write failed. Superuser-only.
+	"""
+	setMemberRole(instanceId: ID!, userId: ID!, role: MembershipRoleType!): Instance!
 	"""
 	Open a new ticket from the public submit form. **Requester-token
 	only** — the instance and the requester's email come from the token
@@ -417,6 +539,37 @@ type QueryRoot {
 	probe which ticket ids exist in another instance.
 	"""
 	ticket(id: ID!): Ticket
+	"""
+	Every instance, **including soft-deleted ones**, sorted by name — the
+	admin instance list. Superuser-only; unlike every other way an
+	`Instance` is reached, this deliberately does not filter `deleted`
+	out, since restoring a deleted instance is exactly what this list is
+	for. A superuser reaching an instance this way still gets no ticket
+	access to it — see `CLAUDE.md`'s superuser boundary house rule; this
+	query and `adminInstance` expose settings-shaped data only
+	(`Instance`'s own fields, `inboundAddresses`, `members`), never a
+	`tickets`/`ticket` path, because `Instance` has none.
+	"""
+	adminInstances: [Instance!]!
+	"""
+	One instance by id, including a soft-deleted one; `null` if no
+	instance has that id at all. Superuser-only — see
+	[`Self::admin_instances`]'s doc comment.
+	"""
+	adminInstance(id: ID!): Instance
+	"""
+	Every user, sorted by email — the admin user list. Superuser-only.
+	"""
+	adminUsers: [User!]!
+	"""
+	One user by id; `null` if no user has that id. Superuser-only. The
+	returned `User`'s `memberships` field is how the admin user page
+	shows which instances this user belongs to and in what role — see
+	[`User::memberships`]'s doc comment for why that field, not a
+	separate superuser-only one, is reused here. `passkeys` stays
+	self-only even when reached this way — see that field's doc comment.
+	"""
+	adminUser(id: ID!): User
 }
 
 type Ticket {
@@ -558,20 +711,41 @@ type User {
 	createdAt: Int!
 	accessTime: Int
 	"""
-	The caller's own registered passkeys. Guarded again even though the only
-	current path to a `User` object (`me`) is already guarded — defence in
-	depth against a future unguarded resolver that returns a `User` (e.g. an
-	admin-facing user lookup) accidentally leaking another user's passkey
-	metadata.
+	Mirrors `db::User::superuser`. Readable on any `User` object (not
+	self-guarded like [`Self::passkeys`]) — knowing *whether* someone is
+	a superuser is not itself sensitive the way passkey credential
+	metadata is, and the admin user list needs to show it for every row.
+	It cannot be *set* over GraphQL either way — see
+	`db::User::superuser`'s doc comment.
+	"""
+	isSuperuser: Boolean!
+	"""
+	The caller's own registered passkeys. **Self only**: now that
+	`adminUser` lets a superuser look up any user's record, this can no
+	longer rely on the only path to a `User` object being `me` — a
+	superuser fetching someone else's passkey *metadata* (registration
+	time, credential id) would still be a real information leak, even
+	though it carries no private key material. `FORBIDDEN`, not an empty
+	list, for anyone but the user themselves (including a superuser) —
+	an empty list would be indistinguishable from "this user has no
+	passkeys" and invite exactly the kind of admin-lookup probing this
+	guard exists to prevent.
 	"""
 	passkeys: [PasskeyInfo!]!
 	"""
-	Every instance this user belongs to, and their role in each — the
-	instance switcher's data source. Same defence-in-depth guard as
-	[`Self::passkeys`], and the same caveat: this reads `self.rec.id`
-	directly (not the caller's own id off `AuthInfo`), so it is already
-	correct for a future admin-facing "look up any user" query, not just
-	`me`.
+	Every (non-deleted) instance this user belongs to, and their role in
+	each — the instance switcher's data source, and also what the admin
+	user page uses to show a looked-up user's memberships (see this
+	field's use from `adminUser`: reusing it here, rather than adding a
+	superuser-only duplicate, keeps "which instances is this user a
+	member of" defined in exactly one resolver). Deleted instances are
+	filtered out — see `SCHEMA.md`'s instance soft-delete section for why
+	this, not a DB-level filter, is where that happens. Same
+	defence-in-depth guard as [`Self::passkeys`] used to be — unlike
+	passkeys, this is *not* self-only: reading who belongs to which
+	instance (not the credentials themselves) is the thing a superuser
+	legitimately needs `adminUser` for, and this field's own doc comment
+	already anticipated that before superusers existed.
 	"""
 	memberships: [MembershipInfo!]!
 }
