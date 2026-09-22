@@ -62,6 +62,14 @@ pub enum AuthInfo {
         /// vec just means `Member`/`InstanceOwner` guards correctly reject
         /// everyone, since there is nothing to be a member of yet.
         memberships: Vec<Membership>,
+        /// Mirrors `db::User::superuser`, populated in
+        /// [`fetch_update_user_auth_info`] from the same row fetch that builds
+        /// `memberships` (no extra round trip). Grants the `Superuser`/
+        /// `InstanceOwnerOrSuperuser` guards and **nothing else** — see
+        /// `db::User::superuser`'s doc comment and `CLAUDE.md`'s superuser
+        /// boundary house rule: a superuser must never pass `Member`/
+        /// `InstanceOwner`.
+        is_superuser: bool,
         /// Set only when authenticated via an opaque `mtu_` token (always true
         /// today — there is no other way to authenticate as a `User` yet), so
         /// `logout` can revoke exactly the token that was presented.
@@ -343,6 +351,7 @@ async fn fetch_update_user_auth_info<A: App + HasDb>(
     Ok(AuthInfo::User {
         id: user_id,
         memberships,
+        is_superuser: user.superuser,
         token_id: None,
     })
 }
@@ -383,10 +392,14 @@ async fn verify_token_with_user_token<A: App + HasDb>(
 
     match fetch_update_user_auth_info(app, user_token.user_id).await? {
         AuthInfo::User {
-            id, memberships, ..
+            id,
+            memberships,
+            is_superuser,
+            ..
         } => Ok(AuthInfo::User {
             id,
             memberships,
+            is_superuser,
             token_id: Some(token_id),
         }),
         other => Ok(other),
@@ -465,6 +478,7 @@ mod tests {
         let auth = AuthInfo::User {
             id: "u1".into(),
             memberships: vec![],
+            is_superuser: false,
             token_id: Some("tok1".into()),
         };
         let (kind, id) = caller_info(Some(&auth));

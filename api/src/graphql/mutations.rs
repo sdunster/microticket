@@ -22,7 +22,10 @@ use crate::storage::Handler as _;
 
 use super::auth::{AuthGuard, AuthRequirement, is_member};
 use super::error::ApiError;
-use super::query::{InboundAddressInfo, PasskeyInfo, Ticket, TicketMessage, TicketStatusType};
+use super::query::{
+    InboundAddressInfo, Instance, MembershipRoleType, PasskeyInfo, Ticket, TicketMessage,
+    TicketStatusType, User,
+};
 
 /// One code per address per this many seconds — cheap anti-spam for
 /// `requestAuthCode`, independent of the code's own 10-minute validity.
@@ -250,6 +253,23 @@ async fn send_system_notification<A: App + HasDb + HasMail + Send + Sync>(
             ticket.id
         );
     }
+}
+
+/// Trim an email supplied to `createUser`/`updateUser` and check its shape —
+/// exactly one `@` with non-empty parts either side. Deliberately **not**
+/// lowercased, unlike [`normalize_ticket_email`]: login (`request_auth_code`,
+/// `get_user_id_by_email`) matches a user's email exactly as stored, so
+/// changing case here would make an admin-created account harder to log in
+/// to, not easier.
+fn validate_user_email(raw: &str) -> Result<String> {
+    let email = raw.trim();
+    let valid = email.split_once('@').is_some_and(|(local, domain)| {
+        !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+    });
+    if !valid {
+        return Err(anyhow!("{raw:?} is not a valid email address"));
+    }
+    Ok(email.to_string())
 }
 
 /// Trim, lowercase, and sanity-check an email address supplied to
@@ -710,12 +730,15 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         }
     }
 
-    /// Add an inbound address to an instance. Owner-only. `address` is
-    /// normalized and classified (exact vs. `*@domain` wildcard) by
+    /// Add an inbound address to an instance. Owner-or-superuser — see
+    /// `Instance::inbound_addresses`'s doc comment. `address` is normalized
+    /// and classified (exact vs. `*@domain` wildcard) by
     /// `inbound::routing::classify_for_storage`, the same logic `bin/cli.rs`'s
     /// `address add` uses, so the two can never disagree about what counts as
     /// a valid address.
-    #[graphql(guard = "AuthGuard::new(AuthRequirement::InstanceOwner(instance_id.to_string()))")]
+    #[graphql(
+        guard = "AuthGuard::new(AuthRequirement::InstanceOwnerOrSuperuser(instance_id.to_string()))"
+    )]
     async fn add_inbound_address(
         &self,
         instance_id: ID,
@@ -738,11 +761,14 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         Ok(created.into())
     }
 
-    /// Remove an inbound address from an instance. Owner-only. An address
-    /// that doesn't exist, or that belongs to a different instance, is
-    /// reported the same "not found" either way — so this can't be used to
-    /// probe another instance's addresses.
-    #[graphql(guard = "AuthGuard::new(AuthRequirement::InstanceOwner(instance_id.to_string()))")]
+    /// Remove an inbound address from an instance. Owner-or-superuser — see
+    /// `Instance::inbound_addresses`'s doc comment. An address that doesn't
+    /// exist, or that belongs to a different instance, is reported the same
+    /// "not found" either way — so this can't be used to probe another
+    /// instance's addresses.
+    #[graphql(
+        guard = "AuthGuard::new(AuthRequirement::InstanceOwnerOrSuperuser(instance_id.to_string()))"
+    )]
     async fn remove_inbound_address(&self, instance_id: ID, address: String) -> Result<bool> {
         let normalized = address.trim().to_lowercase();
         let existing = self
@@ -757,6 +783,414 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             .delete_inbound_address(&existing.address)
             .await?;
         Ok(true)
+    }
+
+    // ── Admin (superuser-only) mutations ─────────────────────────────────────
+    //
+    // Every mutation below is guarded on `AuthRequirement::Superuser` and
+    // sends no mail — internal bookkeeping, per CLAUDE.md's "Outbound mail"
+    // entry, same as `assignTicket`/the requester/CC edits. None of them
+    // grant any ticket access: the superuser boundary (CLAUDE.md) is admin +
+    // instance settings only. Granting superuser itself has no mutation at
+    // all — see `db::User::superuser`'s doc comment: `bin/cli.rs`'s `user
+    // set-superuser` is the only way.
+
+    /// Create a new instance. Superuser-only — instance creation is now also
+    /// a web action, not only `bin/cli.rs`'s `instance create`, but stays
+    /// gated the same way: an operator-driven, low-frequency action, not a
+    /// self-serve one. Slug format (`db::validate_slug`) and the taken-slug
+    /// pre-check (`get_instance_id_by_slug`) mirror the CLI's `instance
+    /// create` exactly, so the two entry points can never disagree about
+    /// what counts as a valid or available slug — see `SCHEMA.md`'s
+    /// slug-uniqueness race entry for the pre-check-then-write window this
+    /// still leaves open, unchanged by this mutation existing. `fromName`
+    /// defaults to `name`, matching the CLI.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn create_instance(
+        &self,
+        name: String,
+        slug: String,
+        from_name: Option<String>,
+        signature: Option<String>,
+        public_submission_enabled: bool,
+    ) -> Result<Instance<A>> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("name cannot be empty"));
+        }
+        let slug = slug.trim().to_string();
+        db::validate_slug(&slug).map_err(ApiError::forbidden)?;
+        if self
+            .app
+            .db()
+            .get_instance_id_by_slug(&slug)
+            .await?
+            .is_some()
+        {
+            return Err(ApiError::conflict(format!("slug {slug:?} is already taken")).into());
+        }
+        let from_name = from_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(name);
+        let signature = signature.unwrap_or_default();
+        let created = self
+            .app
+            .db()
+            .create_instance(
+                name,
+                &slug,
+                from_name,
+                &signature,
+                public_submission_enabled,
+            )
+            .await?;
+        Ok(Instance::new(created))
+    }
+
+    /// Update an instance's name/from-name/signature/public-submission
+    /// setting (`InstanceUpdateShape::Fields`). Superuser-only. There is no
+    /// `slug` argument — slugs are immutable once created (a rename would
+    /// break `[#{slug}-{number}]` subject tags already stamped on past
+    /// tickets and emailed to requesters). Deleting/restoring is a separate
+    /// mutation, [`Self::set_instance_deleted`] — matching
+    /// `InstanceUpdateShape` itself treating `deleted` as its own variant.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn update_instance(
+        &self,
+        id: ID,
+        name: String,
+        from_name: String,
+        signature: String,
+        public_submission_enabled: bool,
+    ) -> Result<Instance<A>> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("name cannot be empty"));
+        }
+        let current = self
+            .app
+            .db()
+            .get_instances(&[id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", id.as_str()))?;
+        self.app
+            .db()
+            .update_instance(
+                id.as_str(),
+                db::InstanceUpdateShape::Fields {
+                    name,
+                    from_name: &from_name,
+                    signature: &signature,
+                    public_submission_enabled,
+                },
+            )
+            .await?;
+        Ok(Instance::new(db::Instance {
+            name: name.to_string(),
+            from_name,
+            signature,
+            public_submission_enabled,
+            ..current
+        }))
+    }
+
+    /// Soft-delete (`deleted: true`) or restore (`deleted: false`) an
+    /// instance — `db::InstanceUpdateShape::SetDeleted`. Superuser-only.
+    /// See `SCHEMA.md`'s instance soft-delete section for what `deleted`
+    /// now actually hides: the instance drops out of every member's
+    /// `memberships` list, `instance(slug)` resolves to `null` for it (both
+    /// identically to "not a member"/"no such slug", not an error — no
+    /// probing), and inbound mail addressed to it is dropped the same way
+    /// mail to no known instance is (logged, no ticket, no mail sent) rather
+    /// than continuing to open tickets nobody will ever see. A no-op
+    /// transition (already at the requested state) still succeeds, mirroring
+    /// `setTicketStatus`'s idempotency.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn set_instance_deleted(&self, id: ID, deleted: bool) -> Result<Instance<A>> {
+        let current = self
+            .app
+            .db()
+            .get_instances(&[id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", id.as_str()))?;
+        if current.deleted != deleted {
+            self.app
+                .db()
+                .update_instance(id.as_str(), db::InstanceUpdateShape::SetDeleted(deleted))
+                .await?;
+        }
+        Ok(Instance::new(db::Instance { deleted, ..current }))
+    }
+
+    /// Create a new user. Does not grant any membership — pair with
+    /// [`Self::add_member`], mirroring `bin/cli.rs`'s `user create` +
+    /// `member add`. Superuser-only. Rejects an email already in use, the
+    /// same pre-check the CLI does. `email` is trimmed and shape-checked
+    /// ([`validate_user_email`]) but not otherwise normalized — `bin/cli.rs`'s
+    /// `user create`, `request_auth_code`,
+    /// and `get_user_id_by_email` apply none either (case-sensitive,
+    /// whitespace-sensitive as stored), so inventing one here would make
+    /// this entry point disagree with every other one about what "the same
+    /// address" means.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn create_user(&self, email: String, name: String) -> Result<User<A>> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("name cannot be empty"));
+        }
+        let email = validate_user_email(&email)?;
+        let email = email.as_str();
+        if self.app.db().get_user_id_by_email(email).await?.is_some() {
+            return Err(
+                ApiError::conflict(format!("a user with email {email} already exists")).into(),
+            );
+        }
+        let created = self.app.db().create_user(email, name).await?;
+        Ok(User::new(created))
+    }
+
+    /// Update a user's name, email, and enabled state
+    /// (`UserUpdateShape::Fields` plus, when the email changed,
+    /// `UserUpdateShape::SetEmail`). Superuser-only. A changed email is
+    /// pre-checked against `get_user_id_by_email` before being written,
+    /// exactly like [`Self::create_user`]. Rejects `enabled: false` when
+    /// `id` names the caller themselves — self-lockout: `Superuser`
+    /// authorizes acting on users in general, not any particular one, so
+    /// nothing else stops a superuser from disabling their own account and
+    /// having no way back in short of another operator running the CLI.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn update_user(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        name: String,
+        email: String,
+        enabled: bool,
+    ) -> Result<User<A>> {
+        let caller_id = require_user_id(ctx)?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("name cannot be empty"));
+        }
+        let email = validate_user_email(&email)?;
+        let current = self
+            .app
+            .db()
+            .get_users(&[id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("User", id.as_str()))?;
+        if !enabled && id.as_str() == caller_id {
+            return Err(ApiError::forbidden("Cannot disable your own account").into());
+        }
+        if email != current.email && self.app.db().get_user_id_by_email(&email).await?.is_some() {
+            return Err(
+                ApiError::conflict(format!("a user with email {email} already exists")).into(),
+            );
+        }
+        if email != current.email {
+            self.app
+                .db()
+                .update_user(id.as_str(), db::UserUpdateShape::SetEmail { email: &email })
+                .await?;
+        }
+        self.app
+            .db()
+            .update_user(id.as_str(), db::UserUpdateShape::Fields { name, enabled })
+            .await?;
+        Ok(User::new(db::User {
+            name: name.to_string(),
+            email,
+            enabled,
+            ..current
+        }))
+    }
+
+    /// **Soft delete.** Disables the user (`enabled = false`, which already
+    /// blocks login and every authenticated request — see
+    /// `auth::fetch_update_user_auth_info`, which re-checks `enabled` on
+    /// every request) and removes every membership they hold. Never a hard
+    /// delete: `ticket_message.author_user_id`/`ticket.assignee_user_id`
+    /// reference a user by id, so removing the row itself would leave those
+    /// references dangling. Superuser-only. Rejects deleting the caller's
+    /// own account — same self-lockout reasoning as
+    /// [`Self::update_user`]'s doc comment. Written to converge on a retry
+    /// after a partial failure: the user is disabled first, then
+    /// memberships are deleted one at a time, so a retry that finds the
+    /// user already disabled (a prior call's first write succeeded, its
+    /// second didn't finish) just re-attempts whatever memberships remain,
+    /// rather than failing on an "already disabled" precondition.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn delete_user(&self, ctx: &Context<'_>, id: ID) -> Result<User<A>> {
+        let caller_id = require_user_id(ctx)?;
+        if id.as_str() == caller_id {
+            return Err(ApiError::forbidden("Cannot delete your own account").into());
+        }
+        let current = self
+            .app
+            .db()
+            .get_users(&[id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("User", id.as_str()))?;
+        self.app
+            .db()
+            .update_user(
+                id.as_str(),
+                db::UserUpdateShape::Fields {
+                    name: &current.name,
+                    enabled: false,
+                },
+            )
+            .await?;
+        let memberships = self.app.db().list_memberships_by_user(id.as_str()).await?;
+        for m in &memberships {
+            self.app.db().delete_membership(&m.id).await?;
+        }
+        Ok(User::new(db::User {
+            enabled: false,
+            ..current
+        }))
+    }
+
+    /// Grant `userId` a role in `instanceId`. Superuser-only — the web
+    /// counterpart to `bin/cli.rs`'s `member add`. Verifies the instance and
+    /// the user both exist, and rejects if a membership already exists
+    /// (mirroring the CLI's own pre-check) — use [`Self::set_member_role`]
+    /// to change an existing membership's role instead.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn add_member(
+        &self,
+        instance_id: ID,
+        user_id: ID,
+        role: MembershipRoleType,
+    ) -> Result<Instance<A>> {
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+        let user_exists = self
+            .app
+            .db()
+            .get_users(&[user_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .is_some();
+        if !user_exists {
+            return Err(ApiError::not_found("User", user_id.as_str()).into());
+        }
+        let existing = self
+            .app
+            .db()
+            .list_memberships_by_user(user_id.as_str())
+            .await?;
+        if existing.iter().any(|m| m.instance_id == instance.id) {
+            return Err(ApiError::conflict(format!(
+                "user {} is already a member of instance {} — use setMemberRole to change the role",
+                user_id.as_str(),
+                instance_id.as_str()
+            ))
+            .into());
+        }
+        self.app
+            .db()
+            .create_membership(user_id.as_str(), &instance.id, role.into())
+            .await?;
+        Ok(Instance::new(instance))
+    }
+
+    /// Revoke `userId`'s membership in `instanceId`. Superuser-only. A
+    /// membership that doesn't exist is reported `NOT_FOUND`, same as a
+    /// missing instance — there's no cross-tenant probing concern to hide
+    /// behind a uniform "not found" here the way ticket mutations do, since
+    /// a superuser can already see every instance/user via `adminInstances`/
+    /// `adminUsers`.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn remove_member(&self, instance_id: ID, user_id: ID) -> Result<Instance<A>> {
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+        let membership = self
+            .app
+            .db()
+            .list_memberships_by_user(user_id.as_str())
+            .await?
+            .into_iter()
+            .find(|m| m.instance_id == instance.id)
+            .ok_or_else(|| {
+                ApiError::not_found(
+                    "Membership",
+                    format!("{}@{}", user_id.as_str(), instance_id.as_str()),
+                )
+            })?;
+        self.app.db().delete_membership(&membership.id).await?;
+        Ok(Instance::new(instance))
+    }
+
+    /// Change an existing membership's role in place
+    /// (`db::Handler::update_membership_role`), rather than a
+    /// remove-then-add — see that method's doc comment for why: it keeps
+    /// the membership row's own id stable and never leaves a window with no
+    /// membership row at all if a second write failed. Superuser-only.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
+    async fn set_member_role(
+        &self,
+        instance_id: ID,
+        user_id: ID,
+        role: MembershipRoleType,
+    ) -> Result<Instance<A>> {
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+        let membership = self
+            .app
+            .db()
+            .list_memberships_by_user(user_id.as_str())
+            .await?
+            .into_iter()
+            .find(|m| m.instance_id == instance.id)
+            .ok_or_else(|| {
+                ApiError::not_found(
+                    "Membership",
+                    format!("{}@{}", user_id.as_str(), instance_id.as_str()),
+                )
+            })?;
+        self.app
+            .db()
+            .update_membership_role(&membership.id, role.into())
+            .await?;
+        Ok(Instance::new(instance))
     }
 
     // ── Ticket mutations ─────────────────────────────────────────────────────
@@ -1754,6 +2188,24 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_user_email_trims_but_preserves_case() {
+        assert_eq!(
+            validate_user_email("  Bob@Example.com ").unwrap(),
+            "Bob@Example.com"
+        );
+    }
+
+    #[test]
+    fn validate_user_email_rejects_malformed_addresses() {
+        for bad in ["", "   ", "bob", "@example.com", "bob@", "a@b@c"] {
+            assert!(
+                validate_user_email(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
 
     /// Sanitized fixture, hand-constructed (not captured from a real device) to
     /// match `webauthn-rs` 0.5.5's `Passkey` serde shape exactly — every field

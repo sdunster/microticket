@@ -11,7 +11,9 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use microticket::db::{self, Handler, Instance, InstanceUpdateShape, MembershipRole, User};
+use microticket::db::{
+    self, Handler, Instance, InstanceUpdateShape, MembershipRole, User, UserUpdateShape,
+};
 use microticket::dynamodb;
 use microticket::inbound::routing;
 use std::path::PathBuf;
@@ -50,8 +52,9 @@ enum Object {
         cmd: UserCmd,
     },
     /// Instance memberships — who belongs to which instance, in what role.
-    /// This is how a member is added; there is no invite mutation over
-    /// GraphQL (see the build plan's "member invites are deferred").
+    /// Also manageable over GraphQL (`addMember`/`removeMember`/
+    /// `setMemberRole`, superuser-only) — this subcommand remains for
+    /// operators working outside the web admin UI.
     Member {
         #[command(subcommand)]
         cmd: MemberCmd,
@@ -127,7 +130,29 @@ enum AddressCmd {
 #[derive(Subcommand, Debug)]
 enum UserCmd {
     /// Create a user. Does not create any membership — pair with `member add`.
-    Create { email: String, name: String },
+    Create {
+        email: String,
+        name: String,
+        /// Grant superuser immediately (admin + instance settings across
+        /// every instance — never ticket access; see `CLAUDE.md`'s
+        /// superuser boundary house rule). Equivalent to `create` followed
+        /// by `set-superuser <id> true`.
+        #[arg(long)]
+        superuser: bool,
+    },
+    /// Grant or revoke superuser. **The only way to grant it** — no GraphQL
+    /// mutation can, by design (see `db::User::superuser`'s doc comment).
+    /// `<id-or-email>` accepts either, mirroring `member add`'s `--user`.
+    SetSuperuser {
+        id_or_email: String,
+        /// `true`/`false`. Explicit (not a bare flag) since this is a
+        /// positional value, not `--superuser` — mirrors `instance update
+        /// --deleted <bool>`'s explicitness for the same reason: a bare
+        /// flag can only ever mean "set to true", and revoking needs the
+        /// same command shape as granting.
+        #[arg(action = clap::ArgAction::Set)]
+        value: bool,
+    },
     /// List every user.
     List,
 }
@@ -231,7 +256,7 @@ fn print_instance(i: &Instance) {
 
 fn print_user(u: &User) {
     println!(
-        "id: {}\nemail: {}\nname: {}\nenabled: {}\ncreated_at: {}\naccess_time: {}",
+        "id: {}\nemail: {}\nname: {}\nenabled: {}\ncreated_at: {}\naccess_time: {}\nsuperuser: {}",
         u.id,
         u.email,
         u.name,
@@ -240,6 +265,7 @@ fn print_user(u: &User) {
         u.access_time
             .map(|t| t.to_string())
             .unwrap_or_else(|| "-".to_string()),
+        bool_str(u.superuser),
     );
 }
 
@@ -266,6 +292,7 @@ async fn run_instance(db: &impl Handler, cmd: InstanceCmd, dry_run: bool) -> Res
             signature,
             public_submission_enabled,
         } => {
+            db::validate_slug(&slug).map_err(|e| anyhow!(e))?;
             if db.get_instance_id_by_slug(&slug).await?.is_some() {
                 return Err(anyhow!("slug {slug:?} is already taken"));
             }
@@ -418,30 +445,51 @@ async fn run_address(db: &impl Handler, cmd: AddressCmd, dry_run: bool) -> Resul
 
 async fn run_user(db: &impl Handler, cmd: UserCmd, dry_run: bool) -> Result<()> {
     match cmd {
-        UserCmd::Create { email, name } => {
+        UserCmd::Create {
+            email,
+            name,
+            superuser,
+        } => {
             if db.get_user_id_by_email(&email).await?.is_some() {
                 return Err(anyhow!("a user with email {email} already exists"));
             }
             if dry_run {
-                println!("[dry-run] would create user email={email:?} name={name:?}");
+                println!(
+                    "[dry-run] would create user email={email:?} name={name:?} superuser={superuser}"
+                );
                 return Ok(());
             }
             let user = db.create_user(&email, &name).await?;
-            print_user(&user);
+            if superuser {
+                db.update_user(&user.id, UserUpdateShape::SetSuperuser(true))
+                    .await?;
+            }
+            print_user(&User { superuser, ..user });
+        }
+        UserCmd::SetSuperuser { id_or_email, value } => {
+            let user_id = resolve_user_id(db, &id_or_email).await?;
+            if dry_run {
+                println!("[dry-run] would set user {user_id} superuser={value}");
+                return Ok(());
+            }
+            db.update_user(&user_id, UserUpdateShape::SetSuperuser(value))
+                .await?;
+            println!("user {user_id} superuser={value}");
         }
         UserCmd::List => {
             let users = db.list_users().await?;
             println!(
-                "{:>12}  {:<30}  {:<20}  {:<7}",
-                "id", "email", "name", "enabled"
+                "{:>12}  {:<30}  {:<20}  {:<7}  {:<9}",
+                "id", "email", "name", "enabled", "superuser"
             );
             for u in &users {
                 println!(
-                    "{:<12}  {:<30}  {:<20}  {:<7}",
+                    "{:<12}  {:<30}  {:<20}  {:<7}  {:<9}",
                     u.id,
                     u.email,
                     u.name,
-                    bool_str(u.enabled)
+                    bool_str(u.enabled),
+                    bool_str(u.superuser)
                 );
             }
             println!("{} user(s)", users.len());

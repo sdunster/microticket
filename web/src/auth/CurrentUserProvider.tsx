@@ -17,6 +17,14 @@ import { useRetryableLazyLoadQuery } from "../components/useRetryableLazyLoadQue
 // differently"). This is the one query that runs for every `/app/*` page —
 // anything more page-specific (e.g. the passkey list on Settings) gets its
 // own query at the point it's needed, not appended here.
+//
+// `memberships { instance { id } }` is selected plainly (not via a
+// colocated fragment) for the same reason as the scalars above: `AppRoute`'s
+// index redirect needs to know synchronously whether a superuser has *any*
+// membership, and that data is already fetched by `InstanceSwitcher_user`
+// below — duplicating the selection (GraphQL/Relay dedupe it) beats adding a
+// second query or threading a callback out of InstanceSwitcher just to
+// unmask one array's length.
 /* eslint-disable relay/unused-fields, relay/must-colocate-fragment-spreads */
 const currentUserProviderQuery = graphql`
   query CurrentUserProviderQuery @throwOnFieldError {
@@ -25,6 +33,12 @@ const currentUserProviderQuery = graphql`
       email
       name
       enabled
+      isSuperuser
+      memberships {
+        instance {
+          id
+        }
+      }
       ...InstanceSwitcher_user
     }
   }

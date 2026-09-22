@@ -238,6 +238,17 @@ fn at_least_one_inbound_address_is_a_wildcard() {
 }
 
 #[test]
+fn there_is_a_seeded_superuser() {
+    let doc = synthetic();
+    assert!(
+        rows(&doc, "user")
+            .iter()
+            .any(|u| u.get("superuser").and_then(|v| v["BOOL"].as_bool()) == Some(true)),
+        "expected at least one seeded user with superuser: true"
+    );
+}
+
+#[test]
 fn there_is_an_owner_and_an_agent() {
     let doc = synthetic();
     let roles: HashSet<String> = rows(&doc, "membership")

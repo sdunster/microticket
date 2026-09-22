@@ -39,8 +39,8 @@ only — AWS credentials.
 > **Known gaps.** Bounce and complaint handling for outbound mail is not implemented — SES
 > notifications are not consumed, so a bad address is not flagged or suppressed
 > ([#6](../../issues/6)). Ticket message threads are unpaged ([#1](../../issues/1)), there is no
-> ticket search ([#8](../../issues/8)), and adding a member needs CLI access rather than an invite
-> ([#7](../../issues/7)). The full list is in the
+> ticket search ([#8](../../issues/8)), and adding a member needs a superuser (CLI or web admin
+> UI) rather than a self-serve email invite ([#7](../../issues/7)). The full list is in the
 > [issue tracker](../../issues); `SCHEMA.md` carries the data-model-level register.
 
 ---

@@ -212,6 +212,7 @@ impl TryInto<db::User> for Item {
                 .i64_field("created_at")?
                 .ok_or_else(|| anyhow!("User missing created_at"))? as u64,
             access_time: self.i64_field("access_time")?.map(|i| i as u64),
+            superuser: self.bool_field("superuser")?.unwrap_or(false),
         })
     }
 }
@@ -1222,6 +1223,29 @@ impl db::Handler for Handler {
         Ok(())
     }
 
+    async fn update_membership_role(&self, id: &str, role: db::MembershipRole) -> db::Result<()> {
+        self.ensure_writable()?;
+        let resp = self
+            .client
+            .update_item()
+            .table_name(self.table_name("membership"))
+            .key("id", AttributeValue::S(id.to_string()))
+            .condition_expression("attribute_exists(id)")
+            .update_expression("SET #r = :role")
+            .expression_attribute_names("#r", "role")
+            .expression_attribute_values(":role", AttributeValue::S(role.as_str().to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| map_update_err(e, format!("Membership {id}")))?;
+        record_capacity(
+            "update_membership_role",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+        Ok(())
+    }
+
     async fn list_memberships_by_user(&self, user_id: &str) -> db::Result<Vec<db::Membership>> {
         query_all("list_memberships_by_user", || {
             self.client
@@ -1315,6 +1339,7 @@ impl db::Handler for Handler {
             enabled: true,
             created_at: now,
             access_time: None,
+            superuser: false,
         })
     }
 
@@ -1361,6 +1386,50 @@ impl db::Handler for Handler {
                     .map_err(|e| map_update_err(e, format!("User {id}")))?;
                 record_capacity(
                     "update_user_access_time",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::UserUpdateShape::SetSuperuser(superuser) => {
+                let mut req = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("user"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)");
+                if superuser {
+                    req = req
+                        .update_expression("SET superuser = :superuser")
+                        .expression_attribute_values(":superuser", AttributeValue::Bool(true));
+                } else {
+                    req = req.update_expression("REMOVE superuser");
+                }
+                let resp = req
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("User {id}")))?;
+                record_capacity(
+                    "update_user_superuser",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::UserUpdateShape::SetEmail { email } => {
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("user"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .update_expression("SET email = :email")
+                    .expression_attribute_values(":email", AttributeValue::S(email.to_string()))
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("User {id}")))?;
+                record_capacity(
+                    "update_user_email",
                     resp.consumed_capacity(),
                     CapKind::Write,
                 );

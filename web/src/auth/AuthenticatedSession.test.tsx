@@ -42,6 +42,7 @@ describe("AuthenticatedSession", () => {
               email: "owner@example.com",
               name: "Olive Owner",
               enabled: true,
+              isSuperuser: false,
               memberships: [],
             },
           },
