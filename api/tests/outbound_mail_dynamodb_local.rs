@@ -101,6 +101,7 @@ fn user_auth(user_id: &str, instance_id: &str, is_owner: bool) -> AuthInfo {
             instance_id: instance_id.to_string(),
             is_owner,
         }],
+        is_superuser: false,
         token_id: None,
     }
 }
@@ -239,8 +240,8 @@ async fn reply_sends_exactly_one_message_addressed_and_tagged_correctly() {
         "subject must carry {expected_tag:?}: {raw}"
     );
     assert!(
-        raw.contains(&format!("+t{}@", ticket.reply_token)),
-        "Reply-To must carry the +t{{token}} address: {raw}"
+        raw.contains(&format!("+t{}.{}@", ticket.id, ticket.reply_token)),
+        "Reply-To must carry the +t{{ticket_id}}.{{token}} address (see outbound::reply_to_address): {raw}"
     );
     assert!(raw.contains("X-Microticket-Loop: 1"), "{raw}");
 }

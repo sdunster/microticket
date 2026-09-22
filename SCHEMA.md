@@ -54,7 +54,22 @@ instance record, so projecting more into the index would just be wasted storage.
 - `signature` (S) — appended to outbound replies
 - `public_submission_enabled` (Bool) — opt-in, default off/absent; gates whether the instance
   appears in the bare `/submit` list
-- `deleted` (Bool)
+- `deleted` (Bool) — soft-delete marker, same omit convention: only ever
+  written `true`; absent means active. Set/cleared only via
+  `InstanceUpdateShape::SetDeleted` (`setInstanceDeleted`/`bin/cli.rs`'s
+  `instance update --deleted`). A deleted instance is hidden from every
+  ordinary path a member or requester reaches it through:
+  - `User.memberships` filters it out — a former member's instance switcher
+    stops showing it.
+  - `Query.instance(slug)` resolves to `null` for it, identically to a slug
+    that doesn't exist or one the caller isn't a member of (no probing).
+  - Inbound mail addressed to it is dropped the same way mail to no known
+    instance is (logged, no ticket opened, no mail sent) — see
+    `inbound::pipeline::process_raw_message`'s step 4.
+  `adminInstances`/`adminInstance` (superuser-only) deliberately do **not**
+  filter it — restoring a deleted instance is what those queries are for.
+  See "Known issues and risks" below for what this does *not* close: a
+  former member with a ticket id already in hand.
 
 ---
 
@@ -110,6 +125,14 @@ drive the next `GetItem`.
 - `access_time` (N) — Unix timestamp of the user's last authenticated request;
   absent until their first one. Throttled to at most one write per minute (see
   `auth::fetch_update_user_auth_info`), so it does not track requests precisely.
+- `superuser` (Bool) — admin access to every instance's settings/membership/
+  inbound addresses (the `Superuser`/`InstanceOwnerOrSuperuser` GraphQL
+  guards) and **nothing else**: a superuser does not pass `Member`/
+  `InstanceOwner` and has no implicit ticket access — see `CLAUDE.md`'s
+  superuser boundary house rule. Same omit-optional-attributes convention as
+  `instance.deleted`: only ever written `true`; absent means `false`.
+  Grantable only via `bin/cli.rs`'s `user set-superuser` — no GraphQL
+  mutation can set it.
 
 ---
 
@@ -434,6 +457,32 @@ commits, with a periodic sweep re-driving anything stuck in `processing` past it
 implemented as of this step; flagged here so step 7 (inbound mail) makes a deliberate choice
 about it rather than inheriting the simple version by default.
 
+#### Deleted instances — a former member with a ticket id already in hand can still reach it
+
+`User.memberships` filtering out deleted instances (see the `deleted`
+attribute's entry above) keeps a former member's instance switcher clean, but
+it is a *listing* filter, not an access-control check baked into every
+resolver. `Query.ticket(id)`/`Ticket.messages` authorize by checking
+`is_member(memberships, ticket.instance_id)` against the caller's *current*
+membership list — and that list is computed fresh, from `membership`, on
+every request (`auth::fetch_update_user_auth_info`), independent of whether
+the instance itself is deleted. So a member of a deleted instance who already
+has one of its ticket ids (from an old email thread, a bookmarked link, browser
+history) can still open that specific ticket: membership isn't revoked by
+deleting the instance, only the instance's own visibility is hidden.
+
+This is deliberate, not an oversight: closing it would mean either stripping
+every deleted instance's memberships from `AuthInfo::User` on every request
+(a DB read added to the hot path of every authenticated GraphQL call, for a
+narrow edge case) or filtering `AuthInfo::User.memberships` at auth time by a
+per-instance `deleted` lookup (same cost, same hot path). Both were rejected
+for the same reason `access_time`'s throttling exists: `auth::fetch_update_user_auth_info`
+runs on every authenticated request, and adding an unconditional extra read
+there for a narrow edge case is the wrong trade. If this needs closing later,
+the fix is scoped to `Query.ticket`/`Ticket.messages`/`Ticket.*` resolvers
+(check the ticket's own instance's `deleted` there, where a read already
+happens), not to the auth hot path.
+
 #### `instance.slug` — uniqueness is a pre-check, not a guarantee, against a concurrent pair of creates
 
 DynamoDB only enforces uniqueness on a table's primary key, and `instance`'s primary key is a
@@ -456,13 +505,17 @@ succeeding with the same `slug`. Two options were on the table:
 
 **Chosen: option 2.** The race this leaves open — two concurrent callers that both pass the
 pre-check for the same slug, so both writes succeed and two instances end up sharing one slug — is
-real but narrow: instance creation is an operator-driven, low-frequency bootstrap action (`instance
-create` in the CLI), not a high-concurrency user-facing path, so the pre-check-then-write window is
-milliseconds wide and would require two operators racing to create the exact same organisation at
-the exact same moment. If it ever happens, `get_instance_id_by_slug` (`slug-index`, collapsed
-through `at_most_one`) will start returning a data-integrity error on the next read — loud, not
-silent — because the index would then have two rows for one slug value. The fix at that point is a
-manual `instance update` to rename one of the two colliding instances' slugs; no automatic
+real but narrow: instance creation is an operator/admin-driven, low-frequency bootstrap action —
+`instance create` in the CLI, and, since the superuser feature landed, the equivalent
+`createInstance` GraphQL mutation (superuser-only, per `CLAUDE.md`'s superuser boundary) — not a
+high-concurrency user-facing path, so the pre-check-then-write window is milliseconds wide and
+would require two operators (or one operator and one superuser, racing each other across the CLI
+and the web admin UI) creating the exact same organisation at the exact same moment. If it ever
+happens, `get_instance_id_by_slug` (`slug-index`, collapsed through `at_most_one`) will start
+returning a data-integrity error on the next read — loud, not silent — because the index would
+then have two rows for one slug value. The fix at that point is a manual `instance update` to
+rename one of the two colliding instances' slugs — CLI-only: `updateInstance` deliberately has no
+`slug` argument (slugs are immutable over GraphQL; see that mutation's doc comment) — no automatic
 detection or recovery is implemented.
 
 #### `ticket` marker attributes — a crash between two GSI-affecting updates leaves an inconsistent listing state

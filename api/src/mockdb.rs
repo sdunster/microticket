@@ -105,6 +105,10 @@ impl db::Handler for Handler {
         Self::unsupported()
     }
 
+    async fn update_membership_role(&self, _id: &str, _role: db::MembershipRole) -> db::Result<()> {
+        Self::unsupported()
+    }
+
     async fn list_memberships_by_user(&self, _user_id: &str) -> db::Result<Vec<db::Membership>> {
         Self::unsupported()
     }

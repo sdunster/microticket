@@ -80,6 +80,16 @@ local setup, and `SCHEMA.md` for the data model.
   `outbound.rs` generates this address and `inbound/routing.rs` parses it — a test asserts the
   round trip, and it is the contract between the two halves of the mail pipeline.
 
+- **Superuser boundary: admin + instance settings, never ticket access; grantable only via the
+  CLI.** `db::User::superuser` gates the `Superuser`/`InstanceOwnerOrSuperuser` GraphQL guards —
+  instance/user/membership/inbound-address management (`createInstance`, `createUser`,
+  `addMember`, `addInboundAddress` via `InstanceOwnerOrSuperuser`, and friends) — and nothing else.
+  A superuser does **not** pass `Member`/`InstanceOwner`, has no implicit access to any instance's
+  tickets, and does not appear in `User.memberships`/the instance switcher unless they hold a real
+  membership row. No GraphQL mutation can set `superuser`; the only way to grant or revoke it is
+  `bin/cli.rs`'s `user set-superuser`. Don't widen this — a future "superuser can see all tickets"
+  feature needs its own explicit guard, not a loosening of `Superuser`/`InstanceOwnerOrSuperuser`.
+
 - **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
   every `.await`.** The process environment is global and tests run in parallel, so a test that
   sets a var, releases its lock, and only then awaits leaves a window for another test to change

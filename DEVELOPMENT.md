@@ -135,12 +135,20 @@ cargo run --bin cli -- instance create "Your Company Support" your-company \
     --signature "Thanks, Your Company Support" \
     --public-submission-enabled
 
-# 3. Grant that user the owner role in the instance (member invites are a CLI-only
-#    operation for now — there is no invite mutation over GraphQL).
+# 3. Grant that user the owner role in the instance (also possible over GraphQL via
+#    `addMember`, but that's superuser-only, and bootstrapping the very first
+#    superuser needs this CLI step regardless — see step 5 below).
 cargo run --bin cli -- member add --instance <instance_id> --user owner@yourdomain.com --role owner
 
 # 4. Map the instance's real inbound address(es).
 cargo run --bin cli -- address add --instance <instance_id> support@yourdomain.com
+
+# 5. (Optional) Make that user a superuser, so they can manage instances/users/
+#    memberships from the web admin UI too, not just tickets. Superuser is
+#    admin + instance settings only — it grants no ticket access on its own
+#    (see CLAUDE.md's superuser boundary house rule) — and can only ever be
+#    granted here, never over GraphQL.
+cargo run --bin cli -- user set-superuser owner@yourdomain.com true
 ```
 
 Against the local stack, export `local/local.env` first (`set -a && . ../local/local.env && set
