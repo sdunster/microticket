@@ -269,15 +269,19 @@ fn print_user(u: &User) {
     );
 }
 
-/// Resolve `--user` to a user id: an email (contains `@`) is looked up via
-/// `email-index`; anything else is treated as a literal id (not verified to
-/// exist here — the write that follows will fail loudly if it doesn't).
+/// Resolve `--user` to a user id: an email (contains `@`) is normalized
+/// (`db::normalize_user_email` — trimmed and lowercased, matching every
+/// other entry point that writes or looks up a user email) and looked up
+/// via `email-index`; anything else is treated as a literal id (not
+/// verified to exist here — the write that follows will fail loudly if it
+/// doesn't).
 async fn resolve_user_id(db: &impl Handler, id_or_email: &str) -> Result<String> {
     if id_or_email.contains('@') {
-        db.get_user_id_by_email(id_or_email)
+        let email = db::normalize_user_email(id_or_email).map_err(|e| anyhow!(e))?;
+        db.get_user_id_by_email(&email)
             .await
             .context("looking up user by email")?
-            .ok_or_else(|| anyhow!("no user with email {id_or_email}"))
+            .ok_or_else(|| anyhow!("no user with email {email}"))
     } else {
         Ok(id_or_email.to_string())
     }
@@ -450,6 +454,7 @@ async fn run_user(db: &impl Handler, cmd: UserCmd, dry_run: bool) -> Result<()> 
             name,
             superuser,
         } => {
+            let email = db::normalize_user_email(&email).map_err(|e| anyhow!(e))?;
             if db.get_user_id_by_email(&email).await?.is_some() {
                 return Err(anyhow!("a user with email {email} already exists"));
             }

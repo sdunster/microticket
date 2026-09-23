@@ -117,6 +117,13 @@ everything is negligible next to avoiding an N-way `BatchGetItem`.
 `KEYS_ONLY` for the same reason as `instance.slug-index` — the login path only needs the id to
 drive the next `GetItem`.
 
+**Invariant: `email` is always trimmed and lowercase.** Every entry point that writes or looks up
+a user email (`createUser`/`updateUser`, `requestAuthCode`/`verifyAuthCode`, the CLI's `user create`
+and `--user`, dev auth) runs it through `db::normalize_user_email` first, so `Bob@Example.com` and
+`bob@example.com` are the same user and collide on the taken-email pre-check. `email-index` itself
+matches exactly — `get_user_id_by_email` must be given a normalized address. No migration shipped
+with this: no stored email contained uppercase when it was introduced.
+
 **Non-obvious attributes:**
 
 - `name` (S)
@@ -283,6 +290,12 @@ login code is worthless once expired, so there is nothing to protect.
 **Exclusively backs `requestAuthCode`/`verifyAuthCode` (authenticated user login).** The public
 submit form's email-verification code is a structurally different table (`ephemeral_state`, `kind:
 "submit_code"`) — see that table's entry above for why the separation is load-bearing.
+
+**`email` (the hash key) is always trimmed and lowercase**, same invariant and same
+`db::normalize_user_email` normalizer as `user.email` above — `requestAuthCode`/`verifyAuthCode`
+normalize the `email` argument once, up front, and use that normalized value for every read/write
+on this table, so a login code requested as `Bob@Example.com` is found again by
+`bob@example.com`.
 
 **Non-obvious attributes:**
 

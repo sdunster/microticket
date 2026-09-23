@@ -760,6 +760,26 @@ pub fn validate_slug(slug: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Trim, lowercase, and shape-check a user's email address (exactly one `@`,
+/// non-empty local and domain parts). The one normalizer for every entry point
+/// that writes or looks up a `user.email` or a `login_code` key — run it once at
+/// the boundary and use the result for every read and write after, which is
+/// what makes user-email matching case-insensitive. See `SCHEMA.md`'s `user`
+/// table for the invariant. Kept separate from `normalize_ticket_email` in
+/// `graphql/mutations.rs` so either can change without the other following.
+pub fn normalize_user_email(raw: &str) -> std::result::Result<String, String> {
+    let email = raw.trim().to_lowercase();
+    let Some((local, domain)) = email.split_once('@') else {
+        return Err(format!(
+            "{raw:?} is not a valid email address (missing '@')"
+        ));
+    };
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return Err(format!("{raw:?} is not a valid email address"));
+    }
+    Ok(email)
+}
+
 pub trait Handler: Sync {
     // ── instance ──────────────────────────────────────────────────────────
     fn get_instances<T: AsRef<str> + Sync>(
@@ -863,6 +883,12 @@ pub trait Handler: Sync {
     /// [`at_most_one`] — unlike seslogin's raw `Vec<String>`, callers here get a
     /// single answer directly, since every call site immediately wants "the one
     /// user with this email, if any" rather than the raw index hits.
+    ///
+    /// **Callers must pass an already-normalized email** ([`normalize_user_email`]
+    /// — trimmed, lowercase). This method matches exactly what it's given; it
+    /// does no normalization of its own, so a caller that skips
+    /// `normalize_user_email` will silently fail to find a user whose email
+    /// differs only in case or surrounding whitespace.
     fn get_user_id_by_email(
         &self,
         email: &str,
@@ -1250,6 +1276,24 @@ mod tests {
         assert!(validate_slug(&slug).is_err());
         let ok = "a".repeat(63);
         assert!(validate_slug(&ok).is_ok());
+    }
+
+    #[test]
+    fn normalize_user_email_trims_and_lowercases() {
+        assert_eq!(
+            normalize_user_email("  Bob@Example.com ").unwrap(),
+            "bob@example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_user_email_rejects_malformed_addresses() {
+        for bad in ["", "   ", "bob", "@example.com", "bob@", "a@b@c"] {
+            assert!(
+                normalize_user_email(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     /// The case that makes `Deleted` its own branch rather than falling out of
