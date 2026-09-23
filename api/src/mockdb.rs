@@ -109,6 +109,14 @@ impl db::Handler for Handler {
         Self::unsupported()
     }
 
+    async fn update_membership_notification_settings(
+        &self,
+        _id: &str,
+        _patch: &db::NotificationSettingsPatch,
+    ) -> db::Result<()> {
+        Self::unsupported()
+    }
+
     async fn list_memberships_by_user(&self, _user_id: &str) -> db::Result<Vec<db::Membership>> {
         Self::unsupported()
     }

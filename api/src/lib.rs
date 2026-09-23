@@ -19,6 +19,7 @@ pub mod request_metrics;
 pub mod s3storage;
 pub mod server;
 pub mod sesmail;
+pub mod staff_notify;
 pub mod storage;
 pub mod telemetry;
 pub mod turnstile;

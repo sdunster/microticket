@@ -800,3 +800,126 @@ async fn mail_to_a_deleted_instance_is_dropped() {
         "no ticket must be created against a deleted instance: {tickets:?}"
     );
 }
+
+// ── staff notifications ─────────────────────────────────────────────────────
+//
+// `setup_instance` above creates no members, so every test before this
+// point exercises `staff_notify::notify_staff` as a no-op (an empty
+// membership list short-circuits before any mail is built) — these two
+// give it someone to actually notify.
+
+#[tokio::test]
+async fn a_new_ticket_via_email_notifies_members() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance, _domain, support_address) = setup_instance(&db, "staffnewtick").await;
+    let member = db
+        .create_user(&unique_email("staffnewtick-member"), "Member")
+        .await
+        .expect("create_user");
+    db.create_membership(&member.id, &instance.id, db::MembershipRole::Owner)
+        .await
+        .expect("create_membership");
+    let app = test_app(db.clone(), "staff-new-ticket");
+
+    let requester = unique_email("requester");
+    let raw = build_eml(
+        &requester,
+        &[("To", &support_address)],
+        "Printer on fire",
+        "Send help.",
+    );
+    let outcome = pipeline::process_raw_message(&app, &ses_message_id(), &raw, None)
+        .await
+        .expect("process_raw_message");
+    assert!(outcome.dropped_reason.is_none(), "{outcome:?}");
+    assert!(outcome.created_new_ticket);
+
+    let sent = app.mail.sent_raw();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the member should get exactly one staff notice about the new ticket: {sent:?}"
+    );
+    assert_eq!(sent[0].to, vec![member.email.clone()]);
+    let raw_msg = String::from_utf8_lossy(&sent[0].raw);
+    assert!(raw_msg.contains("New ticket from"), "{raw_msg}");
+    assert!(
+        !raw_msg.contains("+t"),
+        "a staff notice must never carry a +t… reply tag: {raw_msg}"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_on_an_existing_ticket_notifies_members_per_their_settings() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance, _domain, support_address) = setup_instance(&db, "staffreply2").await;
+    let requester = unique_email("requester");
+    let number = db.increment_ticket_counter(&instance.id).await.unwrap();
+    let ticket = db
+        .create_ticket(
+            &instance.id,
+            number,
+            "Original subject",
+            std::slice::from_ref(&requester),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let opted_in = db
+        .create_user(&unique_email("staffreply2-in"), "Opted In")
+        .await
+        .expect("create_user");
+    db.create_membership(&opted_in.id, &instance.id, db::MembershipRole::Owner)
+        .await
+        .expect("create_membership");
+
+    let opted_out = db
+        .create_user(&unique_email("staffreply2-out"), "Opted Out")
+        .await
+        .expect("create_user");
+    let opted_out_membership = db
+        .create_membership(&opted_out.id, &instance.id, db::MembershipRole::Agent)
+        .await
+        .expect("create_membership");
+    // Turn their (default-on) unassigned_updated setting off — the ticket
+    // has no assignee, so without this they'd be notified too.
+    db.update_membership_notification_settings(
+        &opted_out_membership.id,
+        &db::NotificationSettingsPatch {
+            unassigned_updated: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("update_membership_notification_settings");
+
+    let app = test_app(db.clone(), "staff-reply-2");
+    let local = support_address.split('@').next().unwrap();
+    let domain = support_address.split('@').nth(1).unwrap();
+    let tagged_to = format!("{local}+{}@{domain}", reply_tag(&ticket));
+
+    let raw = build_eml(
+        &requester,
+        &[("To", &tagged_to)],
+        "Re: Original subject",
+        "Following up.",
+    );
+    let outcome = pipeline::process_raw_message(&app, &ses_message_id(), &raw, None)
+        .await
+        .unwrap();
+    assert!(outcome.dropped_reason.is_none(), "{outcome:?}");
+    assert!(!outcome.created_new_ticket);
+
+    let sent = app.mail.sent_raw();
+    assert_eq!(
+        sent.len(),
+        1,
+        "only the opted-in member should be notified, per their own settings: {sent:?}"
+    );
+    assert_eq!(sent[0].to, vec![opted_in.email.clone()]);
+    let raw_msg = String::from_utf8_lossy(&sent[0].raw);
+    assert!(raw_msg.contains("replied"), "{raw_msg}");
+}

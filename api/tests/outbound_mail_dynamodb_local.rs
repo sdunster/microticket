@@ -321,7 +321,7 @@ async fn closing_a_ticket_sends_exactly_one_notice() {
 }
 
 #[tokio::test]
-async fn assigning_a_ticket_sends_no_mail() {
+async fn self_assigning_a_ticket_sends_no_mail_at_all() {
     let prefix = require_local_db!();
     let db = dynamodb::Handler::new(&prefix, false).await;
     let (instance, owner_id, _address) = setup_instance(&db, "assign").await;
@@ -351,10 +351,70 @@ async fn assigning_a_ticket_sends_no_mail() {
         json!(owner_id)
     );
 
+    // No customer mail (internal bookkeeping) *and* no staff notice either —
+    // the actor is their own new assignee, and `staff_notify` always
+    // excludes the actor. `setup_instance` has only the one member, so this
+    // also stands in for "nobody else exists to notify"; the next test
+    // covers assigning to someone else.
     assert_eq!(
         my_app.mail.sent_raw().len(),
         0,
-        "assignment is internal bookkeeping and must never send mail"
+        "self-assignment must never send mail, customer or staff"
+    );
+}
+
+/// Assigning to a *different* member sends no customer mail, but does send
+/// the new assignee a best-effort staff notice (default `assignedToMe`
+/// setting) — and nothing to anyone else. See `staff_notify`'s module doc.
+#[tokio::test]
+async fn assigning_a_ticket_to_another_member_sends_no_customer_mail_but_notifies_the_assignee() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance, owner_id, _address) = setup_instance(&db, "assign2").await;
+    let agent = db
+        .create_user(&unique_email("assign2-agent"), "Agent")
+        .await
+        .expect("create_user");
+    db.create_membership(&agent.id, &instance.id, db::MembershipRole::Agent)
+        .await
+        .expect("create_membership");
+    let requester_email = unique_email("requester");
+    let cc_email = unique_email("cc");
+    let ticket = make_ticket(&db, &instance.id, &requester_email, &cc_email).await;
+
+    let (my_app, schema) = build_app_and_schema(db);
+
+    const ASSIGN_MUTATION: &str = r#"
+        mutation($ticketId: ID!, $userId: ID) {
+            assignTicket(ticketId: $ticketId, userId: $userId) { id assigneeUserId }
+        }
+    "#;
+    let response = schema
+        .execute(
+            Request::new(ASSIGN_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "ticketId": ticket.id,
+                    "userId": agent.id,
+                })))
+                .data(user_auth(&owner_id, &instance.id, true)),
+        )
+        .await;
+    assert_eq!(
+        expect_data(&response, "assignTicket.assigneeUserId"),
+        json!(agent.id)
+    );
+
+    let sent = my_app.mail.sent_raw();
+    assert_eq!(
+        sent.len(),
+        1,
+        "exactly one staff notice, to the new assignee, and no customer mail: {sent:?}"
+    );
+    assert_eq!(sent[0].to, vec![agent.email.clone()]);
+    let raw = String::from_utf8_lossy(&sent[0].raw);
+    assert!(
+        !raw.contains("+t"),
+        "a staff notice must never carry a +t… reply tag: {raw}"
     );
 }
 
@@ -362,7 +422,16 @@ async fn assigning_a_ticket_sends_no_mail() {
 async fn submitting_a_ticket_sends_an_acknowledgement() {
     let prefix = require_local_db!();
     let db = dynamodb::Handler::new(&prefix, false).await;
-    let (instance, _owner_id, _address) = setup_instance(&db, "submit").await;
+    let (instance, owner_id, _address) = setup_instance(&db, "submit").await;
+    let owner_email = db
+        .get_users(&[&owner_id])
+        .await
+        .expect("get_users")
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("owner exists")
+        .email;
     let requester_email = unique_email("requester");
 
     let (my_app, schema) = build_app_and_schema(db);
@@ -382,11 +451,318 @@ async fn submitting_a_ticket_sends_an_acknowledgement() {
         "submitTicket must succeed even though mail is best-effort"
     );
 
+    // Two messages now: the customer-facing acknowledgement, and a
+    // best-effort staff notice to the instance's owner — who is *not* the
+    // actor here (submitTicket's actor is the requester's own address, per
+    // `staff_notify`), so the default `newTicket` setting notifies them.
     let sent = my_app.mail.sent_raw();
     assert_eq!(
         sent.len(),
-        1,
-        "submitTicket must send exactly one acknowledgement: {sent:?}"
+        2,
+        "expected the requester's acknowledgement plus one staff notice: {sent:?}"
     );
+
+    let ack = sent
+        .iter()
+        .find(|m| m.to == vec![requester_email.clone()])
+        .expect("no acknowledgement addressed to the requester");
+    assert!(
+        String::from_utf8_lossy(&ack.raw).contains("Thanks for reaching out"),
+        "the requester's message must be the acknowledgement"
+    );
+
+    let staff_notice = sent
+        .iter()
+        .find(|m| m.to == vec![owner_email.clone()])
+        .expect("no staff notice addressed to the owner");
+    let raw = String::from_utf8_lossy(&staff_notice.raw);
+    assert!(raw.contains(&requester_email), "{raw}");
+    assert!(
+        !raw.contains("+t"),
+        "a staff notice must never carry a +t… reply tag: {raw}"
+    );
+}
+
+// ── staff notifications ─────────────────────────────────────────────────────
+//
+// Everything above exercises customer-facing mail; these exercise
+// `staff_notify` end to end, through the same real GraphQL mutations,
+// against a *second* member so there is always someone other than the actor
+// around to (not) notify.
+
+/// `label`'s instance, its owner, and a second member (an agent) added to
+/// it — `staff_notify`'s recipient rules need someone who isn't the actor.
+async fn setup_instance_with_agent(
+    db: &dynamodb::Handler,
+    label: &str,
+) -> (db::Instance, String, db::User, String) {
+    let (instance, owner_id, address) = setup_instance(db, label).await;
+    let agent = db
+        .create_user(&unique_email(&format!("{label}-agent")), "Agent")
+        .await
+        .expect("create_user");
+    db.create_membership(&agent.id, &instance.id, db::MembershipRole::Agent)
+        .await
+        .expect("create_membership");
+    (instance, owner_id, agent, address)
+}
+
+#[tokio::test]
+async fn an_agent_reply_notifies_a_fellow_member_by_default_but_never_the_actor() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance, owner_id, agent, _address) = setup_instance_with_agent(&db, "staffreply").await;
+    let requester_email = unique_email("requester");
+    let cc_email = unique_email("cc");
+    let ticket = make_ticket(&db, &instance.id, &requester_email, &cc_email).await;
+
+    let (my_app, schema) = build_app_and_schema(db);
+
+    let response = schema
+        .execute(
+            Request::new(REPLY_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "ticketId": ticket.id,
+                    "body": "We're on it.",
+                })))
+                .data(user_auth(&owner_id, &instance.id, true)),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+
+    let sent = my_app.mail.sent_raw();
+    // The customer reply, plus a staff notice to the agent (unassigned
+    // ticket, `unassignedUpdated` defaults true) — never to the owner, who
+    // is the actor.
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(
+        sent.iter().any(|m| m.to == vec![requester_email.clone()]),
+        "the customer reply is still sent: {sent:?}"
+    );
+    let staff_notice = sent
+        .iter()
+        .find(|m| m.to == vec![agent.email.clone()])
+        .expect("no staff notice addressed to the agent");
+    let raw = String::from_utf8_lossy(&staff_notice.raw);
+    assert!(raw.contains("replied to the customer"), "{raw}");
+    assert!(
+        !raw.contains("+t"),
+        "a staff notice must never carry a +t… reply tag: {raw}"
+    );
+}
+
+#[tokio::test]
+async fn an_internal_note_notifies_a_fellow_member_by_default() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance, owner_id, agent, _address) = setup_instance_with_agent(&db, "staffnote").await;
+    let requester_email = unique_email("requester");
+    let cc_email = unique_email("cc");
+    let ticket = make_ticket(&db, &instance.id, &requester_email, &cc_email).await;
+
+    let (my_app, schema) = build_app_and_schema(db);
+
+    let response = schema
+        .execute(
+            Request::new(ADD_NOTE_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "ticketId": ticket.id,
+                    "body": "Waiting on vendor.",
+                })))
+                .data(user_auth(&owner_id, &instance.id, true)),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+
+    // No customer mail at all (an internal note never sends any — see
+    // CLAUDE.md), but the agent gets a staff notice.
+    let sent = my_app.mail.sent_raw();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].to, vec![agent.email.clone()]);
+    assert!(String::from_utf8_lossy(&sent[0].raw).contains("added an internal note"));
+}
+
+#[tokio::test]
+async fn closing_a_ticket_notifies_a_fellow_member_alongside_the_customer_notice() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance, owner_id, agent, _address) = setup_instance_with_agent(&db, "staffclose").await;
+    let requester_email = unique_email("requester");
+    let cc_email = unique_email("cc");
+    let ticket = make_ticket(&db, &instance.id, &requester_email, &cc_email).await;
+
+    let (my_app, schema) = build_app_and_schema(db);
+
+    let response = schema
+        .execute(
+            Request::new(SET_STATUS_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "ticketId": ticket.id,
+                    "status": "CLOSED",
+                })))
+                .data(user_auth(&owner_id, &instance.id, true)),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+
+    let sent = my_app.mail.sent_raw();
+    assert_eq!(sent.len(), 2, "customer notice + staff notice: {sent:?}");
+    assert!(sent.iter().any(|m| m.to == vec![requester_email.clone()]));
+    let staff_notice = sent
+        .iter()
+        .find(|m| m.to == vec![agent.email.clone()])
+        .expect("no staff notice addressed to the agent");
+    assert!(String::from_utf8_lossy(&staff_notice.raw).contains("closed this ticket"));
+}
+
+#[tokio::test]
+async fn a_reply_on_a_ticket_assigned_to_someone_else_does_not_notify_by_default() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance, owner_id, agent, _address) = setup_instance_with_agent(&db, "staffothers").await;
+    let requester_email = unique_email("requester");
+    let cc_email = unique_email("cc");
+    let ticket = make_ticket(&db, &instance.id, &requester_email, &cc_email).await;
+    // Assign to the owner (self-assign, sends no mail — see the assignment
+    // tests above) so the ticket is "assigned to someone else" from the
+    // agent's point of view.
+    db.update_ticket(
+        &ticket.id,
+        db::TicketUpdateShape::SetStatusAndAssignee {
+            instance_id: &instance.id,
+            status: ticket.status,
+            assignee_user_id: Some(&owner_id),
+            now: ticket.updated_at,
+        },
+    )
+    .await
+    .expect("assign ticket to owner directly");
+
+    let (my_app, schema) = build_app_and_schema(db);
+
+    let response = schema
+        .execute(
+            Request::new(REPLY_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "ticketId": ticket.id,
+                    "body": "Working on it.",
+                })))
+                .data(user_auth(&owner_id, &instance.id, true)),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+
+    // Only the customer-facing reply — `assignedToOthersUpdated` defaults
+    // to off, so the agent hears nothing about the owner's ticket.
+    let sent = my_app.mail.sent_raw();
+    assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0].to, vec![requester_email]);
+
+    // Enabling the setting via the mutation makes the very next reply
+    // notify the agent — proving the mutation's write actually takes
+    // effect, not just that the default is off.
+    const UPDATE_SETTINGS_MUTATION: &str = r#"
+        mutation($instanceId: ID!, $settings: NotificationSettingsInput!) {
+            updateNotificationSettings(instanceId: $instanceId, settings: $settings) {
+                notificationSettings { assignedToOthersUpdated }
+            }
+        }
+    "#;
+    let update_response = schema
+        .execute(
+            Request::new(UPDATE_SETTINGS_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "instanceId": instance.id,
+                    "settings": { "assignedToOthersUpdated": true },
+                })))
+                .data(user_auth(&agent.id, &instance.id, false)),
+        )
+        .await;
+    assert_eq!(
+        expect_data(
+            &update_response,
+            "updateNotificationSettings.notificationSettings.assignedToOthersUpdated"
+        ),
+        json!(true)
+    );
+
+    let response2 = schema
+        .execute(
+            Request::new(REPLY_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "ticketId": ticket.id,
+                    "body": "Still working on it.",
+                })))
+                .data(user_auth(&owner_id, &instance.id, true)),
+        )
+        .await;
+    assert!(response2.errors.is_empty(), "{:?}", response2.errors);
+
+    let sent2 = my_app.mail.sent_raw();
+    assert_eq!(
+        sent2.len(),
+        3,
+        "prior 1 + this reply's customer mail + the now-enabled staff notice: {sent2:?}"
+    );
+    assert!(
+        sent2.iter().any(|m| m.to == vec![agent.email.clone()]),
+        "the agent should now be notified: {sent2:?}"
+    );
+}
+
+fn superuser_auth(user_id: &str) -> AuthInfo {
+    AuthInfo::User {
+        id: user_id.to_string(),
+        memberships: vec![],
+        is_superuser: true,
+        token_id: None,
+    }
+}
+
+/// `MembershipInfo.notificationSettings` is only reachable off a `User`
+/// object — `me` always returns the caller's own, so the one real path to
+/// *someone else's* is a superuser's `adminUser`. This is that path,
+/// end to end: it must be rejected `FORBIDDEN`, not silently return the
+/// agent's real settings or a misleadingly empty/default-looking response.
+#[tokio::test]
+async fn notification_settings_is_forbidden_via_admin_user() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (_instance, _owner_id, agent, _address) =
+        setup_instance_with_agent(&db, "staffguard").await;
+    let superuser = db
+        .create_user(&unique_email("staffguard-super"), "Super")
+        .await
+        .expect("create_user");
+
+    let (_my_app, schema) = build_app_and_schema(db);
+
+    const ADMIN_USER_SETTINGS_QUERY: &str = r#"
+        query($id: ID!) {
+            adminUser(id: $id) {
+                memberships {
+                    instance { id }
+                    notificationSettings { newTicket }
+                }
+            }
+        }
+    "#;
+    let response = schema
+        .execute(
+            Request::new(ADMIN_USER_SETTINGS_QUERY)
+                .variables(Variables::from_json(json!({ "id": agent.id })))
+                .data(superuser_auth(&superuser.id)),
+        )
+        .await;
+    assert!(
+        !response.errors.is_empty(),
+        "a superuser must not be able to read another user's notification settings via adminUser"
+    );
+    assert!(
+        response.errors.iter().any(|e| e
+            .message
+            .contains("Cannot view another member's notification settings")),
+        "{:?}",
+        response.errors
+    );
 }

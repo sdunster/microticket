@@ -7,10 +7,16 @@
 //! and [`mockmail`](crate::mockmail) each get handed a [`BuiltMessage`] and
 //! never construct MIME themselves.
 //!
-//! Every outbound email in this project — an agent's reply, a status-change
-//! notice, a submission acknowledgement — goes through the single
-//! [`build_outbound`] function, so there is exactly one place that can get a
-//! required header wrong.
+//! Every *customer-facing* outbound email in this project — an agent's
+//! reply, a status-change notice, a submission acknowledgement — goes
+//! through the single [`build_outbound`] function, so there is exactly one
+//! place that can get a required header wrong. Staff (member) email
+//! notifications are a deliberately separate pipeline,
+//! [`crate::staff_notify`] — see that module's doc comment for why a staff
+//! notice can't just be another `build_outbound` call (in short: it must
+//! never carry the `+t{ticket_id}.{reply_token}` reply tag this module
+//! stamps on every message below, or a staff member's own reply could be
+//! mistaken for a customer message).
 //!
 //! **The step 6/7 contract**: [`reply_to_address`] builds the `Reply-To`
 //! this module stamps on every outbound message, and it must parse back to

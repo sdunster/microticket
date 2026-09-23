@@ -18,13 +18,14 @@ use crate::db::Handler as _;
 use crate::inbound::{attachments, routing};
 use crate::mail::Handler as _;
 use crate::outbound;
+use crate::staff_notify::{self, Actor, StaffEvent};
 use crate::storage::Handler as _;
 
 use super::auth::{AuthGuard, AuthRequirement, is_member};
 use super::error::ApiError;
 use super::query::{
-    InboundAddressInfo, Instance, MembershipRoleType, PasskeyInfo, Ticket, TicketMessage,
-    TicketStatusType, User,
+    InboundAddressInfo, Instance, MembershipInfo, MembershipRoleType, NotificationSettingsInput,
+    PasskeyInfo, Ticket, TicketMessage, TicketStatusType, User,
 };
 
 /// One code per address per this many seconds — cheap anti-spam for
@@ -1290,6 +1291,21 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         )
         .await;
 
+        // Best-effort staff notice — see `staff_notify`'s module doc. A new
+        // ticket is always unassigned, so there is no assignee category to
+        // pass through.
+        staff_notify::notify_staff(
+            &*self.app,
+            &ticket,
+            None,
+            StaffEvent::NewTicket {
+                requester_email: email,
+            },
+            Actor::Email(email),
+            Some(body),
+        )
+        .await;
+
         info!(
             "Ticket submitted: instance={} ticket={} number={}",
             instance.id, ticket.id, ticket.number
@@ -1485,6 +1501,19 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             )
             .await?;
 
+        // Best-effort staff notice — only after the customer-facing send
+        // above actually succeeded (this line is unreached otherwise, since
+        // the `?` above returns early on failure), per CLAUDE.md.
+        staff_notify::notify_staff(
+            &*self.app,
+            &ticket,
+            ticket.assignee_user_id.as_deref(),
+            StaffEvent::AgentReply,
+            Actor::User { id: &user_id },
+            Some(body),
+        )
+        .await;
+
         Ok(TicketMessage::new(db::TicketMessage {
             rfc_message_id: Some(message_id),
             attachments: stored_attachments,
@@ -1543,6 +1572,19 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             )
             .await?;
 
+        // Best-effort staff notice — an internal note never emails the
+        // customer (see this mutation's own doc comment), but it is still
+        // ticket activity staff members can opt into hearing about.
+        staff_notify::notify_staff(
+            &*self.app,
+            &ticket,
+            ticket.assignee_user_id.as_deref(),
+            StaffEvent::InternalNote,
+            Actor::User { id: &user_id },
+            Some(body),
+        )
+        .await;
+
         Ok(TicketMessage::new(msg))
     }
 
@@ -1558,7 +1600,9 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
     ///
     /// A close or a reopen (including restoring a deleted ticket) mails
     /// requesters/CCs a brief notice — see `outbound::status_notice_body`.
-    /// Deleting one does not: see that function's doc comment.
+    /// Deleting one does not: see that function's doc comment. The same
+    /// "not into `DELETED`" carve-out applies to the best-effort staff
+    /// notice below.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn set_ticket_status(
         &self,
@@ -1567,8 +1611,10 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         status: TicketStatusType,
     ) -> Result<Ticket<A>> {
         let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let user_id = require_user_id(ctx)?;
+        let old_status = ticket.status;
         let new_status: db::TicketStatus = status.into();
-        if new_status == ticket.status {
+        if new_status == old_status {
             return Ok(Ticket::new(ticket));
         }
         let now = crate::clock::now_sec();
@@ -1591,7 +1637,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         // mail" entry in `CLAUDE.md`, for the reasoning). Failure here is
         // logged, never surfaced — the status change is this mutation's
         // primary effect and has already succeeded.
-        if let Some(notice) = outbound::status_notice_body(ticket.status, new_status) {
+        if let Some(notice) = outbound::status_notice_body(old_status, new_status) {
             send_system_notification(
                 &*self.app,
                 &ticket,
@@ -1599,6 +1645,30 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
                 &ticket.cc_emails,
                 notice,
                 "set_ticket_status",
+            )
+            .await;
+        }
+
+        // Best-effort staff notice, for any status change except one *into*
+        // `DELETED` — mirrors the customer-mail carve-out above (housekeeping,
+        // not something a member needs to hear about). Passed a ticket
+        // reflecting the *new* status, so `staff_notify`'s own deleted-ticket
+        // skip (rule 4) sees the post-write state.
+        if new_status != db::TicketStatus::Deleted {
+            let ticket_for_notify = db::Ticket {
+                status: new_status,
+                ..ticket.clone()
+            };
+            staff_notify::notify_staff(
+                &*self.app,
+                &ticket_for_notify,
+                ticket.assignee_user_id.as_deref(),
+                StaffEvent::StatusChanged {
+                    old: old_status,
+                    new: new_status,
+                },
+                Actor::User { id: &user_id },
+                None,
             )
             .await;
         }
@@ -1615,9 +1685,14 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
     /// when assigning, must themselves be a member of this ticket's
     /// instance — assigning to an outsider would be silently useless (they
     /// could never see it via the "assigned to me" filter, which is itself
-    /// instance-scoped). **Sends no mail**: which agent owns a ticket is
-    /// internal bookkeeping the requester has no reason to be notified
-    /// about — see the "Outbound mail" entry in `CLAUDE.md`.
+    /// instance-scoped). **Sends no customer mail**: which agent owns a
+    /// ticket is internal bookkeeping the requester has no reason to be
+    /// notified about — see the "Outbound mail" entry in `CLAUDE.md`. It
+    /// *does* send a best-effort staff notice, but only to the new and
+    /// previous assignee (never the rest of the team) — see
+    /// `staff_notify`'s module doc — and only when the assignee actually
+    /// changes (a self-assign, or reassigning to the current assignee,
+    /// notifies nobody).
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn assign_ticket(
         &self,
@@ -1626,6 +1701,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         user_id: Option<ID>,
     ) -> Result<Ticket<A>> {
         let ticket = require_ticket_member(ctx, &*self.app, ticket_id.as_str()).await?;
+        let actor_id = require_user_id(ctx)?;
         if let Some(uid) = &user_id {
             let target_memberships = self.app.db().list_memberships_by_user(uid.as_str()).await?;
             if !target_memberships
@@ -1638,6 +1714,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             }
         }
         let now = crate::clock::now_sec();
+        let old_assignee = ticket.assignee_user_id.clone();
         let assignee_user_id = user_id.as_ref().map(|id| id.as_str());
         self.app
             .db()
@@ -1651,6 +1728,22 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
                 },
             )
             .await?;
+
+        if old_assignee.as_deref() != assignee_user_id {
+            staff_notify::notify_staff(
+                &*self.app,
+                &ticket,
+                assignee_user_id,
+                StaffEvent::Assigned {
+                    old: old_assignee.as_deref(),
+                    new: assignee_user_id,
+                },
+                Actor::User { id: &actor_id },
+                None,
+            )
+            .await;
+        }
+
         Ok(Ticket::new(db::Ticket {
             assignee_user_id: user_id.map(|id| id.to_string()),
             updated_at: now,
@@ -1659,9 +1752,11 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         }))
     }
 
-    /// Add a requester (a "To" recipient) to a ticket. **Sends no mail** —
-    /// see `assign_ticket`'s doc comment and `CLAUDE.md`'s "Outbound mail"
-    /// entry; this mutation, like assignment, is internal bookkeeping.
+    /// Add a requester (a "To" recipient) to a ticket. **Sends no mail at
+    /// all** — customer or staff — see `CLAUDE.md`'s "Outbound mail" and
+    /// "Staff notifications" entries; unlike `assignTicket` (which does send
+    /// a staff notice), who's on a ticket's requester/CC list is internal
+    /// bookkeeping nobody is notified about.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn add_ticket_requester(
         &self,
@@ -1692,8 +1787,8 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
     }
 
     /// Remove a requester from a ticket. Refuses to remove the last one — a
-    /// ticket must always have someone to reply to. **Sends no mail** — see
-    /// `assign_ticket`'s doc comment.
+    /// ticket must always have someone to reply to. **Sends no mail at
+    /// all** — see [`Self::add_ticket_requester`]'s doc comment.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn remove_ticket_requester(
         &self,
@@ -1728,8 +1823,8 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         }))
     }
 
-    /// Add a CC recipient to a ticket. **Sends no mail** — see
-    /// `assign_ticket`'s doc comment.
+    /// Add a CC recipient to a ticket. **Sends no mail at all** — see
+    /// [`Self::add_ticket_requester`]'s doc comment.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
     async fn add_ticket_cc(
         &self,
@@ -1790,6 +1885,62 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             last_activity_at: now,
             ..ticket
         }))
+    }
+
+    /// Update the caller's own staff-notification preferences for
+    /// `instanceId` (`db::NotificationSettingsPatch`, `SET`-only — see
+    /// `CLAUDE.md`'s omit-optional-attributes house rule). Member-only,
+    /// resolved via `list_memberships_by_user(caller)` filtered to
+    /// `instanceId` — never an `instanceId` argument trusted on its own,
+    /// the same "never trust an id argument" posture as
+    /// `require_ticket_member` — so this can only ever touch the caller's
+    /// *own* membership row, which is also what makes
+    /// `MembershipInfo::notification_settings`'s self-only guard
+    /// meaningful: there is no mutation that can set anyone else's.
+    /// Returns the membership merged onto its current settings, without a
+    /// second read of the row this just wrote.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Member(instance_id.to_string()))")]
+    async fn update_notification_settings(
+        &self,
+        ctx: &Context<'_>,
+        instance_id: ID,
+        settings: NotificationSettingsInput,
+    ) -> Result<MembershipInfo<A>> {
+        let user_id = require_user_id(ctx)?;
+        let membership = self
+            .app
+            .db()
+            .list_memberships_by_user(&user_id)
+            .await?
+            .into_iter()
+            .find(|m| m.instance_id == instance_id.as_str())
+            .ok_or_else(|| ApiError::not_found("Membership", instance_id.as_str()))?;
+
+        let patch: db::NotificationSettingsPatch = settings.into();
+        if !patch.is_empty() {
+            self.app
+                .db()
+                .update_membership_notification_settings(&membership.id, &patch)
+                .await?;
+        }
+        let merged = patch.merged_onto(membership.notification_settings);
+
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+
+        Ok(MembershipInfo::new(
+            user_id,
+            Instance::new(instance),
+            membership.role.into(),
+            merged,
+        ))
     }
 
     /// Revoke the calling token, if there is one to revoke (a `Requester`

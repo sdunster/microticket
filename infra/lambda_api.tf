@@ -22,6 +22,11 @@ resource "aws_lambda_function" "api" {
         # explicitly here.
         WEBAUTHN_RP_ID     = var.support_domain
         WEBAUTHN_RP_ORIGIN = "https://${var.support_domain}"
+        # api/src/staff_notify.rs: web app origin for the "View ticket"/
+        # "Change your notification settings" links a staff notification
+        # email carries. Defaults to localhost, meant only for `make dev`,
+        # so this must be set explicitly here too.
+        APP_BASE_URL = "https://${var.support_domain}"
       },
       # api/src/turnstile.rs: verification is skipped whenever this is
       # unset, so omit the key entirely rather than setting it to an empty
