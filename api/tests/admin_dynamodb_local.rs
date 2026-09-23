@@ -85,8 +85,13 @@ fn unique_id(label: &str) -> String {
     format!("{label}-{suffix}").to_lowercase()
 }
 
+/// Lowercased deliberately: `createUser`/`updateUser` normalize the `email`
+/// argument (`db::normalize_user_email`), so a mixed-case nanoid here would
+/// only be asserting against that normalization when a test creates a user
+/// directly via `db.create_user` and later looks it up through the
+/// normalized GraphQL path.
 fn unique_email(label: &str) -> String {
-    format!("{label}-{}@example.com", nanoid::nanoid!(8))
+    format!("{label}-{}@example.com", nanoid::nanoid!(8)).to_lowercase()
 }
 
 fn expect_data(response: &Response, path: &str) -> Value {
@@ -407,6 +412,55 @@ async fn create_user_is_never_a_superuser_by_default() {
     assert_eq!(expect_data(&response, "createUser.isSuperuser"), false);
 }
 
+/// `createUser` normalizes (`db::normalize_user_email`): a mixed-case,
+/// space-padded email is stored trimmed and lowercase, and a second
+/// `createUser` with a differently-cased variant of the same address is
+/// rejected as a conflict against the first.
+#[tokio::test]
+async fn create_user_normalizes_email_and_rejects_a_case_variant() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (_my_app, schema) = build_app_and_schema(db);
+
+    let suffix = nanoid::nanoid!(8).to_lowercase();
+    let local = format!("bob-{suffix}");
+    let expected_email = format!("{local}@example.com");
+    // Capitalize the leading letter and shout the domain, wrapped in
+    // whitespace — mixed case *and* untrimmed, both of which
+    // `db::normalize_user_email` must undo.
+    let mixed_case = format!("  Bob-{suffix}@Example.COM ");
+    assert_ne!(
+        mixed_case.trim().to_lowercase(),
+        mixed_case,
+        "fixture must actually exercise mixed case/whitespace"
+    );
+
+    let created = schema
+        .execute(
+            Request::new(CREATE_USER_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "email": mixed_case, "name": "Bob",
+                })))
+                .data(superuser_auth("su1")),
+        )
+        .await;
+    assert_eq!(expect_data(&created, "createUser.email"), expected_email);
+
+    // A second createUser with yet another case variant of the same address
+    // must be rejected as a conflict against the first, now-lowercase row.
+    let other_case_variant = format!("{}@example.com", local.to_uppercase());
+    let conflict = schema
+        .execute(
+            Request::new(CREATE_USER_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "email": other_case_variant, "name": "Also Bob",
+                })))
+                .data(superuser_auth("su1")),
+        )
+        .await;
+    assert_eq!(expect_error_code(&conflict), "CONFLICT");
+}
+
 const UPDATE_USER_MUTATION: &str = r#"
     mutation($id: ID!, $name: String!, $email: String!, $enabled: Boolean!) {
         updateUser(id: $id, name: $name, email: $email, enabled: $enabled) {
@@ -438,6 +492,37 @@ async fn update_user_rejects_an_email_already_taken_by_someone_else() {
             Request::new(UPDATE_USER_MUTATION)
                 .variables(Variables::from_json(json!({
                     "id": user.id, "name": "Mover", "email": taken_email, "enabled": true,
+                })))
+                .data(superuser_auth("su1")),
+        )
+        .await;
+    assert_eq!(expect_error_code(&response), "CONFLICT");
+}
+
+/// Same conflict, but the incoming email only *differs in case* from the
+/// other user's already-lowercase stored email — `updateUser` must still
+/// normalize before comparing, so this can't slip through as "a different
+/// address" merely because the letters differ in case.
+#[tokio::test]
+async fn update_user_rejects_a_case_variant_of_someone_elses_email() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let taken_email = unique_email("taken-target-case");
+    db.create_user(&taken_email, "Other")
+        .await
+        .expect("create_user");
+    let user = db
+        .create_user(&unique_email("mover-case"), "Mover")
+        .await
+        .expect("create_user");
+    let (_my_app, schema) = build_app_and_schema(db);
+
+    let case_variant = taken_email.to_uppercase();
+    let response = schema
+        .execute(
+            Request::new(UPDATE_USER_MUTATION)
+                .variables(Variables::from_json(json!({
+                    "id": user.id, "name": "Mover", "email": case_variant, "enabled": true,
                 })))
                 .data(superuser_auth("su1")),
         )

@@ -107,8 +107,13 @@ fn extract_login_code(mail: &mockmail::Handler, to: &str) -> String {
     rest[..end].trim().to_string()
 }
 
+/// Lowercased deliberately: `requestAuthCode`/`verifyAuthCode` normalize the
+/// `email` argument (`db::normalize_user_email`), so a mixed-case nanoid
+/// here would only be asserting against that normalization, since the user
+/// below is created directly via `db.create_user` (which stores exactly
+/// what it's given) and then looked up through the normalized GraphQL path.
 fn unique_email() -> String {
-    format!("integration-{}@microticket.test", nanoid::nanoid!(10))
+    format!("integration-{}@microticket.test", nanoid::nanoid!(10)).to_lowercase()
 }
 
 /// Read `data.<path>` out of a GraphQL response as JSON, panicking with the
@@ -289,5 +294,81 @@ async fn disabled_user_cannot_log_in() {
             .expect("get_login_code against DynamoDB Local")
             .is_none(),
         "no login_code row should exist for a disabled user"
+    );
+}
+
+/// Login is case-insensitive end to end: `requestAuthCode` with a
+/// mixed-case, space-padded form of a user's (lowercase-stored) email
+/// stores the login code under the normalized key, and `verifyAuthCode`
+/// with a *different* casing of that same address and the right code still
+/// succeeds — see `db::normalize_user_email`.
+#[tokio::test]
+async fn login_is_case_insensitive() {
+    let prefix = require_local_db!();
+
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let mail = mockmail::Handler::new();
+
+    let stored_email = unique_email();
+    assert_eq!(
+        stored_email,
+        stored_email.trim().to_lowercase(),
+        "unique_email() fixture must already be normalized"
+    );
+    db.create_user(&stored_email, "Case Insensitive User")
+        .await
+        .expect("create_user against DynamoDB Local");
+
+    let my_app = Arc::new(app::new(db, mail, mockstorage::Storage::new(), 0));
+    let webauthn = Arc::new(app::build_webauthn().expect("WebAuthn build failed"));
+    let schema = graphql::build_schema(my_app.clone(), webauthn);
+
+    // requestAuthCode with a mixed-case, space-padded variant of the stored
+    // email.
+    let request_variant = format!("  {} ", stored_email.to_uppercase());
+    let response = schema
+        .execute(
+            Request::new(r#"mutation($email: String!) { requestAuthCode(email: $email) }"#)
+                .variables(Variables::from_json(json!({ "email": request_variant }))),
+        )
+        .await;
+    assert_eq!(expect_data(&response, "requestAuthCode"), json!(true));
+
+    // The login code was actually sent (to the real, normalized address) and
+    // stored under the normalized `login_code` key — not under the
+    // mixed-case/padded form the caller sent.
+    let code = extract_login_code(&my_app.mail, &stored_email);
+    assert!(
+        my_app
+            .db()
+            .get_login_code(&stored_email)
+            .await
+            .expect("get_login_code against DynamoDB Local")
+            .is_some(),
+        "login_code must be stored under the normalized (lowercase) email"
+    );
+
+    // verifyAuthCode with yet another form of the same address (uppercase,
+    // no surrounding whitespace this time — distinct from the padded form
+    // requestAuthCode was called with) and the right code must still
+    // succeed.
+    let verify_variant = stored_email.to_uppercase();
+    let response = schema
+        .execute(
+            Request::new(
+                r#"mutation($email: String!, $code: String!) { verifyAuthCode(email: $email, code: $code) }"#,
+            )
+            .variables(Variables::from_json(json!({
+                "email": verify_variant,
+                "code": code,
+            }))),
+        )
+        .await;
+    let token = expect_data(&response, "verifyAuthCode");
+    assert!(
+        token
+            .as_str()
+            .is_some_and(|t| t.starts_with(auth::USER_TOKEN_PREFIX)),
+        "verifyAuthCode with a differently-cased email must still succeed: {token:?}"
     );
 }

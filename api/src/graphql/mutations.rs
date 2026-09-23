@@ -255,23 +255,6 @@ async fn send_system_notification<A: App + HasDb + HasMail + Send + Sync>(
     }
 }
 
-/// Trim an email supplied to `createUser`/`updateUser` and check its shape —
-/// exactly one `@` with non-empty parts either side. Deliberately **not**
-/// lowercased, unlike [`normalize_ticket_email`]: login (`request_auth_code`,
-/// `get_user_id_by_email`) matches a user's email exactly as stored, so
-/// changing case here would make an admin-created account harder to log in
-/// to, not easier.
-fn validate_user_email(raw: &str) -> Result<String> {
-    let email = raw.trim();
-    let valid = email.split_once('@').is_some_and(|(local, domain)| {
-        !local.is_empty() && !domain.is_empty() && !domain.contains('@')
-    });
-    if !valid {
-        return Err(anyhow!("{raw:?} is not a valid email address"));
-    }
-    Ok(email.to_string())
-}
-
 /// Trim, lowercase, and sanity-check an email address supplied to
 /// `addTicketRequester`/`addTicketCc` — a minimal shape check (one `@`,
 /// non-empty local/domain parts), not full RFC 5321 validation, matching how
@@ -317,14 +300,27 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
     /// address belongs to a real, enabled user — telling the caller otherwise
     /// would let anyone enumerate registered emails one guess at a time. Every
     /// early-return path below exists to preserve that: a bad Turnstile token, an
-    /// unknown/disabled user, and a rate-limit hit are all indistinguishable from
-    /// the outside.
+    /// unknown/disabled user, a malformed email, and a rate-limit hit are all
+    /// indistinguishable from the outside. `email` is normalized
+    /// ([`db::normalize_user_email`]) once, up front, and the normalized form is
+    /// used for every lookup/write below (`get_user_id_by_email`, the
+    /// `login_code` row, the mail send) — this is what makes login
+    /// case-insensitive: `Bob@Example.com` finds the same user and `login_code`
+    /// row as `bob@example.com`.
     async fn request_auth_code(
         &self,
         ctx: &Context<'_>,
         email: String,
         turnstile_token: Option<String>,
     ) -> bool {
+        let email = match db::normalize_user_email(&email) {
+            Ok(e) => e,
+            Err(e) => {
+                info!("request_auth_code: malformed email: {e}");
+                return true;
+            }
+        };
+
         let remote_ip = ctx
             .data_opt::<super::ClientIp>()
             .and_then(|ip| ip.0.as_deref());
@@ -417,9 +413,19 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
 
     /// Verify an email login code and return an opaque `mtu_` token on success.
     /// **Returns `null` on every failure path** — expired, wrong code, too many
-    /// attempts, unknown/disabled user — so the response never tells the caller
-    /// which step failed.
+    /// attempts, unknown/disabled user, malformed email — so the response never
+    /// tells the caller which step failed. `email` is normalized
+    /// ([`db::normalize_user_email`]) once, up front, exactly like
+    /// [`Self::request_auth_code`], so a differently-cased address still
+    /// resolves to the `login_code` row `requestAuthCode` wrote.
     async fn verify_auth_code(&self, email: String, code: String) -> Option<String> {
+        let email = match db::normalize_user_email(&email) {
+            Ok(e) => e,
+            Err(e) => {
+                info!("verify_auth_code: malformed email: {e}");
+                return None;
+            }
+        };
         let now = crate::clock::now_sec();
 
         let record = match self.app.db().get_login_code(&email).await {
@@ -933,20 +939,21 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
     /// Create a new user. Does not grant any membership — pair with
     /// [`Self::add_member`], mirroring `bin/cli.rs`'s `user create` +
     /// `member add`. Superuser-only. Rejects an email already in use, the
-    /// same pre-check the CLI does. `email` is trimmed and shape-checked
-    /// ([`validate_user_email`]) but not otherwise normalized — `bin/cli.rs`'s
-    /// `user create`, `request_auth_code`,
-    /// and `get_user_id_by_email` apply none either (case-sensitive,
-    /// whitespace-sensitive as stored), so inventing one here would make
-    /// this entry point disagree with every other one about what "the same
-    /// address" means.
+    /// same pre-check the CLI does. `email` is normalized
+    /// ([`db::normalize_user_email`] — trimmed and lowercased) before the
+    /// taken-email check and the write, the same normalizer every other
+    /// entry point that writes or looks up a user email uses
+    /// (`bin/cli.rs`'s `user create`, `request_auth_code`,
+    /// `verify_auth_code`), so this can never disagree with any of them
+    /// about what "the same address" means. This is what makes an
+    /// admin-created account's email case-insensitive for login too.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
     async fn create_user(&self, email: String, name: String) -> Result<User<A>> {
         let name = name.trim();
         if name.is_empty() {
             return Err(anyhow!("name cannot be empty"));
         }
-        let email = validate_user_email(&email)?;
+        let email = db::normalize_user_email(&email).map_err(|e| anyhow!(e))?;
         let email = email.as_str();
         if self.app.db().get_user_id_by_email(email).await?.is_some() {
             return Err(
@@ -959,13 +966,17 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
 
     /// Update a user's name, email, and enabled state
     /// (`UserUpdateShape::Fields` plus, when the email changed,
-    /// `UserUpdateShape::SetEmail`). Superuser-only. A changed email is
-    /// pre-checked against `get_user_id_by_email` before being written,
-    /// exactly like [`Self::create_user`]. Rejects `enabled: false` when
-    /// `id` names the caller themselves — self-lockout: `Superuser`
-    /// authorizes acting on users in general, not any particular one, so
-    /// nothing else stops a superuser from disabling their own account and
-    /// having no way back in short of another operator running the CLI.
+    /// `UserUpdateShape::SetEmail`). Superuser-only. `email` is normalized
+    /// ([`db::normalize_user_email`]) before comparison and before the
+    /// taken-email pre-check against `get_user_id_by_email`, exactly like
+    /// [`Self::create_user`] — since `current.email` is itself always
+    /// stored normalized, a request that only changes the case of an
+    /// already-lowercase email is a no-op, not a conflict. Rejects
+    /// `enabled: false` when `id` names the caller themselves —
+    /// self-lockout: `Superuser` authorizes acting on users in general, not
+    /// any particular one, so nothing else stops a superuser from disabling
+    /// their own account and having no way back in short of another
+    /// operator running the CLI.
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
     async fn update_user(
         &self,
@@ -980,7 +991,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         if name.is_empty() {
             return Err(anyhow!("name cannot be empty"));
         }
-        let email = validate_user_email(&email)?;
+        let email = db::normalize_user_email(&email).map_err(|e| anyhow!(e))?;
         let current = self
             .app
             .db()
@@ -2188,24 +2199,6 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validate_user_email_trims_but_preserves_case() {
-        assert_eq!(
-            validate_user_email("  Bob@Example.com ").unwrap(),
-            "Bob@Example.com"
-        );
-    }
-
-    #[test]
-    fn validate_user_email_rejects_malformed_addresses() {
-        for bad in ["", "   ", "bob", "@example.com", "bob@", "a@b@c"] {
-            assert!(
-                validate_user_email(bad).is_err(),
-                "{bad:?} should be rejected"
-            );
-        }
-    }
 
     /// Sanitized fixture, hand-constructed (not captured from a real device) to
     /// match `webauthn-rs` 0.5.5's `Passkey` serde shape exactly — every field

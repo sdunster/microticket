@@ -213,12 +213,15 @@ pub async fn resolve_dev_auth<A: App + HasDb>(
     match config {
         DevAuthConfig::User { id_or_email } => {
             let user_id = if id_or_email.contains('@') {
+                let email = db::normalize_user_email(id_or_email).map_err(|e| {
+                    AuthError::Permanent(format!("Dev auth: invalid email {id_or_email:?}: {e}"))
+                })?;
                 app.db()
-                    .get_user_id_by_email(id_or_email)
+                    .get_user_id_by_email(&email)
                     .await
                     .map_err(|e| classify_db_err("dev auth: fetch user by email", e))?
                     .ok_or_else(|| {
-                        AuthError::Permanent(format!("Dev auth user not found: {id_or_email}"))
+                        AuthError::Permanent(format!("Dev auth user not found: {email}"))
                     })?
             } else {
                 id_or_email.clone()

@@ -127,6 +127,8 @@ Bootstrap sequence for a brand-new deployment's first organisation and owner:
 
 ```bash
 # 1. Create the first user (the person who will own the organisation).
+#    Email is trimmed and lowercased before being stored, so login is
+#    effectively case-insensitive — see SCHEMA.md's `user` table entry.
 cargo run --bin cli -- user create owner@yourdomain.com "Your Name"
 
 # 2. Create the instance (the tenant organisation).
