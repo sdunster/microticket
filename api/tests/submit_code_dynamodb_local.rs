@@ -67,8 +67,13 @@ macro_rules! require_local_db {
     };
 }
 
+/// Lowercased deliberately: some tests below create a user directly via
+/// `db.create_user` (which stores exactly what it's given) and then log in
+/// through `requestAuthCode`/`verifyAuthCode`, which normalize the `email`
+/// argument (`db::normalize_user_email`) — a mixed-case nanoid here would
+/// only be asserting against that normalization.
 fn unique_email(label: &str) -> String {
-    format!("{label}-{}@microticket.test", nanoid::nanoid!(10))
+    format!("{label}-{}@microticket.test", nanoid::nanoid!(10)).to_lowercase()
 }
 
 /// Pull a 6-digit code out of the mock mailer's most recent message to `to`
