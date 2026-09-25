@@ -6,6 +6,18 @@ enum AddressKindType {
 	WILDCARD
 }
 
+type ApiTokenInfo {
+	id: ID!
+	name: String!
+	enabled: Boolean!
+	createdAt: Int!
+	lastUsedAt: Int
+	"""
+	Dataloaded — see [`TicketMessage::author`]'s doc comment.
+	"""
+	createdBy: User
+}
+
 type Attachment {
 	filename: String!
 	contentType: String!
@@ -22,6 +34,11 @@ bytes to directly (never through this API).
 type AttachmentUpload {
 	key: String!
 	uploadUrl: String!
+}
+
+type CreatedApiToken {
+	token: String!
+	apiToken: ApiTokenInfo!
 }
 
 """
@@ -74,6 +91,16 @@ type Instance {
 	remains available for operators working outside the web UI.
 	"""
 	members: [MemberInfo!]!
+	"""
+	Every `api_token` row for this instance, oldest first — the token
+	management page's data source. Owner-or-superuser, same posture (and
+	same doc-comment reasoning) as [`Self::inbound_addresses`]/
+	[`Self::members`]: an integration credential is instance *settings*,
+	not something a plain agent needs to see or a superuser is barred
+	from managing on an owner's behalf. The secret itself never appears
+	here — see `createApiToken`'s doc comment for the only time it does.
+	"""
+	apiTokens: [ApiTokenInfo!]!
 }
 
 type MemberInfo {
@@ -282,6 +309,38 @@ type MutationRoot {
 	"""
 	setMemberRole(instanceId: ID!, userId: ID!, role: MembershipRoleType!): Instance!
 	"""
+	Mint a fresh `mta_` integration token for `instanceId`, scoped to
+	exactly `submitVerifiedTicket` (see `auth::AuthInfo::ApiToken`'s doc
+	comment). Owner-or-superuser, the same posture as `addInboundAddress` —
+	this is instance settings, and the superuser boundary in `CLAUDE.md`
+	explicitly allows a superuser to manage those without granting any
+	ticket access.
+	
+	**`token` is the only time the full secret ever exists outside the
+	caller's own storage** — only its sha256 hash is persisted (see
+	`auth::issue_api_token`), mirroring `issue_user_token`'s "the caller
+	keeps nothing else" contract. There is no way to recover a lost
+	secret; the only remedy is deleting the row and minting a new one.
+	"""
+	createApiToken(instanceId: ID!, name: String!): CreatedApiToken!
+	"""
+	Rename and/or enable/disable an existing token. Takes only `id` — the
+	instance it belongs to is a fact of the record, not a caller-supplied
+	argument — so this mutation carries **no static guard**;
+	`require_api_token_manager` is the entire authorization story (see
+	its doc comment). Disabling takes effect on the token's very next
+	request: `verify_token`'s `mta_` branch checks `enabled` on every
+	call, and nothing caches the result.
+	"""
+	updateApiToken(id: ID!, name: String!, enabled: Boolean!): ApiTokenInfo!
+	"""
+	Hard delete — see `db::Handler::delete_api_token`'s doc comment for
+	why there's no soft-delete marker to set instead. Same no-static-guard,
+	`require_api_token_manager`-only authorization as
+	[`Self::update_api_token`].
+	"""
+	deleteApiToken(id: ID!): Boolean!
+	"""
 	Open a new ticket from the public submit form. **Requester-token
 	only** — the instance and the requester's email come from the token
 	(`AuthInfo::Requester`), never from an argument, so this can't be used
@@ -299,6 +358,41 @@ type MutationRoot {
 	would risk a duplicate submission on retry.
 	"""
 	submitTicket(subject: String!, body: String!): Ticket!
+	"""
+	Open a new ticket with a **caller-supplied, trusted** list of
+	requester (`to`) and CC (`cc`) addresses — the integration-token
+	counterpart to `submitTicket`. `AuthRequirement::ApiToken` means the
+	instance comes from the token, never an argument (same reasoning as
+	`submitTicket`'s `Requester` token), but unlike `submitTicket` the
+	*addresses* are also taken on the caller's word rather than proven by
+	an email-verification code — that is the entire point of this
+	mutation, and why an `mta_` token is instance-owner-or-superuser
+	minted rather than self-service: whoever holds one can open a ticket
+	claiming to be any address they name. An external service that has
+	already verified its own users' addresses (a customer portal behind
+	its own login, say) is the intended caller.
+	
+	`to[0]` is treated as the submitter for the first message's
+	`fromEmail` — with a caller-supplied list rather than
+	`submitTicket`'s always-exactly-one-address token, some convention is
+	needed, and "the primary requester is whichever address the caller
+	listed first" is the least surprising one available. `to`/`cc` are
+	normalized ([`normalize_ticket_email`]), deduped, and capped at
+	[`MAX_VERIFIED_TICKET_RECIPIENTS`] by
+	[`normalize_verified_recipients`] before anything is written; an
+	address matching one of this instance's own inbound addresses is
+	rejected outright (`outbound::is_own_address`) rather than silently
+	dropped — silently dropping it (the way `build_outbound` treats
+	`To`/`Cc`) could leave a ticket whose requester is itself, or whose
+	acknowledgement has nowhere left to go.
+	
+	Sends the same best-effort acknowledgement `submitTicket` does (see
+	`send_system_notification`'s doc comment for the best-effort
+	reasoning) to every `to`/`cc` address, and the same best-effort
+	`NewTicket` staff notice, attributed to `to[0]` — there is no user or
+	requester identity to attribute it to otherwise.
+	"""
+	submitVerifiedTicket(subject: String!, body: String!, to: [String!]!, cc: [String!]! = []): SubmittedTicket!
 	"""
 	Mint a presigned S3 PUT into `pending/{instance_id}/{nanoid}/{filename}`
 	for an agent to upload an attachment to, ahead of attaching it to a
@@ -646,6 +740,21 @@ type QueryRoot {
 	self-only even when reached this way — see that field's doc comment.
 	"""
 	adminUser(id: ID!): User
+}
+
+"""
+`submitVerifiedTicket`'s result — deliberately narrow, not `Ticket<A>`:
+an integration token has no business reading back ticket internals
+(assignee, messages, internal notes) through nested fields just because
+it opened the ticket. `subject_tag` is the `[#{slug}-{number}]` tag
+`outbound::tag_subject` stamps on every outbound message for this
+ticket, handed back so the caller can recognize its own ticket in a
+downstream inbox without a second query.
+"""
+type SubmittedTicket {
+	id: ID!
+	number: Int!
+	subjectTag: String!
 }
 
 type Ticket {

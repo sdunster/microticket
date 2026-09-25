@@ -387,6 +387,43 @@ resource "aws_dynamodb_table" "user_token" {
   }
 }
 
+# ── api_token ─────────────────────────────────────────────────────────────────
+# Instance-scoped integration credentials (mta_{id}.{secret}) authorising
+# submitVerifiedTicket. Deliberately no token_hash GSI, unlike user_token
+# above — see SCHEMA.md for why: the token carries its own row id, so
+# verification is a GetItem by id, never a GSI lookup with an eventual-
+# consistency window.
+
+resource "aws_dynamodb_table" "api_token" {
+  name                        = "${var.db_prefix}_api_token"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "id"
+  deletion_protection_enabled = true
+
+  point_in_time_recovery {
+    enabled                 = true
+    recovery_period_in_days = 35
+  }
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+  attribute {
+    name = "instance_id"
+    type = "S"
+  }
+
+  # The token management page: list every token for an instance. ALL — same
+  # reasoning as membership's instance_id-index: low-cardinality, low-traffic,
+  # and every field is rendered directly from the list.
+  global_secondary_index {
+    name            = "instance_id-index"
+    hash_key        = "instance_id"
+    projection_type = "ALL"
+  }
+}
+
 # ── webauthn_credential ──────────────────────────────────────────────────────
 
 resource "aws_dynamodb_table" "webauthn_credential" {
