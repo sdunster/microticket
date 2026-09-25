@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use async_graphql::connection::{Connection, EmptyFields};
 use async_graphql::dataloader::DataLoader;
-use async_graphql::{Context, Enum, ID, Object, SimpleObject};
+use async_graphql::{Context, Enum, ID, InputObject, Object, SimpleObject};
 
 use crate::app::{App, HasDb, HasStorage};
 use crate::auth::AuthInfo;
@@ -65,6 +65,55 @@ impl From<MembershipRoleType> for db::MembershipRole {
         match role {
             MembershipRoleType::Owner => Self::Owner,
             MembershipRoleType::Agent => Self::Agent,
+        }
+    }
+}
+
+/// A member's five staff-notification preferences, exposed over GraphQL as
+/// `NotificationSettings` — see `db::NotificationSettings`'s doc comment for
+/// what each field means and what it defaults to when never explicitly set.
+#[derive(SimpleObject, Clone, Copy, Debug, PartialEq, Eq)]
+#[graphql(name = "NotificationSettings")]
+pub struct NotificationSettingsInfo {
+    pub new_ticket: bool,
+    pub assigned_to_me: bool,
+    pub assigned_to_me_updated: bool,
+    pub unassigned_updated: bool,
+    pub assigned_to_others_updated: bool,
+}
+
+impl From<db::NotificationSettings> for NotificationSettingsInfo {
+    fn from(s: db::NotificationSettings) -> Self {
+        Self {
+            new_ticket: s.new_ticket,
+            assigned_to_me: s.assigned_to_me,
+            assigned_to_me_updated: s.assigned_to_me_updated,
+            unassigned_updated: s.unassigned_updated,
+            assigned_to_others_updated: s.assigned_to_others_updated,
+        }
+    }
+}
+
+/// `updateNotificationSettings`'s argument — a patch over
+/// [`db::NotificationSettingsPatch`]: every field optional, `null`/omitted
+/// meaning "leave this one alone". See that type's doc comment.
+#[derive(InputObject, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NotificationSettingsInput {
+    pub new_ticket: Option<bool>,
+    pub assigned_to_me: Option<bool>,
+    pub assigned_to_me_updated: Option<bool>,
+    pub unassigned_updated: Option<bool>,
+    pub assigned_to_others_updated: Option<bool>,
+}
+
+impl From<NotificationSettingsInput> for db::NotificationSettingsPatch {
+    fn from(i: NotificationSettingsInput) -> Self {
+        Self {
+            new_ticket: i.new_ticket,
+            assigned_to_me: i.assigned_to_me,
+            assigned_to_me_updated: i.assigned_to_me_updated,
+            unassigned_updated: i.unassigned_updated,
+            assigned_to_others_updated: i.assigned_to_others_updated,
         }
     }
 }
@@ -272,18 +321,48 @@ impl<A: App + HasDb + Send + Sync + 'static> MemberInfo<A> {
 }
 
 /// One of the caller's own memberships: which instance, and their role in it.
-/// Backs `User.memberships` (i.e. `me.memberships`).
+/// Backs `User.memberships` (i.e. `me.memberships`), which `adminUser` also
+/// reuses for a superuser looking up someone else's memberships — see that
+/// field's doc comment. `user_id` is carried alongside `instance`/`role`
+/// purely so [`Self::notification_settings`] can enforce its self-only
+/// guard without a second DB round trip; `settings` is loaded once here
+/// (from the same `db::Membership` row `role` already came from) rather
+/// than re-fetched by that resolver.
 #[derive(Debug, PartialEq)]
 pub struct MembershipInfo<A: App + HasDb + Send + Sync> {
+    user_id: String,
     instance: Instance<A>,
     role: MembershipRoleType,
+    settings: db::NotificationSettings,
+}
+
+impl<A: App + HasDb + Send + Sync> MembershipInfo<A> {
+    /// Construct directly from already-loaded parts — used by
+    /// `graphql::mutations::update_notification_settings`, which builds its
+    /// response from the membership row it just patched rather than a fresh
+    /// `User.memberships` read.
+    pub fn new(
+        user_id: String,
+        instance: Instance<A>,
+        role: MembershipRoleType,
+        settings: db::NotificationSettings,
+    ) -> Self {
+        Self {
+            user_id,
+            instance,
+            role,
+            settings,
+        }
+    }
 }
 
 impl<A: App + HasDb + Send + Sync> Clone for MembershipInfo<A> {
     fn clone(&self) -> Self {
         Self {
+            user_id: self.user_id.clone(),
             instance: self.instance.clone(),
             role: self.role,
+            settings: self.settings,
         }
     }
 }
@@ -295,6 +374,29 @@ impl<A: App + HasDb + Send + Sync + 'static> MembershipInfo<A> {
     }
     async fn role(&self) -> MembershipRoleType {
         self.role
+    }
+
+    /// This member's own staff-notification preferences for this instance.
+    /// **Self only** — the same defence-in-depth reasoning as
+    /// `User::passkeys`: `adminUser` lets a superuser reach another user's
+    /// `memberships`, and notification preferences are exactly the kind of
+    /// per-person setting that shouldn't leak to a lookup, even though
+    /// (unlike passkeys) there's no credential material involved.
+    /// `FORBIDDEN`, not the defaults, for anyone but the member themselves —
+    /// an innocuous-looking default response would be the wrong failure
+    /// mode here too, for the same reason `User::passkeys` doesn't return an
+    /// empty list.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn notification_settings(&self, ctx: &Context<'_>) -> Result<NotificationSettingsInfo> {
+        let Some(AuthInfo::User { id, .. }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        };
+        if id != &self.user_id {
+            return Err(
+                ApiError::forbidden("Cannot view another member's notification settings").into(),
+            );
+        }
+        Ok(self.settings.into())
     }
 }
 
@@ -409,8 +511,10 @@ impl<A: App + HasDb + Send + Sync + 'static> User<A> {
             .zip(instances)
             .filter_map(|(m, inst)| {
                 inst.filter(|i| !i.deleted).map(|i| MembershipInfo {
+                    user_id: m.user_id.clone(),
                     instance: Instance::new(i),
                     role: m.role.into(),
+                    settings: m.notification_settings,
                 })
             })
             .collect())

@@ -46,8 +46,10 @@ local setup, and `SCHEMA.md` for the data model.
     housekeeping (spam cleanup, a mistaken submission), not a resolution the customer is owed a
     notification about.
   - `assignTicket`, `addTicketRequester`/`removeTicketRequester`, `addTicketCc`/`removeTicketCc`
-    send nothing at all — which agent owns a ticket, and who else is copied on it, is internal
-    bookkeeping. `addInternalNote` never sends mail, as the build plan says explicitly.
+    send no **customer** mail at all — which agent owns a ticket, and who else is copied on it, is
+    internal bookkeeping. `addInternalNote` never sends customer mail, as the build plan says
+    explicitly. (`assignTicket` *does* send a best-effort **staff** notice — see the next entry;
+    the requester/CC mutations never send anything, staff included.)
   - A send failure is handled differently depending on whether the mail *is* the mutation's
     primary effect or a secondary side effect of one: `replyToTicket` fails the mutation (the
     message row survives, but the caller is told delivery didn't happen); `submitTicket`'s
@@ -55,6 +57,58 @@ local setup, and `SCHEMA.md` for the data model.
     surfacing as a mutation error, since the ticket already exists / the status already changed by
     the time mail is attempted. See `reply_to_ticket`'s doc comment in `graphql/mutations.rs` for
     the full reasoning.
+
+- **Staff notifications: a second, separate mail pipeline (`api/src/staff_notify.rs`).** The
+  customer-mail rule above is about requesters/CCs. Members/agents get their own opt-out email
+  notifications about ticket activity in their instance, stored as five optional `Bool` attributes
+  on the `membership` row (absent means the default below, per the omit-optional-attributes house
+  rule; `updateNotificationSettings` writes an explicit `true`/`false` once changed; removing and
+  re-adding a membership resets to defaults):
+
+  | Setting | Attribute | Default | Meaning |
+  |---|---|---|---|
+  | `newTicket` | `notify_new_ticket` | `true` | A new ticket is opened (inbound email or the public submit form) |
+  | `assignedToMe` | `notify_assigned_to_me` | `true` | Someone else assigns a ticket to this member |
+  | `assignedToMeUpdated` | `notify_assigned_to_me_updated` | `true` | A ticket assigned to this member gets an update (also covers being unassigned/reassigned away — see below) |
+  | `unassignedUpdated` | `notify_unassigned_updated` | `true` | An unassigned ticket gets an update |
+  | `assignedToOthersUpdated` | `notify_assigned_to_others_updated` | `false` | A ticket assigned to someone else gets an update — off by default; opting into every other agent's traffic is a deliberate choice |
+
+  "An update" is a customer message (inbound mail on an existing ticket), an agent reply
+  (`replyToTicket`, only after the customer-facing send succeeds), an internal note
+  (`addInternalNote`), or a status change (`setTicketStatus`) — **except a transition *into*
+  `DELETED`**, mirroring the customer-mail carve-out above. Assignment (`assignTicket`) is its own
+  event: it mails only the new assignee (`assignedToMe`) and the previous assignee
+  (`assignedToMeUpdated`, told they were unassigned or the ticket went to someone else) — it never
+  fans out to the rest of the team, and a self-assign or a no-op reassignment notifies nobody. The
+  actor who performed the action is always excluded, superusers get nothing by virtue of being
+  superusers (only a real membership row counts), and a deleted ticket notifies nobody regardless
+  of event or settings. See `staff_notify::select_recipients`'s doc comment for the exact rules,
+  unit-tested there.
+
+  A staff notice is deliberately built differently from customer mail (`staff_notify::build_staff_mime`,
+  not `outbound::build_outbound`): `From` the system sender (`mail::system_from()`) under the
+  instance's display name, `Reply-To` the system reply-to, **no `+t{ticket_id}.{reply_token}` tag
+  anywhere**, one message per recipient (`To:` only, no `Cc:`), a subject that does not parse as
+  `[#{slug}-{number}]` (`outbound::parse_subject_tag` must return `None` for it — pinned by a unit
+  test), and never persisted as a `ticket_message` row. The reason is structural, not cosmetic: SES
+  receives every address on the support domain, so a staff member hitting "reply" on a notice that
+  *did* carry a reply tag would have their reply mistaken for a customer message by the inbound
+  pipeline. Like `submitTicket`'s acknowledgement and `setTicketStatus`'s notice, sending is
+  best-effort — every failure is `warn!`-logged and swallowed, never surfacing as a mutation error
+  or failing inbound processing.
+
+  `updateNotificationSettings` (GraphQL) is the only way to change these, and only for the caller's
+  *own* membership — resolved via `list_memberships_by_user(caller)` filtered to the given
+  instance, never a trusted membership id. `MembershipInfo.notificationSettings` is **self-only**:
+  `FORBIDDEN` for anyone reading someone else's `memberships` (e.g. a superuser via `adminUser`),
+  the same defence-in-depth posture as `User.passkeys`.
+
+  Needs `APP_BASE_URL` (the web app's origin, for the "View ticket"/"Change your notification
+  settings" links a notice carries) set in every environment that sends this mail — `api/src/staff_notify.rs`
+  defaults to `http://localhost:5173` otherwise. The inbound-mail Lambda also needs `MAIL_FROM` now
+  that it sends mail of its own (previously it only consumed the inbound queue) — without it, a
+  staff notification sent from that Lambda falls back to `mail::FROM_FALLBACK`'s reserved `.test`
+  domain and is refused by the provider.
 
 - **Rows reference an instance by `id`, never by `slug`.** Slugs are editable and exist for
   humans; `id` is the foreign key every other table stores. Anything taking an instance from user

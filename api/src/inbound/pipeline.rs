@@ -44,6 +44,7 @@ use crate::inbound::{attachments, resolution, routing};
 use crate::mail::Handler as _;
 use crate::mailloop::{self, DropReason};
 use crate::outbound;
+use crate::staff_notify::{self, Actor, StaffEvent};
 use crate::storage;
 
 /// How long a `processed_message` idempotency row is retained. Long enough
@@ -390,6 +391,31 @@ where
         )
         .await
     };
+
+    // 10. Best-effort staff notice — see `staff_notify`'s module doc. Uses
+    // the re-fetched `ticket` (post-update state), and the raw `body_text`
+    // (not `notify_body`'s customer-relay fallback text) — `staff_notify`
+    // applies its own "(no message body)" placeholder for an empty/missing
+    // text part.
+    let staff_event = if created_new_ticket {
+        StaffEvent::NewTicket {
+            requester_email: &from_normalized,
+        }
+    } else {
+        StaffEvent::CustomerMessage {
+            from_email: &from_normalized,
+            reopened,
+        }
+    };
+    staff_notify::notify_staff(
+        app,
+        &ticket,
+        ticket.assignee_user_id.as_deref(),
+        staff_event,
+        Actor::Email(&from_normalized),
+        Some(body_text.as_deref().unwrap_or("")),
+    )
+    .await;
 
     Ok(Outcome {
         dropped_reason: None,

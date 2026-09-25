@@ -13,6 +13,16 @@ resource "aws_lambda_function" "inbound_mail" {
       # api/src/s3storage.rs: same bucket the API lambda reads/writes — raw
       # MIME lands under inbound/, extracted attachments under attachments/.
       MAIL_BUCKET = aws_s3_bucket.mail.id
+      # api/src/mail.rs: this function now sends mail of its own —
+      # api/src/staff_notify.rs's best-effort staff notifications, sent from
+      # the system sender, not an instance's inbound address. Without this,
+      # a staff notification sent from this Lambda would fall back to
+      # mail::FROM_FALLBACK's reserved `.test` domain and be refused by SES.
+      MAIL_FROM = "no-reply@${var.support_domain}"
+      # api/src/staff_notify.rs: web app origin for the "View ticket"/
+      # "Change your notification settings" links a staff notification
+      # email carries. See lambda_api.tf's identical variable.
+      APP_BASE_URL = "https://${var.support_domain}"
     }
   }
 
