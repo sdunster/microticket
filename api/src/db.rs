@@ -321,11 +321,107 @@ pub struct Membership {
     pub user_id: String,
     pub instance_id: String,
     pub role: MembershipRole,
+    /// This member's staff-notification preferences for this instance — see
+    /// [`NotificationSettings`]'s doc comment.
+    pub notification_settings: NotificationSettings,
 }
 
 impl HasID for Membership {
     fn id(&self) -> &str {
         &self.id
+    }
+}
+
+/// One member's staff-email-notification preferences for one instance —
+/// whether `crate::staff_notify` mails them about a given kind of ticket
+/// activity. Each field is stored as an *optional* Bool on the `membership`
+/// row (see [`NotificationSettingsPatch`]) — per the omit-optional-attributes
+/// house rule, an absent attribute means "use the default", not `false`, so
+/// this type's [`Default`] impl is the single source of truth for what those
+/// defaults are; `crate::dynamodb`'s hydration and this impl must never
+/// disagree. Removing and re-adding a membership drops the row (and with it
+/// every attribute here), so a re-added member always starts back at these
+/// defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotificationSettings {
+    /// A new ticket is opened in this instance (inbound email or the public
+    /// submission form).
+    pub new_ticket: bool,
+    /// Someone else assigns a ticket to this member.
+    pub assigned_to_me: bool,
+    /// A ticket assigned to this member receives an "update" (a customer
+    /// message, an agent reply, an internal note, or a close/reopen) —
+    /// including being unassigned from/reassigned away from this member,
+    /// which reuses this same setting (see `crate::staff_notify`'s doc
+    /// comment on why assignment changes are covered by *this* setting, not
+    /// `assigned_to_me`, for the outgoing member's side of the change).
+    pub assigned_to_me_updated: bool,
+    /// A ticket with no assignee receives an update.
+    pub unassigned_updated: bool,
+    /// A ticket assigned to someone else receives an update. Off by default —
+    /// unlike the other four, opting into every other agent's ticket traffic
+    /// is noisy enough that it should be a deliberate choice.
+    pub assigned_to_others_updated: bool,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            new_ticket: true,
+            assigned_to_me: true,
+            assigned_to_me_updated: true,
+            unassigned_updated: true,
+            assigned_to_others_updated: false,
+        }
+    }
+}
+
+/// A patch to a subset of [`NotificationSettings`]' fields —
+/// `updateNotificationSettings`'s argument shape and
+/// [`Handler::update_membership_notification_settings`]'s input. `None`
+/// means "leave this field alone"; `Some(v)` always writes an explicit
+/// `true`/`false` (never a `REMOVE` back to the default — there is no GraphQL
+/// path back to "unset", only removing the membership itself resets to
+/// defaults, per [`NotificationSettings`]'s doc comment).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NotificationSettingsPatch {
+    pub new_ticket: Option<bool>,
+    pub assigned_to_me: Option<bool>,
+    pub assigned_to_me_updated: Option<bool>,
+    pub unassigned_updated: Option<bool>,
+    pub assigned_to_others_updated: Option<bool>,
+}
+
+impl NotificationSettingsPatch {
+    /// True when every field is `None` — the caller sent an update with
+    /// nothing to change. [`crate::dynamodb::Handler::update_membership_notification_settings`]
+    /// treats this as a no-op rather than sending DynamoDB an `UpdateItem`
+    /// with an empty `SET` clause.
+    pub fn is_empty(&self) -> bool {
+        self.new_ticket.is_none()
+            && self.assigned_to_me.is_none()
+            && self.assigned_to_me_updated.is_none()
+            && self.unassigned_updated.is_none()
+            && self.assigned_to_others_updated.is_none()
+    }
+
+    /// Merge this patch onto `current`, returning the resulting settings —
+    /// used to build the response `MembershipInfo` a mutation returns
+    /// without a second read of the row it just wrote.
+    pub fn merged_onto(&self, current: NotificationSettings) -> NotificationSettings {
+        NotificationSettings {
+            new_ticket: self.new_ticket.unwrap_or(current.new_ticket),
+            assigned_to_me: self.assigned_to_me.unwrap_or(current.assigned_to_me),
+            assigned_to_me_updated: self
+                .assigned_to_me_updated
+                .unwrap_or(current.assigned_to_me_updated),
+            unassigned_updated: self
+                .unassigned_updated
+                .unwrap_or(current.unassigned_updated),
+            assigned_to_others_updated: self
+                .assigned_to_others_updated
+                .unwrap_or(current.assigned_to_others_updated),
+        }
     }
 }
 
@@ -865,6 +961,17 @@ pub trait Handler: Sync {
         id: &str,
         role: MembershipRole,
     ) -> impl Future<Output = Result<()>> + Send;
+    /// Apply a [`NotificationSettingsPatch`] to a membership row —
+    /// `updateNotificationSettings`'s write path. Only the fields the patch
+    /// sets are touched (`SET`, never `REMOVE`); an empty patch
+    /// (`NotificationSettingsPatch::is_empty`) is a no-op that sends no
+    /// `UpdateItem` at all, matching the house rule against a call with an
+    /// empty update expression.
+    fn update_membership_notification_settings(
+        &self,
+        id: &str,
+        patch: &NotificationSettingsPatch,
+    ) -> impl Future<Output = Result<()>> + Send;
     fn list_memberships_by_user(
         &self,
         user_id: &str,
@@ -1294,6 +1401,48 @@ mod tests {
                 "{bad:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn notification_settings_defaults_match_the_documented_table() {
+        let d = NotificationSettings::default();
+        assert!(d.new_ticket);
+        assert!(d.assigned_to_me);
+        assert!(d.assigned_to_me_updated);
+        assert!(d.unassigned_updated);
+        assert!(
+            !d.assigned_to_others_updated,
+            "off by default — noisy otherwise"
+        );
+    }
+
+    #[test]
+    fn notification_settings_patch_empty_patch_changes_nothing() {
+        let current = NotificationSettings::default();
+        let patch = NotificationSettingsPatch::default();
+        assert!(patch.is_empty());
+        assert_eq!(patch.merged_onto(current), current);
+    }
+
+    #[test]
+    fn notification_settings_patch_merges_only_set_fields() {
+        let current = NotificationSettings::default();
+        let patch = NotificationSettingsPatch {
+            assigned_to_others_updated: Some(true),
+            new_ticket: Some(false),
+            ..Default::default()
+        };
+        assert!(!patch.is_empty());
+        let merged = patch.merged_onto(current);
+        assert!(!merged.new_ticket);
+        assert!(merged.assigned_to_others_updated);
+        // Untouched fields keep the current value.
+        assert_eq!(merged.assigned_to_me, current.assigned_to_me);
+        assert_eq!(
+            merged.assigned_to_me_updated,
+            current.assigned_to_me_updated
+        );
+        assert_eq!(merged.unassigned_updated, current.unassigned_updated);
     }
 
     /// The case that makes `Deleted` its own branch rather than falling out of

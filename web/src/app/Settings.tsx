@@ -5,11 +5,13 @@ import { useRetryableLazyLoadQuery } from "../components/useRetryableLazyLoadQue
 import RelayErrorBoundary from "../components/RelayErrorBoundary";
 import LoadingIndicator from "../components/LoadingIndicator";
 import { PasskeyList } from "./PasskeyList";
+import { NotificationSettingsSection } from "./NotificationSettingsSection";
 
 const settingsQuery = graphql`
   query SettingsQuery @throwOnFieldError {
     me {
       ...PasskeyList_user
+      ...NotificationSettingsSection_user
     }
   }
 `;
@@ -27,16 +29,25 @@ function SettingsContent() {
           <PasskeyList user={data.me} />
         </div>
       </section>
+      <section className="mt-8">
+        <h2 className="text-sm font-semibold tracking-wide text-ink-muted uppercase">
+          Email notifications
+        </h2>
+        <div className="mt-3">
+          <NotificationSettingsSection user={data.me} />
+        </div>
+      </section>
     </div>
   );
 }
 
 /**
- * `/app/settings` — passkey management. Runs its own query (spreading
- * `PasskeyList`'s own colocated fragment) rather than reusing the shell's
- * `CurrentUserProvider` query, so navigating between ticket views never
- * fetches the passkey list, and visiting Settings never refetches
- * memberships.
+ * `/app/settings` — passkey management and per-instance email notification
+ * preferences. Runs its own query (spreading `PasskeyList`'s and
+ * `NotificationSettingsSection`'s own colocated fragments) rather than
+ * reusing the shell's `CurrentUserProvider` query, so navigating between
+ * ticket views never fetches the passkey list or notification settings, and
+ * visiting Settings never refetches the shell's own `memberships` read.
  */
 export default function Settings() {
   return (

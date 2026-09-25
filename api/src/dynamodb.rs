@@ -345,6 +345,7 @@ impl TryInto<db::Membership> for Item {
             .ok_or_else(|| anyhow!("Membership missing role"))?;
         let role = db::MembershipRole::parse(&role_str)
             .ok_or_else(|| anyhow!("Membership has unrecognized role: {role_str}"))?;
+        let defaults = db::NotificationSettings::default();
         Ok(db::Membership {
             id: self.id()?,
             user_id: self
@@ -354,6 +355,29 @@ impl TryInto<db::Membership> for Item {
                 .string_field("instance_id")?
                 .ok_or_else(|| anyhow!("Membership missing instance_id"))?,
             role,
+            // Each attribute is absent unless it was ever explicitly written
+            // (`updateNotificationSettings`) — absent means "use the
+            // default", per `db::NotificationSettings`'s doc comment. Once
+            // written it holds an explicit `true` or `false`; `Bool`
+            // hydration errors (not silently defaults) on the wrong type,
+            // same as every other bool field here.
+            notification_settings: db::NotificationSettings {
+                new_ticket: self
+                    .bool_field("notify_new_ticket")?
+                    .unwrap_or(defaults.new_ticket),
+                assigned_to_me: self
+                    .bool_field("notify_assigned_to_me")?
+                    .unwrap_or(defaults.assigned_to_me),
+                assigned_to_me_updated: self
+                    .bool_field("notify_assigned_to_me_updated")?
+                    .unwrap_or(defaults.assigned_to_me_updated),
+                unassigned_updated: self
+                    .bool_field("notify_unassigned_updated")?
+                    .unwrap_or(defaults.unassigned_updated),
+                assigned_to_others_updated: self
+                    .bool_field("notify_assigned_to_others_updated")?
+                    .unwrap_or(defaults.assigned_to_others_updated),
+            },
         })
     }
 }
@@ -1208,6 +1232,11 @@ impl db::Handler for Handler {
             user_id: user_id.to_string(),
             instance_id: instance_id.to_string(),
             role,
+            // No `notify_*` attributes are written here — per the
+            // omit-optional-attributes house rule, a brand-new membership
+            // (and one re-added after removal) starts at
+            // `NotificationSettings::default()` by simple absence.
+            notification_settings: db::NotificationSettings::default(),
         })
     }
 
@@ -1240,6 +1269,63 @@ impl db::Handler for Handler {
             .map_err(|e| map_update_err(e, format!("Membership {id}")))?;
         record_capacity(
             "update_membership_role",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+        Ok(())
+    }
+
+    async fn update_membership_notification_settings(
+        &self,
+        id: &str,
+        patch: &db::NotificationSettingsPatch,
+    ) -> db::Result<()> {
+        self.ensure_writable()?;
+        if patch.is_empty() {
+            // No fields set — nothing to write. An `UpdateItem` with an
+            // empty `SET` clause is a request error, not a no-op, so this
+            // has to be caught here rather than left to DynamoDB.
+            return Ok(());
+        }
+
+        let fields: [(&str, &str, Option<bool>); 5] = [
+            (":nt", "notify_new_ticket", patch.new_ticket),
+            (":am", "notify_assigned_to_me", patch.assigned_to_me),
+            (
+                ":amu",
+                "notify_assigned_to_me_updated",
+                patch.assigned_to_me_updated,
+            ),
+            (":uu", "notify_unassigned_updated", patch.unassigned_updated),
+            (
+                ":aou",
+                "notify_assigned_to_others_updated",
+                patch.assigned_to_others_updated,
+            ),
+        ];
+
+        let mut sets = Vec::new();
+        let mut req = self
+            .client
+            .update_item()
+            .table_name(self.table_name("membership"))
+            .key("id", AttributeValue::S(id.to_string()))
+            .condition_expression("attribute_exists(id)");
+        for (placeholder, attr, value) in fields {
+            if let Some(v) = value {
+                sets.push(format!("{attr} = {placeholder}"));
+                req = req.expression_attribute_values(placeholder, AttributeValue::Bool(v));
+            }
+        }
+
+        let resp = req
+            .update_expression(format!("SET {}", sets.join(", ")))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| map_update_err(e, format!("Membership {id}")))?;
+        record_capacity(
+            "update_membership_notification_settings",
             resp.consumed_capacity(),
             CapKind::Write,
         );

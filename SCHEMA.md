@@ -164,6 +164,14 @@ of members, so rendering either list directly from the GSI beats an N-way `Batch
 **Non-obvious attributes:**
 
 - `role` (S) — `owner` \| `agent`
+- `notify_new_ticket`, `notify_assigned_to_me`, `notify_assigned_to_me_updated`,
+  `notify_unassigned_updated`, `notify_assigned_to_others_updated` (all Bool, all optional) — this
+  member's `api/src/staff_notify.rs` email-notification preferences. Per the omit-optional-attributes
+  house rule, an absent attribute means "use the default" (see `db::NotificationSettings`'s doc
+  comment for what each defaults to), never `Bool(false)`; `updateNotificationSettings` `SET`s an
+  attribute explicitly on either `true` or `false` and never `REMOVE`s one back to its default.
+  Removing and re-adding a membership drops the row — and every attribute on it — so a re-added
+  member starts back at the defaults.
 
 ---
 

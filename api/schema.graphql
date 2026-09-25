@@ -84,6 +84,19 @@ type MemberInfo {
 type MembershipInfo {
 	instance: Instance!
 	role: MembershipRoleType!
+	"""
+	This member's own staff-notification preferences for this instance.
+	**Self only** — the same defence-in-depth reasoning as
+	`User::passkeys`: `adminUser` lets a superuser reach another user's
+	`memberships`, and notification preferences are exactly the kind of
+	per-person setting that shouldn't leak to a lookup, even though
+	(unlike passkeys) there's no credential material involved.
+	`FORBIDDEN`, not the defaults, for anyone but the member themselves —
+	an innocuous-looking default response would be the wrong failure
+	mode here too, for the same reason `User::passkeys` doesn't return an
+	empty list.
+	"""
+	notificationSettings: NotificationSettings!
 }
 
 """
@@ -366,7 +379,9 @@ type MutationRoot {
 	
 	A close or a reopen (including restoring a deleted ticket) mails
 	requesters/CCs a brief notice — see `outbound::status_notice_body`.
-	Deleting one does not: see that function's doc comment.
+	Deleting one does not: see that function's doc comment. The same
+	"not into `DELETED`" carve-out applies to the best-effort staff
+	notice below.
 	"""
 	setTicketStatus(ticketId: ID!, status: TicketStatusType!): Ticket!
 	"""
@@ -374,26 +389,33 @@ type MutationRoot {
 	when assigning, must themselves be a member of this ticket's
 	instance — assigning to an outsider would be silently useless (they
 	could never see it via the "assigned to me" filter, which is itself
-	instance-scoped). **Sends no mail**: which agent owns a ticket is
-	internal bookkeeping the requester has no reason to be notified
-	about — see the "Outbound mail" entry in `CLAUDE.md`.
+	instance-scoped). **Sends no customer mail**: which agent owns a
+	ticket is internal bookkeeping the requester has no reason to be
+	notified about — see the "Outbound mail" entry in `CLAUDE.md`. It
+	*does* send a best-effort staff notice, but only to the new and
+	previous assignee (never the rest of the team) — see
+	`staff_notify`'s module doc — and only when the assignee actually
+	changes (a self-assign, or reassigning to the current assignee,
+	notifies nobody).
 	"""
 	assignTicket(ticketId: ID!, userId: ID): Ticket!
 	"""
-	Add a requester (a "To" recipient) to a ticket. **Sends no mail** —
-	see `assign_ticket`'s doc comment and `CLAUDE.md`'s "Outbound mail"
-	entry; this mutation, like assignment, is internal bookkeeping.
+	Add a requester (a "To" recipient) to a ticket. **Sends no mail at
+	all** — customer or staff — see `CLAUDE.md`'s "Outbound mail" and
+	"Staff notifications" entries; unlike `assignTicket` (which does send
+	a staff notice), who's on a ticket's requester/CC list is internal
+	bookkeeping nobody is notified about.
 	"""
 	addTicketRequester(ticketId: ID!, email: String!): Ticket!
 	"""
 	Remove a requester from a ticket. Refuses to remove the last one — a
-	ticket must always have someone to reply to. **Sends no mail** — see
-	`assign_ticket`'s doc comment.
+	ticket must always have someone to reply to. **Sends no mail at
+	all** — see [`Self::add_ticket_requester`]'s doc comment.
 	"""
 	removeTicketRequester(ticketId: ID!, email: String!): Ticket!
 	"""
-	Add a CC recipient to a ticket. **Sends no mail** — see
-	`assign_ticket`'s doc comment.
+	Add a CC recipient to a ticket. **Sends no mail at all** — see
+	[`Self::add_ticket_requester`]'s doc comment.
 	"""
 	addTicketCc(ticketId: ID!, email: String!): Ticket!
 	"""
@@ -401,6 +423,21 @@ type MutationRoot {
 	zero — there is no "must keep at least one" rule for them.
 	"""
 	removeTicketCc(ticketId: ID!, email: String!): Ticket!
+	"""
+	Update the caller's own staff-notification preferences for
+	`instanceId` (`db::NotificationSettingsPatch`, `SET`-only — see
+	`CLAUDE.md`'s omit-optional-attributes house rule). Member-only,
+	resolved via `list_memberships_by_user(caller)` filtered to
+	`instanceId` — never an `instanceId` argument trusted on its own,
+	the same "never trust an id argument" posture as
+	`require_ticket_member` — so this can only ever touch the caller's
+	*own* membership row, which is also what makes
+	`MembershipInfo::notification_settings`'s self-only guard
+	meaningful: there is no mutation that can set anyone else's.
+	Returns the membership merged onto its current settings, without a
+	second read of the row this just wrote.
+	"""
+	updateNotificationSettings(instanceId: ID!, settings: NotificationSettingsInput!): MembershipInfo!
 	"""
 	Revoke the calling token, if there is one to revoke (a `Requester`
 	capability token, or an impersonated dev-auth session, has none — this is
@@ -441,6 +478,32 @@ type MutationRoot {
 	"not found" as [`Self::rename_passkey`].
 	"""
 	deletePasskey(id: String!): Boolean!
+}
+
+"""
+A member's five staff-notification preferences, exposed over GraphQL as
+`NotificationSettings` — see `db::NotificationSettings`'s doc comment for
+what each field means and what it defaults to when never explicitly set.
+"""
+type NotificationSettings {
+	newTicket: Boolean!
+	assignedToMe: Boolean!
+	assignedToMeUpdated: Boolean!
+	unassignedUpdated: Boolean!
+	assignedToOthersUpdated: Boolean!
+}
+
+"""
+`updateNotificationSettings`'s argument — a patch over
+[`db::NotificationSettingsPatch`]: every field optional, `null`/omitted
+meaning "leave this one alone". See that type's doc comment.
+"""
+input NotificationSettingsInput {
+	newTicket: Boolean
+	assignedToMe: Boolean
+	assignedToMeUpdated: Boolean
+	unassignedUpdated: Boolean
+	assignedToOthersUpdated: Boolean
 }
 
 """
