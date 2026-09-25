@@ -1,8 +1,12 @@
-//! `MutationRoot`: email-code login, opaque token issuance/revocation, and
-//! passkeys. Ported from seslogin's `graphql/mutations.rs` (the auth block
-//! around its lines 360-570, and the passkey block around 2146-2560), trimmed to
-//! microticket's single `User` principal — no kiosk sessions, no API tokens.
+//! `MutationRoot`: email-code login, opaque token issuance/revocation,
+//! passkeys, and instance-scoped API token management. Ported from
+//! seslogin's `graphql/mutations.rs` (the auth block around its lines
+//! 360-570, and the passkey block around 2146-2560), trimmed to microticket's
+//! principals — no kiosk sessions. `createApiToken`/`updateApiToken`/
+//! `deleteApiToken` below are a later addition (see `auth::AuthInfo::ApiToken`'s
+//! doc comment) with no seslogin equivalent to port from.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow};
@@ -21,11 +25,12 @@ use crate::outbound;
 use crate::staff_notify::{self, Actor, StaffEvent};
 use crate::storage::Handler as _;
 
-use super::auth::{AuthGuard, AuthRequirement, is_member};
+use super::auth::{AuthGuard, AuthRequirement, is_member, is_owner};
 use super::error::ApiError;
 use super::query::{
-    InboundAddressInfo, Instance, MembershipInfo, MembershipRoleType, NotificationSettingsInput,
-    PasskeyInfo, Ticket, TicketMessage, TicketStatusType, User,
+    ApiTokenInfo, CreatedApiToken, InboundAddressInfo, Instance, MembershipInfo,
+    MembershipRoleType, NotificationSettingsInput, PasskeyInfo, Ticket, TicketMessage,
+    TicketStatusType, User,
 };
 
 /// One code per address per this many seconds — cheap anti-spam for
@@ -40,6 +45,16 @@ const LOGIN_CODE_DIGITS: u32 = 6;
 /// the WebAuthn ceremony completes (see `finish_passkey_registration`) to close
 /// the race between the pre-check and the write.
 const MAX_PASSKEYS_PER_USER: usize = 10;
+/// `submitVerifiedTicket`'s combined `to`+`cc` cap, after normalization and
+/// dedup. An integration token is long-lived and unattended — there's no
+/// human in the loop to notice a misbehaving caller — so this is what stops
+/// a leaked (or simply buggy) token from turning this mutation into a bulk
+/// mail relay via one ticket's requester/CC lists.
+const MAX_VERIFIED_TICKET_RECIPIENTS: usize = 20;
+/// `createApiToken`/`updateApiToken`'s `name` length cap — generous for a
+/// human-chosen label ("Zendesk sync", "Partner portal"), not meant to be a
+/// meaningful constraint in practice.
+const MAX_API_TOKEN_NAME_LEN: usize = 100;
 
 fn sha256_hex(input: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -91,6 +106,46 @@ async fn require_ticket_member<A: App + HasDb + HasMail + Send + Sync>(
         return Err(ApiError::not_found("Ticket", ticket_id).into());
     }
     Ok(ticket)
+}
+
+/// The per-record authorization check `updateApiToken`/`deleteApiToken` use —
+/// they take only a token `id` (never an `instanceId`), so, like
+/// [`require_ticket_member`], authorization has to happen inside the
+/// resolver body after fetching the row, not in a static `#[graphql(guard)]`.
+/// Both mutations are declared with **no** static guard at all (`Authenticated`
+/// would admit a `Requester`, which must never manage tokens), so this is the
+/// entire authorization story for both, checked in this order:
+///
+/// 1. The caller isn't an `AuthInfo::User` at all → `FORBIDDEN`, checked
+///    *before* the fetch so a non-user caller learns nothing about whether
+///    `id` exists.
+/// 2. The row doesn't exist → `NOT_FOUND`.
+/// 3. The caller is neither a superuser nor an owner of the row's
+///    `instance_id` → `NOT_FOUND` — the same "missing and unauthorized look
+///    identical" posture as [`require_ticket_member`], so this can't be used
+///    to probe which token ids exist in another instance.
+async fn require_api_token_manager<A: App + HasDb + Send + Sync>(
+    ctx: &Context<'_>,
+    app: &A,
+    id: &str,
+) -> Result<db::ApiToken> {
+    let Some(AuthInfo::User {
+        memberships,
+        is_superuser,
+        ..
+    }) = ctx.data_opt::<AuthInfo>()
+    else {
+        return Err(ApiError::forbidden("Must be authenticated as a user").into());
+    };
+    let token = app
+        .db()
+        .get_api_token(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("ApiToken", id))?;
+    if !*is_superuser && !is_owner(memberships, &token.instance_id) {
+        return Err(ApiError::not_found("ApiToken", id).into());
+    }
+    Ok(token)
 }
 
 /// Move every validated `pending/…` key in `keys` into
@@ -275,6 +330,103 @@ fn normalize_ticket_email(raw: &str) -> Result<String> {
     Ok(lower)
 }
 
+/// Normalize, dedupe, and cap `submitVerifiedTicket`'s `to`/`cc` lists — pure
+/// (no DB, no instance), so it's testable on its own. Each address goes
+/// through [`normalize_ticket_email`]; `to` keeps first-seen order with
+/// duplicates dropped; `cc` does the same, *and* drops anything already
+/// present in `to` (a requester doesn't also need to be a CC on their own
+/// ticket). `to` must be non-empty after that — a ticket needs at least one
+/// requester — and the combined, post-dedup length must not exceed
+/// [`MAX_VERIFIED_TICKET_RECIPIENTS`].
+///
+/// **Does not check an instance's own inbound addresses** — that requires
+/// the instance's `inbound_address` rows, which this function has no access
+/// to; the caller (`submit_verified_ticket`) runs that check separately
+/// after loading the instance, via `outbound::is_own_address`.
+fn normalize_verified_recipients(
+    to: &[String],
+    cc: &[String],
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut to_norm = Vec::with_capacity(to.len());
+    let mut seen: HashSet<String> = HashSet::new();
+    for raw in to {
+        let email = normalize_ticket_email(raw)?;
+        if seen.insert(email.clone()) {
+            to_norm.push(email);
+        }
+    }
+    if to_norm.is_empty() {
+        return Err(anyhow!("to must contain at least one address"));
+    }
+
+    let mut cc_norm = Vec::with_capacity(cc.len());
+    for raw in cc {
+        let email = normalize_ticket_email(raw)?;
+        // `seen` already holds every `to` address, so this one check both
+        // dedupes cc against itself and drops any cc that's also a to.
+        if seen.insert(email.clone()) {
+            cc_norm.push(email);
+        }
+    }
+
+    if to_norm.len() + cc_norm.len() > MAX_VERIFIED_TICKET_RECIPIENTS {
+        return Err(anyhow!(
+            "too many recipients: {} exceeds the limit of {MAX_VERIFIED_TICKET_RECIPIENTS}",
+            to_norm.len() + cc_norm.len()
+        ));
+    }
+
+    Ok((to_norm, cc_norm))
+}
+
+/// The shared write path behind `submitTicket` and `submitVerifiedTicket`:
+/// allocate the next per-instance ticket number, create the ticket, and
+/// store the submitter's own message as the first `ticket_message` (`kind:
+/// INBOUND`, `from_email` set, no `author_user_id` — no staff member wrote
+/// it). `requester_emails[0]` is treated as the message's `from_email`
+/// regardless of how many requesters there are — see
+/// `submit_verified_ticket`'s doc comment for why that's the right choice
+/// there too, not just for `submitTicket`'s always-exactly-one-requester
+/// case this was originally written for.
+///
+/// Deliberately stops here: sending the acknowledgement and the staff
+/// notice, and logging, differ enough between the two callers (a token id
+/// to log for one, not the other; matching `context` strings for
+/// `send_system_notification`/`notify_staff`) that folding them in here
+/// would just move the divergence inside this function instead of removing
+/// it.
+async fn open_submitted_ticket<A: App + HasDb + Send + Sync>(
+    app: &A,
+    instance: &db::Instance,
+    subject: &str,
+    body: &str,
+    requester_emails: &[String],
+    cc_emails: &[String],
+) -> Result<db::Ticket> {
+    let number = app.db().increment_ticket_counter(&instance.id).await?;
+    let ticket = app
+        .db()
+        .create_ticket(&instance.id, number, subject, requester_emails, cc_emails)
+        .await?;
+
+    app.db()
+        .create_ticket_message(
+            &ticket.id,
+            db::TicketMessageKind::Inbound,
+            None,
+            Some(&requester_emails[0]),
+            &[],
+            &[],
+            Some(body),
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+    Ok(ticket)
+}
+
 pub struct MutationRoot<A: App + HasDb + HasMail + HasStorage + Send + Sync> {
     pub(super) app: Arc<A>,
 }
@@ -293,6 +445,20 @@ struct PasskeyChallenge {
 struct AttachmentUpload {
     key: String,
     upload_url: String,
+}
+
+/// `submitVerifiedTicket`'s result — deliberately narrow, not `Ticket<A>`:
+/// an integration token has no business reading back ticket internals
+/// (assignee, messages, internal notes) through nested fields just because
+/// it opened the ticket. `subject_tag` is the `[#{slug}-{number}]` tag
+/// `outbound::tag_subject` stamps on every outbound message for this
+/// ticket, handed back so the caller can recognize its own ticket in a
+/// downstream inbox without a second query.
+#[derive(SimpleObject)]
+struct SubmittedTicket {
+    id: ID,
+    number: i64,
+    subject_tag: String,
 }
 
 #[Object]
@@ -1205,6 +1371,103 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         Ok(Instance::new(instance))
     }
 
+    // ── API token management ─────────────────────────────────────────────────
+
+    /// Mint a fresh `mta_` integration token for `instanceId`, scoped to
+    /// exactly `submitVerifiedTicket` (see `auth::AuthInfo::ApiToken`'s doc
+    /// comment). Owner-or-superuser, the same posture as `addInboundAddress` —
+    /// this is instance settings, and the superuser boundary in `CLAUDE.md`
+    /// explicitly allows a superuser to manage those without granting any
+    /// ticket access.
+    ///
+    /// **`token` is the only time the full secret ever exists outside the
+    /// caller's own storage** — only its sha256 hash is persisted (see
+    /// `auth::issue_api_token`), mirroring `issue_user_token`'s "the caller
+    /// keeps nothing else" contract. There is no way to recover a lost
+    /// secret; the only remedy is deleting the row and minting a new one.
+    #[graphql(
+        guard = "AuthGuard::new(AuthRequirement::InstanceOwnerOrSuperuser(instance_id.to_string()))"
+    )]
+    async fn create_api_token(
+        &self,
+        ctx: &Context<'_>,
+        instance_id: ID,
+        name: String,
+    ) -> Result<CreatedApiToken<A>> {
+        let user_id = require_user_id(ctx)?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("name cannot be empty"));
+        }
+        if name.chars().count() > MAX_API_TOKEN_NAME_LEN {
+            return Err(anyhow!(
+                "name cannot be longer than {MAX_API_TOKEN_NAME_LEN} characters"
+            ));
+        }
+
+        self.app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .filter(|i| !i.deleted)
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+
+        let (token, secret) =
+            auth::issue_api_token(&*self.app, instance_id.as_str(), name, &user_id).await?;
+        Ok(CreatedApiToken::new(secret, ApiTokenInfo::new(token)))
+    }
+
+    /// Rename and/or enable/disable an existing token. Takes only `id` — the
+    /// instance it belongs to is a fact of the record, not a caller-supplied
+    /// argument — so this mutation carries **no static guard**;
+    /// `require_api_token_manager` is the entire authorization story (see
+    /// its doc comment). Disabling takes effect on the token's very next
+    /// request: `verify_token`'s `mta_` branch checks `enabled` on every
+    /// call, and nothing caches the result.
+    async fn update_api_token(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        name: String,
+        enabled: bool,
+    ) -> Result<ApiTokenInfo<A>> {
+        let existing = require_api_token_manager(ctx, &*self.app, id.as_str()).await?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("name cannot be empty"));
+        }
+        if name.chars().count() > MAX_API_TOKEN_NAME_LEN {
+            return Err(anyhow!(
+                "name cannot be longer than {MAX_API_TOKEN_NAME_LEN} characters"
+            ));
+        }
+        self.app
+            .db()
+            .update_api_token(
+                &existing.id,
+                db::ApiTokenUpdateShape::Fields { name, enabled },
+            )
+            .await?;
+        Ok(ApiTokenInfo::new(db::ApiToken {
+            name: name.to_string(),
+            enabled,
+            ..existing
+        }))
+    }
+
+    /// Hard delete — see `db::Handler::delete_api_token`'s doc comment for
+    /// why there's no soft-delete marker to set instead. Same no-static-guard,
+    /// `require_api_token_manager`-only authorization as
+    /// [`Self::update_api_token`].
+    async fn delete_api_token(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let existing = require_api_token_manager(ctx, &*self.app, id.as_str()).await?;
+        self.app.db().delete_api_token(&existing.id).await?;
+        Ok(true)
+    }
+
     // ── Ticket mutations ─────────────────────────────────────────────────────
 
     /// Open a new ticket from the public submit form. **Requester-token
@@ -1252,34 +1515,15 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             .filter(|i| !i.deleted)
             .ok_or_else(|| ApiError::not_found("Instance", instance_id))?;
 
-        let number = self.app.db().increment_ticket_counter(&instance.id).await?;
-        let ticket = self
-            .app
-            .db()
-            .create_ticket(
-                &instance.id,
-                number,
-                subject,
-                std::slice::from_ref(email),
-                &[],
-            )
-            .await?;
-
-        self.app
-            .db()
-            .create_ticket_message(
-                &ticket.id,
-                db::TicketMessageKind::Inbound,
-                None,
-                Some(email),
-                &[],
-                &[],
-                Some(body),
-                None,
-                None,
-                None,
-            )
-            .await?;
+        let ticket = open_submitted_ticket(
+            &*self.app,
+            &instance,
+            subject,
+            body,
+            std::slice::from_ref(email),
+            &[],
+        )
+        .await?;
 
         send_system_notification(
             &*self.app,
@@ -1311,6 +1555,129 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             instance.id, ticket.id, ticket.number
         );
         Ok(Ticket::new(ticket))
+    }
+
+    /// Open a new ticket with a **caller-supplied, trusted** list of
+    /// requester (`to`) and CC (`cc`) addresses — the integration-token
+    /// counterpart to `submitTicket`. `AuthRequirement::ApiToken` means the
+    /// instance comes from the token, never an argument (same reasoning as
+    /// `submitTicket`'s `Requester` token), but unlike `submitTicket` the
+    /// *addresses* are also taken on the caller's word rather than proven by
+    /// an email-verification code — that is the entire point of this
+    /// mutation, and why an `mta_` token is instance-owner-or-superuser
+    /// minted rather than self-service: whoever holds one can open a ticket
+    /// claiming to be any address they name. An external service that has
+    /// already verified its own users' addresses (a customer portal behind
+    /// its own login, say) is the intended caller.
+    ///
+    /// `to[0]` is treated as the submitter for the first message's
+    /// `fromEmail` — with a caller-supplied list rather than
+    /// `submitTicket`'s always-exactly-one-address token, some convention is
+    /// needed, and "the primary requester is whichever address the caller
+    /// listed first" is the least surprising one available. `to`/`cc` are
+    /// normalized ([`normalize_ticket_email`]), deduped, and capped at
+    /// [`MAX_VERIFIED_TICKET_RECIPIENTS`] by
+    /// [`normalize_verified_recipients`] before anything is written; an
+    /// address matching one of this instance's own inbound addresses is
+    /// rejected outright (`outbound::is_own_address`) rather than silently
+    /// dropped — silently dropping it (the way `build_outbound` treats
+    /// `To`/`Cc`) could leave a ticket whose requester is itself, or whose
+    /// acknowledgement has nowhere left to go.
+    ///
+    /// Sends the same best-effort acknowledgement `submitTicket` does (see
+    /// `send_system_notification`'s doc comment for the best-effort
+    /// reasoning) to every `to`/`cc` address, and the same best-effort
+    /// `NewTicket` staff notice, attributed to `to[0]` — there is no user or
+    /// requester identity to attribute it to otherwise.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::ApiToken)")]
+    async fn submit_verified_ticket(
+        &self,
+        ctx: &Context<'_>,
+        subject: String,
+        body: String,
+        to: Vec<String>,
+        #[graphql(default_with = "Vec::new()")] cc: Vec<String>,
+    ) -> Result<SubmittedTicket> {
+        let Some(AuthInfo::ApiToken {
+            token_id,
+            instance_id,
+        }) = ctx.data_opt::<AuthInfo>()
+        else {
+            return Err(ApiError::forbidden("Must present a valid API token").into());
+        };
+        let subject = subject.trim();
+        if subject.is_empty() {
+            return Err(anyhow!("subject cannot be empty"));
+        }
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(anyhow!("body cannot be empty"));
+        }
+        let (to, cc) = normalize_verified_recipients(&to, &cc)?;
+
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .filter(|i| !i.deleted)
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+
+        let addresses = self
+            .app
+            .db()
+            .list_inbound_addresses_by_instance(&instance.id)
+            .await?;
+        if let Some(own) = to
+            .iter()
+            .chain(cc.iter())
+            .find(|addr| outbound::is_own_address(&addresses, addr))
+        {
+            return Err(anyhow!(
+                "{own:?} is one of this instance's own inbound addresses and cannot be a requester or CC"
+            ));
+        }
+
+        let ticket = open_submitted_ticket(&*self.app, &instance, subject, body, &to, &cc).await?;
+
+        send_system_notification(
+            &*self.app,
+            &ticket,
+            &to,
+            &cc,
+            outbound::ACKNOWLEDGEMENT_BODY,
+            "submit_verified_ticket",
+        )
+        .await;
+
+        // Best-effort staff notice — see `staff_notify`'s module doc, and
+        // this mutation's own doc comment for why `to[0]` is the attributed
+        // requester. A new ticket is always unassigned, so there is no
+        // assignee category to pass through.
+        staff_notify::notify_staff(
+            &*self.app,
+            &ticket,
+            None,
+            StaffEvent::NewTicket {
+                requester_email: &to[0],
+            },
+            Actor::Email(&to[0]),
+            Some(body),
+        )
+        .await;
+
+        info!(
+            "Verified ticket submitted: instance={} ticket={} number={} token={}",
+            instance.id, ticket.id, ticket.number, token_id
+        );
+        Ok(SubmittedTicket {
+            id: ID(ticket.id.clone()),
+            number: ticket.number as i64,
+            subject_tag: db::ticket_subject_tag(&instance.slug, ticket.number),
+        })
     }
 
     /// Mint a presigned S3 PUT into `pending/{instance_id}/{nanoid}/{filename}`

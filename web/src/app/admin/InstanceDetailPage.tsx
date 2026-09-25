@@ -10,6 +10,7 @@ import { InstanceEditForm } from "./InstanceEditForm";
 import { InstanceDeleteControl } from "./InstanceDeleteControl";
 import { MembersSection } from "./MembersSection";
 import { InboundAddressesSection } from "./InboundAddressesSection";
+import { ApiTokensSection } from "./ApiTokensSection";
 
 const instanceDetailPageQuery = graphql`
   query InstanceDetailPageQuery($id: ID!) @throwOnFieldError {
@@ -19,6 +20,7 @@ const instanceDetailPageQuery = graphql`
       ...InstanceDeleteControl_instance
       ...MembersSection_instance
       ...InboundAddressesSection_instance
+      ...ApiTokensSection_instance
     }
     ...MembersSection_query
   }
@@ -57,6 +59,7 @@ function Content({ id }: { id: string }) {
       <InstanceEditForm instance={data.adminInstance} />
       <MembersSection instance={data.adminInstance} query={data} />
       <InboundAddressesSection instance={data.adminInstance} />
+      <ApiTokensSection instance={data.adminInstance} />
       <InstanceDeleteControl instance={data.adminInstance} />
     </div>
   );

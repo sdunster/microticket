@@ -290,6 +290,23 @@ impl<A: App + HasDb + Send + Sync + 'static> Instance<A> {
             })
             .collect())
     }
+
+    /// Every `api_token` row for this instance, oldest first — the token
+    /// management page's data source. Owner-or-superuser, same posture (and
+    /// same doc-comment reasoning) as [`Self::inbound_addresses`]/
+    /// [`Self::members`]: an integration credential is instance *settings*,
+    /// not something a plain agent needs to see or a superuser is barred
+    /// from managing on an owner's behalf. The secret itself never appears
+    /// here — see `createApiToken`'s doc comment for the only time it does.
+    #[graphql(
+        guard = "AuthGuard::new(AuthRequirement::InstanceOwnerOrSuperuser(self.rec.id.clone()))"
+    )]
+    async fn api_tokens(&self, ctx: &Context<'_>) -> Result<Vec<ApiTokenInfo<A>>> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let mut tokens = app.db().list_api_tokens_by_instance(&self.rec.id).await?;
+        tokens.sort_by_key(|t| t.created_at);
+        Ok(tokens.into_iter().map(ApiTokenInfo::new).collect())
+    }
 }
 
 /// One member of an instance: the user, and their role in this instance
@@ -317,6 +334,92 @@ impl<A: App + HasDb + Send + Sync + 'static> MemberInfo<A> {
     }
     async fn role(&self) -> MembershipRoleType {
         self.role
+    }
+}
+
+/// An `api_token` row, exposed over GraphQL. Reachable only through
+/// `Instance.apiTokens` (owner-or-superuser — see that field's doc comment)
+/// and as the payload of `createApiToken`/`updateApiToken`. **Never carries
+/// the secret or its hash** — `createApiToken`'s `CreatedApiToken.token` is
+/// the one and only place the full secret is ever returned.
+#[derive(Debug, PartialEq)]
+pub struct ApiTokenInfo<A: App + HasDb + Send + Sync> {
+    _marker: PhantomData<A>,
+    rec: db::ApiToken,
+}
+
+impl<A: App + HasDb + Send + Sync> ApiTokenInfo<A> {
+    pub fn new(rec: db::ApiToken) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec,
+        }
+    }
+}
+
+impl<A: App + HasDb + Send + Sync> Clone for ApiTokenInfo<A> {
+    fn clone(&self) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec: self.rec.clone(),
+        }
+    }
+}
+
+#[Object]
+impl<A: App + HasDb + Send + Sync + 'static> ApiTokenInfo<A> {
+    async fn id(&self) -> ID {
+        ID(self.rec.id.clone())
+    }
+    async fn name(&self) -> &str {
+        &self.rec.name
+    }
+    async fn enabled(&self) -> bool {
+        self.rec.enabled
+    }
+    async fn created_at(&self) -> i64 {
+        self.rec.created_at as i64
+    }
+    async fn last_used_at(&self) -> Option<i64> {
+        self.rec.last_used_at.map(|t| t as i64)
+    }
+    /// Dataloaded — see [`TicketMessage::author`]'s doc comment.
+    async fn created_by(&self, ctx: &Context<'_>) -> Result<Option<User<A>>> {
+        let loader = ctx.data_unchecked::<DataLoader<DatabaseLoader<A>>>();
+        let rec = loader
+            .load_one(UserId(ID(self.rec.created_by_user_id.clone())))
+            .await
+            .map_err(|e| anyhow!("Failed to load createdBy via DataLoader: {}", e))?;
+        Ok(rec.map(User::new))
+    }
+}
+
+/// `createApiToken`'s result: the freshly minted [`ApiTokenInfo`] alongside
+/// `token`, the full secret — see that mutation's doc comment for why this
+/// is the one and only place it appears. Generic over `A` for the same
+/// reason as [`Instance`]/[`ApiTokenInfo`] themselves (composes with
+/// `build_schema`'s per-binary `A`); not a `#[derive(SimpleObject)]` like
+/// [`super::mutations::AttachmentUpload`] because `ApiTokenInfo<A>` is itself
+/// a `#[Object]` type carrying `A`'s bounds, not a plain value type.
+#[derive(Debug, PartialEq)]
+pub struct CreatedApiToken<A: App + HasDb + Send + Sync> {
+    token: String,
+    api_token: ApiTokenInfo<A>,
+}
+
+impl<A: App + HasDb + Send + Sync> CreatedApiToken<A> {
+    pub fn new(token: String, api_token: ApiTokenInfo<A>) -> Self {
+        Self { token, api_token }
+    }
+}
+
+#[Object]
+impl<A: App + HasDb + Send + Sync + 'static> CreatedApiToken<A> {
+    async fn token(&self) -> &str {
+        &self.token
+    }
+    async fn api_token(&self) -> &ApiTokenInfo<A> {
+        &self.api_token
     }
 }
 
@@ -852,6 +955,11 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> Ticket<A> {
                 }
                 false
             }
+            // An integration token authorises `submitVerifiedTicket` alone —
+            // it has no business reading a thread back, notes or otherwise.
+            Some(AuthInfo::ApiToken { .. }) => {
+                return Err(ApiError::forbidden("Must be authenticated").into());
+            }
             None => return Err(ApiError::forbidden("Must be authenticated").into()),
         };
         let app = ctx.data_unchecked::<Arc<A>>();
@@ -1113,6 +1221,9 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
             Some(AuthInfo::Requester { email, instance_id }) => {
                 instance_id == &rec.instance_id && rec.requester_emails.iter().any(|e| e == email)
             }
+            // Never visible to an integration token — see `messages`'s
+            // matching arm above.
+            Some(AuthInfo::ApiToken { .. }) => false,
             None => false,
         };
         if !visible {

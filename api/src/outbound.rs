@@ -144,7 +144,13 @@ pub fn reply_to_address(from_address: &str, ticket_id: &str, reply_token: &str) 
 /// an exact match, or the same domain as one of its wildcards. Used to
 /// exclude our own addresses from `To`/`Cc` so a ticket can never mail
 /// itself into a loop, however it ended up on the requester/CC list.
-fn is_own_address(addresses: &[db::InboundAddress], candidate: &str) -> bool {
+///
+/// `pub(crate)`, not private: `graphql::mutations::submit_verified_ticket`
+/// reuses this to reject a caller-supplied `to`/`cc` address that is itself
+/// one of the instance's own inbound addresses — see that mutation's doc
+/// comment for why silently filtering it (the way [`build_outbound`] does
+/// for `To`/`Cc`) would be the wrong behaviour there.
+pub(crate) fn is_own_address(addresses: &[db::InboundAddress], candidate: &str) -> bool {
     let n = routing::normalize_recipient(candidate);
     addresses.iter().any(|a| match a.kind {
         db::AddressKind::Exact => a.address == n.address,
