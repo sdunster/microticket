@@ -204,6 +204,42 @@ impl db::Handler for Handler {
         Self::unsupported()
     }
 
+    // ── api_token ─────────────────────────────────────────────────────────
+
+    async fn create_api_token(
+        &self,
+        _id: &str,
+        _instance_id: &str,
+        _name: &str,
+        _token_hash: &str,
+        _created_by_user_id: &str,
+    ) -> db::Result<db::ApiToken> {
+        Self::unsupported()
+    }
+
+    async fn get_api_token(&self, _id: &str) -> db::Result<Option<db::ApiToken>> {
+        Self::unsupported()
+    }
+
+    async fn list_api_tokens_by_instance(
+        &self,
+        _instance_id: &str,
+    ) -> db::Result<Vec<db::ApiToken>> {
+        Self::unsupported()
+    }
+
+    async fn update_api_token(
+        &self,
+        _id: &str,
+        _change: db::ApiTokenUpdateShape<'_>,
+    ) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    async fn delete_api_token(&self, _id: &str) -> db::Result<()> {
+        Self::unsupported()
+    }
+
     // ── ticket ────────────────────────────────────────────────────────────
 
     async fn get_tickets<T: AsRef<str> + Sync>(

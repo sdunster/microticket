@@ -341,6 +341,50 @@ the index small matters more here than on most tables.
 
 ---
 
+### `{prefix}_api_token`
+
+Instance-scoped integration credentials, format `mta_{id}.{secret}`, authorising exactly
+`submitVerifiedTicket` for `instance_id` — see `auth::AuthInfo::ApiToken`'s doc comment and
+CLAUDE.md's "API tokens" house rule.
+
+| Attribute     | Type | Role                  |
+| ------------- | ---- | --------------------- |
+| `id`          | S    | Hash key (PK) — nanoid |
+| `instance_id` | S    | GSI hash key           |
+
+**GSIs:**
+
+| GSI                 | Hash key      | Sort key | Projection | Purpose                              |
+| ------------------- | ------------- | -------- | ---------- | ------------------------------------- |
+| `instance_id-index` | `instance_id` | —        | ALL        | The token management page's list      |
+
+**Deliberately no `token_hash` GSI, unlike `user_token` above.** The token string carries its own
+row id (`mta_{id}.{secret}`, not just an opaque secret), so verification (`auth::verify_token`'s
+`mta_` branch) is a `GetItem` on `id` — no GSI, no eventual-consistency window — followed by a
+constant-time comparison of the full presented token against the stored `token_hash`. This is the
+same trade the `+t{ticket_id}.{reply_token}` reply tag makes, and for the same reason: a token
+minted by `createApiToken` must authenticate on its very first use, which a GSI lookup cannot
+promise.
+
+**Non-obvious attributes:**
+
+- `name` (S) — an admin-chosen label ("Zendesk sync"), shown on the management page
+- `token_hash` (S) — sha256 of the *full* token string (`mta_{id}.{secret}`), never the secret
+  alone and never the secret itself, which exists in full only at issuance
+- `enabled` (BOOL) — always written (unlike most bool flags in this schema, this is not an
+  omit-optional-attributes presence marker); `updateApiToken` flips it, and `verify_token` checks
+  it on every request, so disabling takes effect immediately, with nothing cached
+- `created_at` (N)
+- `created_by_user_id` (S) — the instance owner or superuser who minted it
+- `last_used_at` (N) — absent until first use, same throttled-touch convention as
+  `user_token.last_used_at`
+
+**No expiry.** Unlike `user_token`/the requester submit token, this is a long-lived integration
+credential — an external service configures it once and keeps using it. Revocation is
+`updateApiToken(enabled: false)` or `deleteApiToken`, never a clock running out.
+
+---
+
 ### `{prefix}_webauthn_credential`
 
 | Attribute | Type | Role                  |

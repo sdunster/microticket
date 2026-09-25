@@ -40,6 +40,8 @@ local setup, and `SCHEMA.md` for the data model.
   - `replyToTicket` sends the reply itself (`kind: REPLY`) — the agent's own words, always.
   - `submitTicket` sends the requester a brief acknowledgement (`kind: SYSTEM`), so the public
     form's result lands in their inbox with the `Reply-To` thread already wired up.
+    `submitVerifiedTicket` sends the same acknowledgement to every `to`/`cc` address — see the "API
+    tokens" entry below.
   - `setTicketStatus` sends requesters/CCs a brief notice (`kind: SYSTEM`) **only on a close or a
     reopen** (including restoring a deleted ticket back to open) — see `outbound::status_notice_body`.
     Transitioning *into* `DELETED`, in either direction, sends nothing: deleting a ticket is admin
@@ -143,6 +145,30 @@ local setup, and `SCHEMA.md` for the data model.
   membership row. No GraphQL mutation can set `superuser`; the only way to grant or revoke it is
   `bin/cli.rs`'s `user set-superuser`. Don't widen this — a future "superuser can see all tickets"
   feature needs its own explicit guard, not a loosening of `Superuser`/`InstanceOwnerOrSuperuser`.
+
+- **API tokens (`mta_`) authorise `submitVerifiedTicket` and nothing else.** `AuthInfo::ApiToken`
+  is a third principal, instance-scoped, minted only by that instance's owner or a superuser
+  (`createApiToken`, guarded `InstanceOwnerOrSuperuser` like `addInboundAddress` — an integration
+  credential is instance settings, not something a plain agent hands out). It never passes
+  `Authenticated` or any other guard — including `Superuser`/`InstanceOwnerOrSuperuser` themselves —
+  so a leaked token reaches exactly one mutation, never `createAttachmentUpload`, never `me`, never
+  the token-management mutations that could mint or revoke more of itself.
+  - **Id embedded in the token, no `token_hash` GSI** — same shape, same reasoning, as the
+    `+t{ticket_id}.{reply_token}` reply tag two entries below: `mta_{id}.{secret}`, verified by a
+    `GetItem` on `id` (no GSI, no eventual-consistency window) followed by a constant-time compare
+    of the full token against the stored `token_hash`. A token must authenticate on its very first
+    use, which a GSI lookup cannot promise.
+  - `submitVerifiedTicket(subject, body, to, cc)` takes the instance from the token, never an
+    argument, and takes `to`/`cc` **on the caller's word** — no email-verification code, unlike the
+    public submit form's `Requester` token. That trust is the entire point of an owner/superuser-
+    minted credential: an external service that has already verified its own users' addresses (a
+    customer portal behind its own login) opens a ticket with the right requester/CC list in one
+    call. `to`/`cc` are normalized, deduped, and capped at 20 combined recipients — a leaked token
+    must not become a bulk-mail relay — and any address matching one of the instance's own inbound
+    addresses is rejected outright, not silently dropped (dropping it could leave a ticket whose
+    requester is itself).
+  - No expiry: a long-lived integration credential, not a session. Revocation is
+    `updateApiToken(enabled: false)` or `deleteApiToken`.
 
 - **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
   every `.await`.** The process environment is global and tests run in parallel, so a test that

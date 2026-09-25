@@ -37,7 +37,11 @@ pub(crate) fn is_owner(memberships: &[Membership], instance_id: &str) -> bool {
 
 pub enum AuthRequirement {
     /// Any authenticated principal: a `User`, or a `Requester` holding a submit
-    /// capability token.
+    /// capability token. **Never `ApiToken`** — an integration token is scoped
+    /// to exactly one mutation (`submitVerifiedTicket`, guarded by
+    /// [`Self::ApiToken`] below), not to "anything a logged-in caller could
+    /// do"; widening this to admit it would hand a leaked integration token
+    /// reach into `createAttachmentUpload` and everything else this guards.
     Authenticated,
     /// A `User` who belongs (in any role) to this instance.
     Member(String),
@@ -61,6 +65,12 @@ pub enum AuthRequirement {
     /// purposes. Every *ticket*-facing guard stays plain `Member`/
     /// `InstanceOwner` — see [`Self::Superuser`]'s doc comment.
     InstanceOwnerOrSuperuser(String),
+    /// The instance-scoped `mta_` integration token: satisfied only by
+    /// `AuthInfo::ApiToken`, never by a `User` (however privileged) or a
+    /// `Requester`. Guards exactly `submitVerifiedTicket` — see
+    /// `AuthInfo::ApiToken`'s doc comment for what it authorises and why
+    /// nothing else does.
+    ApiToken,
 }
 
 pub struct AuthGuard {
@@ -81,6 +91,7 @@ impl Guard for AuthGuard {
                 if match auth {
                     Some(AuthInfo::User { .. }) => true,
                     Some(AuthInfo::Requester { .. }) => true,
+                    Some(AuthInfo::ApiToken { .. }) => false,
                     None => false,
                 } {
                     Ok(())
@@ -92,6 +103,7 @@ impl Guard for AuthGuard {
                 if match auth {
                     Some(AuthInfo::User { memberships, .. }) => is_member(memberships, instance_id),
                     Some(AuthInfo::Requester { .. }) => false,
+                    Some(AuthInfo::ApiToken { .. }) => false,
                     None => false,
                 } {
                     Ok(())
@@ -103,6 +115,7 @@ impl Guard for AuthGuard {
                 if match auth {
                     Some(AuthInfo::User { memberships, .. }) => is_owner(memberships, instance_id),
                     Some(AuthInfo::Requester { .. }) => false,
+                    Some(AuthInfo::ApiToken { .. }) => false,
                     None => false,
                 } {
                     Ok(())
@@ -114,6 +127,7 @@ impl Guard for AuthGuard {
                 if match auth {
                     Some(AuthInfo::Requester { .. }) => true,
                     Some(AuthInfo::User { .. }) => false,
+                    Some(AuthInfo::ApiToken { .. }) => false,
                     None => false,
                 } {
                     Ok(())
@@ -125,6 +139,7 @@ impl Guard for AuthGuard {
                 if match auth {
                     Some(AuthInfo::User { is_superuser, .. }) => *is_superuser,
                     Some(AuthInfo::Requester { .. }) => false,
+                    Some(AuthInfo::ApiToken { .. }) => false,
                     None => false,
                 } {
                     Ok(())
@@ -140,6 +155,7 @@ impl Guard for AuthGuard {
                         ..
                     }) => *is_superuser || is_owner(memberships, instance_id),
                     Some(AuthInfo::Requester { .. }) => false,
+                    Some(AuthInfo::ApiToken { .. }) => false,
                     None => false,
                 } {
                     Ok(())
@@ -147,6 +163,18 @@ impl Guard for AuthGuard {
                     Err(unauthenticated(
                         "Must be an owner of this instance, or a superuser",
                     ))
+                }
+            }
+            AuthRequirement::ApiToken => {
+                if match auth {
+                    Some(AuthInfo::ApiToken { .. }) => true,
+                    Some(AuthInfo::User { .. }) => false,
+                    Some(AuthInfo::Requester { .. }) => false,
+                    None => false,
+                } {
+                    Ok(())
+                } else {
+                    Err(unauthenticated("Must provide a valid API token"))
                 }
             }
         }
@@ -195,6 +223,10 @@ mod tests {
             guard = "AuthGuard::new(AuthRequirement::InstanceOwnerOrSuperuser(\"inst1\".to_string()))"
         )]
         async fn instance_owner_or_superuser(&self) -> bool {
+            true
+        }
+        #[graphql(guard = "AuthGuard::new(AuthRequirement::ApiToken)")]
+        async fn api_token(&self) -> bool {
             true
         }
     }
@@ -251,6 +283,13 @@ mod tests {
         }
     }
 
+    fn api_token() -> AuthInfo {
+        AuthInfo::ApiToken {
+            token_id: "tok1".into(),
+            instance_id: "inst1".into(),
+        }
+    }
+
     async fn field_ok(auth: Option<AuthInfo>, field: &str) -> bool {
         let schema = build_test_schema();
         let query = format!("{{ {field} }}");
@@ -299,5 +338,26 @@ mod tests {
         assert!(!field_ok(Some(requester()), "instanceOwnerOrSuperuser").await);
         // But Requester still passes its own requirement, unaffected.
         assert!(field_ok(Some(requester()), "requester").await);
+    }
+
+    /// An `ApiToken` principal passes only `AuthRequirement::ApiToken` —
+    /// every other requirement rejects it, including `Authenticated` (see
+    /// that variant's doc comment for why widening it would be a mistake).
+    /// A `User`/`Requester` never passes `ApiToken` either, however
+    /// privileged.
+    #[tokio::test]
+    async fn api_token_guard_truth_table() {
+        assert!(field_ok(Some(api_token()), "apiToken").await);
+        assert!(!field_ok(Some(api_token()), "authenticated").await);
+        assert!(!field_ok(Some(api_token()), "member").await);
+        assert!(!field_ok(Some(api_token()), "instanceOwner").await);
+        assert!(!field_ok(Some(api_token()), "requester").await);
+        assert!(!field_ok(Some(api_token()), "superuser").await);
+        assert!(!field_ok(Some(api_token()), "instanceOwnerOrSuperuser").await);
+
+        assert!(!field_ok(None, "apiToken").await);
+        assert!(!field_ok(Some(owner_of_inst1()), "apiToken").await);
+        assert!(!field_ok(Some(superuser_no_memberships()), "apiToken").await);
+        assert!(!field_ok(Some(requester()), "apiToken").await);
     }
 }

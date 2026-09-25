@@ -173,6 +173,54 @@ pub enum UserTokenUpdateShape {
     TouchLastUsed,
 }
 
+/// An instance-scoped integration credential (`mta_{id}.{secret}`) — see
+/// `auth::AuthInfo::ApiToken`'s doc comment for what it authorises (exactly
+/// `submitVerifiedTicket`, for `instance_id`, and nothing else) and
+/// `auth::issue_api_token`/`auth::verify_token`'s `mta_` branch for how it's
+/// minted and checked. Unlike [`UserToken`], `id` is not an opaque row key
+/// the caller never sees — it's embedded in the token string itself (the
+/// house rule in `CLAUDE.md`'s "API tokens" entry: same id-in-token,
+/// no-hash-GSI shape as the `+t{ticket_id}.{reply_token}` reply tag), so
+/// [`crate::db::Handler::get_api_token`] is always a `GetItem` by id, never a
+/// GSI lookup.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApiToken {
+    pub id: String,
+    pub instance_id: String,
+    pub name: String,
+    /// sha256 of the *full* presented token string (`mta_{id}.{secret}`), not
+    /// just the secret half — see `auth::verify_token`'s `mta_` branch. The
+    /// secret itself is never stored; it exists in full only at issuance, as
+    /// the string `auth::issue_api_token` returns.
+    pub token_hash: String,
+    /// Always written (never omitted) — unlike most bool flags in this
+    /// project, a token's enabled state is a fact every row needs, not a
+    /// sometimes-absent marker, so this does not follow the
+    /// omit-optional-attributes convention `Instance::deleted`/
+    /// `User::superuser` do.
+    pub enabled: bool,
+    pub created_at: u64,
+    pub created_by_user_id: String,
+    /// Absent until the token's first use, same throttled-touch convention
+    /// as `UserToken::last_used_at`.
+    pub last_used_at: Option<u64>,
+}
+
+impl HasID for ApiToken {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Update shapes for `api_token` — `updateApiToken`'s write path
+/// (`Fields`) and the throttled `last_used_at` touch on successful
+/// verification (`TouchLastUsed`), mirroring [`UserTokenUpdateShape`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApiTokenUpdateShape<'a> {
+    Fields { name: &'a str, enabled: bool },
+    TouchLastUsed,
+}
+
 /// A registered WebAuthn/passkey credential. `passkey_json` is the serialized
 /// `webauthn_rs::prelude::Passkey` — opaque to everything except the
 /// `webauthn-rs` crate, and the thing the serialized-fixture regression test in
@@ -1044,6 +1092,41 @@ pub trait Handler: Sync {
         change: UserTokenUpdateShape,
     ) -> impl Future<Output = Result<()>> + Send;
     fn delete_user_token(&self, id: &str) -> impl Future<Output = Result<()>> + Send;
+
+    // ── api_token ─────────────────────────────────────────────────────────
+    /// `id` is supplied by the caller (`auth::issue_api_token`), not
+    /// generated here — unlike every other `create_*` method, which mints
+    /// its own id, this one needs to mint the id *first* so it can be
+    /// embedded in the returned token string before the row exists. The
+    /// `attribute_not_exists(id)` condition guards against the same
+    /// astronomically-unlikely nanoid collision `create_instance` documents,
+    /// not against a real caller race.
+    fn create_api_token(
+        &self,
+        id: &str,
+        instance_id: &str,
+        name: &str,
+        token_hash: &str,
+        created_by_user_id: &str,
+    ) -> impl Future<Output = Result<ApiToken>> + Send;
+    /// A consistent `GetItem` by id — see [`ApiToken`]'s doc comment for why
+    /// this table has no `token_hash` GSI to look up by instead.
+    fn get_api_token(&self, id: &str) -> impl Future<Output = Result<Option<ApiToken>>> + Send;
+    /// The management list (`Instance.apiTokens`) — every token for one
+    /// instance, via `instance_id-index`.
+    fn list_api_tokens_by_instance(
+        &self,
+        instance_id: &str,
+    ) -> impl Future<Output = Result<Vec<ApiToken>>> + Send;
+    fn update_api_token(
+        &self,
+        id: &str,
+        change: ApiTokenUpdateShape<'_>,
+    ) -> impl Future<Output = Result<()>> + Send;
+    /// Hard delete — nothing else in the schema references an `api_token`
+    /// row, so unlike a ticket or an instance there is no soft-delete
+    /// marker to set instead.
+    fn delete_api_token(&self, id: &str) -> impl Future<Output = Result<()>> + Send;
 
     // ── ticket ────────────────────────────────────────────────────────────
     fn get_tickets<T: AsRef<str> + Sync>(

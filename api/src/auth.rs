@@ -1,13 +1,13 @@
 //! Authentication principals and the `Authorization` header dispatcher.
 //!
-//! Ported from seslogin's `auth.rs`, minus the kiosk/session and API-token
-//! principals microticket has no equivalent of. There are exactly two principals:
-//! an authenticated [`AuthInfo::User`] (a member, possibly of several instances)
-//! and an anonymous [`AuthInfo::Requester`] holding a short-lived, single-purpose
+//! Ported from seslogin's `auth.rs`, minus the kiosk/session principal
+//! microticket has no equivalent of. There are three principals: an
+//! authenticated [`AuthInfo::User`] (a member, possibly of several instances),
+//! an anonymous [`AuthInfo::Requester`] holding a short-lived, single-purpose
 //! capability token scoped to one instance (the public submit form's flow — the
-//! same pattern as seslogin's `period_link.rs`). Only `User` is real as of this
-//! step; `Requester` becomes reachable in step 4, once there is an instance id to
-//! scope it to.
+//! same pattern as seslogin's `period_link.rs`), and [`AuthInfo::ApiToken`], a
+//! long-lived instance-scoped integration credential that authorises exactly
+//! `submitVerifiedTicket` and nothing else — see that variant's doc comment.
 
 use thiserror::Error;
 use tracing::warn;
@@ -79,6 +79,19 @@ pub enum AuthInfo {
     /// `submitTicket` for one `(email, instance_id)` pair, and nothing else.
     /// Unreachable until step 4.
     Requester { email: String, instance_id: String },
+    /// An instance-scoped integration token (`mta_`): authorises exactly
+    /// `submitVerifiedTicket` for `instance_id`, and nothing else — never a
+    /// `User`, never a `Requester`, never passes any other
+    /// [`crate::graphql::auth::AuthRequirement`] guard (including
+    /// `Authenticated` — see that guard's doc comment for why widening it to
+    /// admit this variant would be a mistake). Minted only by an instance
+    /// owner or superuser via `issue_api_token`; long-lived (no expiry — see
+    /// that function's doc comment), so revocation is disabling or deleting
+    /// the row, not waiting it out.
+    ApiToken {
+        token_id: String,
+        instance_id: String,
+    },
 }
 
 /// Prefix of an opaque user session token, sha256-hashed and stored in
@@ -91,6 +104,16 @@ pub const USER_TOKEN_PREFIX: &str = "mtu_";
 /// a different prefix from [`USER_TOKEN_PREFIX`] so [`verify_token`]'s
 /// dispatch can never confuse the two, however either is stored.
 pub const REQUESTER_TOKEN_PREFIX: &str = "mts_";
+
+/// Prefix of an instance-scoped integration token, stored in the durable
+/// `api_token` table. Format: `mta_{id}.{secret}` — see [`issue_api_token`]'s
+/// doc comment for why the row's own id is embedded in the token rather than
+/// looked up via a `token_hash` GSI (the same reasoning, and the same shape,
+/// as the `+t{ticket_id}.{reply_token}` reply tag — see `CLAUDE.md`).
+/// Deliberately a fourth-letter suffix distinct from [`USER_TOKEN_PREFIX`]
+/// (`mtu_`) and [`REQUESTER_TOKEN_PREFIX`] (`mts_`), so [`verify_token`]'s
+/// dispatch never has to guess which scheme a bearer token belongs to.
+pub const API_TOKEN_PREFIX: &str = "mta_";
 
 /// `ephemeral_state` `kind` for the requester submit-token flow's short-lived
 /// capability token (post-code-verification). Distinct from
@@ -240,6 +263,7 @@ pub async fn resolve_dev_auth<A: App + HasDb>(
 pub enum CallerType {
     User,
     Requester,
+    ApiToken,
     #[default]
     Unauthenticated,
 }
@@ -249,6 +273,7 @@ impl CallerType {
         match self {
             Self::User => "user",
             Self::Requester => "requester",
+            Self::ApiToken => "api_token",
             Self::Unauthenticated => "unauthenticated",
         }
     }
@@ -266,6 +291,7 @@ pub fn caller_info(auth: Option<&AuthInfo>) -> (CallerType, String) {
         None => (CallerType::Unauthenticated, "unknown".to_owned()),
         Some(AuthInfo::User { id, .. }) => (CallerType::User, id.clone()),
         Some(AuthInfo::Requester { email, .. }) => (CallerType::Requester, email.clone()),
+        Some(AuthInfo::ApiToken { token_id, .. }) => (CallerType::ApiToken, token_id.clone()),
     }
 }
 
@@ -292,6 +318,47 @@ pub async fn issue_user_token<A: App + HasDb>(app: &A, user_id: &str) -> anyhow:
         .create_user_token(&hash, user_id, expires_at)
         .await?;
     Ok(secret)
+}
+
+/// Mint a fresh `mta_{id}.{secret}` integration token for `instance_id` and
+/// persist its row, returning both the created [`db::ApiToken`] and the full
+/// secret — the only time it ever exists in full. `createApiToken`
+/// (`graphql::mutations`) hands the secret straight back to the caller and
+/// keeps nothing.
+///
+/// The id is minted *here*, before the row is written, specifically so it
+/// can be embedded in the returned token — see [`API_TOKEN_PREFIX`]'s doc
+/// comment for why: verification then becomes a `GetItem` on `id` (no GSI,
+/// no eventual-consistency window), with `secret` compared
+/// constant-time against the stored `token_hash`, exactly mirroring the
+/// `+t{ticket_id}.{reply_token}` reply tag's reasoning in `CLAUDE.md`.
+///
+/// No expiry: unlike [`issue_user_token`]/[`issue_submit_token`], this is a
+/// long-lived integration credential — an external service configures it
+/// once and keeps using it, so there is no session to time out. Revocation
+/// is `updateApiToken(enabled: false)` or `deleteApiToken`, not waiting for
+/// an expiry.
+pub async fn issue_api_token<A: App + HasDb>(
+    app: &A,
+    instance_id: &str,
+    name: &str,
+    created_by_user_id: &str,
+) -> anyhow::Result<(db::ApiToken, String)> {
+    let id = crate::dynamodb::new_id();
+    // The full token string, prefix and id included — `token_hash` below is
+    // sha256 of *this*, not just the random suffix, since verification
+    // (`verify_token_with_api_token`) hashes whatever the caller presents in
+    // the `Authorization` header.
+    let full_token = format!(
+        "{API_TOKEN_PREFIX}{id}.{}",
+        crate::nonce::generate_nonce(32)
+    );
+    let hash = hash_token(&full_token);
+    let token = app
+        .db()
+        .create_api_token(&id, instance_id, name, &hash, created_by_user_id)
+        .await?;
+    Ok((token, full_token))
 }
 
 /// Fetch a user's DB record, reject if disabled, and throttle-touch
@@ -436,8 +503,82 @@ async fn verify_token_with_requester_token<A: App + HasDb>(
     })
 }
 
+/// Split a presented `mta_{id}.{secret}` token into `(id, secret)`, or
+/// `None` if it isn't shaped like one — the prefix is missing, there's no
+/// `.` separator, or either half is empty. Splitting on the *first* `.` is
+/// unambiguous because neither the nanoid alphabet (`id`) nor the base64url
+/// alphabet ([`crate::nonce::generate_nonce`], `secret`) contains `.` — see
+/// [`API_TOKEN_PREFIX`]'s doc comment. A free function, not inlined into
+/// [`verify_token_with_api_token`], so the malformed-input cases are
+/// unit-testable without a database.
+fn parse_api_token(token: &str) -> Option<(&str, &str)> {
+    let rest = token.strip_prefix(API_TOKEN_PREFIX)?;
+    let (id, secret) = rest.split_once('.')?;
+    if id.is_empty() || secret.is_empty() {
+        return None;
+    }
+    Some((id, secret))
+}
+
+/// Verify an `mta_` integration token: parse it, `GetItem` the row by the id
+/// it carries, compare the *full* presented token against the stored
+/// `token_hash` in constant time, and check `enabled` — see
+/// [`issue_api_token`]'s doc comment for the id-in-token design this mirrors
+/// from the reply tag. A missing row and a hash mismatch are reported with
+/// the **same message** ("Invalid API token"), deliberately: distinguishing
+/// them would tell a caller with a wrong secret whether the id half of their
+/// guess happened to be real.
+async fn verify_token_with_api_token<A: App + HasDb>(
+    app: &A,
+    token: &str,
+) -> Result<AuthInfo, AuthError> {
+    let Some((id, _secret)) = parse_api_token(token) else {
+        return Err(AuthError::Permanent("Invalid API token".into()));
+    };
+    let api_token = app
+        .db()
+        .get_api_token(id)
+        .await
+        .map_err(|e| classify_db_err("fetch api token", e))?
+        .ok_or_else(|| AuthError::Permanent("Invalid API token".into()))?;
+
+    let hash = hash_token(token);
+    if !crate::inbound::resolution::constant_time_eq(
+        hash.as_bytes(),
+        api_token.token_hash.as_bytes(),
+    ) {
+        return Err(AuthError::Permanent("Invalid API token".into()));
+    }
+
+    if !api_token.enabled {
+        return Err(AuthError::Permanent("API token is disabled".into()));
+    }
+
+    // Throttled touch, same 60s window as access_time/user_token above.
+    let now = crate::clock::now_sec();
+    if api_token.last_used_at.is_none_or(|t| now > t + 60) {
+        match app
+            .db()
+            .update_api_token(&api_token.id, db::ApiTokenUpdateShape::TouchLastUsed)
+            .await
+        {
+            Ok(_) => {}
+            Err(db::Error::MutationDisabled) => {
+                warn!("update_api_token skipped: mutations disabled");
+            }
+            Err(e) => return Err(AuthError::Transient(e.to_string())),
+        }
+    }
+
+    Ok(AuthInfo::ApiToken {
+        token_id: api_token.id,
+        instance_id: api_token.instance_id,
+    })
+}
+
 /// Dispatch an opaque token to the right verifier by its prefix: `mtu_` for a
-/// user session, `mts_` for a requester submit capability. Anything else is a
+/// user session, `mts_` for a requester submit capability, `mta_` for an
+/// instance-scoped integration token. Anything else is a
 /// definitively bad credential, not a "try the next scheme" fallthrough.
 pub async fn verify_token<A: App + HasDb>(app: &A, token: &str) -> Result<AuthInfo, AuthError> {
     if token.starts_with(USER_TOKEN_PREFIX) {
@@ -445,6 +586,9 @@ pub async fn verify_token<A: App + HasDb>(app: &A, token: &str) -> Result<AuthIn
     }
     if token.starts_with(REQUESTER_TOKEN_PREFIX) {
         return verify_token_with_requester_token(app, token).await;
+    }
+    if token.starts_with(API_TOKEN_PREFIX) {
+        return verify_token_with_api_token(app, token).await;
     }
     Err(AuthError::Permanent("Unrecognized token".into()))
 }
@@ -501,10 +645,72 @@ mod tests {
     }
 
     #[test]
+    fn caller_info_for_api_token() {
+        let auth = AuthInfo::ApiToken {
+            token_id: "tok1".into(),
+            instance_id: "inst1".into(),
+        };
+        let (kind, id) = caller_info(Some(&auth));
+        assert_eq!(kind, CallerType::ApiToken);
+        assert_eq!(id, "tok1");
+    }
+
+    #[test]
     fn caller_type_strings_are_stable() {
         assert_eq!(CallerType::User.as_str(), "user");
         assert_eq!(CallerType::Requester.as_str(), "requester");
+        assert_eq!(CallerType::ApiToken.as_str(), "api_token");
         assert_eq!(CallerType::Unauthenticated.as_str(), "unauthenticated");
+    }
+
+    #[test]
+    fn parse_api_token_accepts_a_well_formed_token() {
+        assert_eq!(
+            parse_api_token("mta_abc123.def456"),
+            Some(("abc123", "def456"))
+        );
+    }
+
+    #[test]
+    fn parse_api_token_rejects_missing_separator() {
+        assert_eq!(parse_api_token("mta_abc123def456"), None);
+    }
+
+    #[test]
+    fn parse_api_token_rejects_empty_id() {
+        assert_eq!(parse_api_token("mta_.def456"), None);
+    }
+
+    #[test]
+    fn parse_api_token_rejects_empty_secret() {
+        assert_eq!(parse_api_token("mta_abc123."), None);
+    }
+
+    #[test]
+    fn parse_api_token_rejects_the_wrong_prefix() {
+        assert_eq!(parse_api_token("mtu_abc123.def456"), None);
+    }
+
+    #[tokio::test]
+    async fn verify_token_rejects_a_malformed_api_token() {
+        use crate::app;
+        use crate::mockdb;
+        use crate::mockmail;
+        use crate::mockstorage;
+
+        let my_app = app::new(
+            mockdb::Handler::new(),
+            mockmail::Handler::new(),
+            mockstorage::Storage::new(),
+            0,
+        );
+        for bad in ["mta_no_dot_here", "mta_.secret", "mta_id.", "mta_."] {
+            let result = verify_token(&my_app, bad).await;
+            assert!(
+                matches!(result, Err(AuthError::Permanent(_))),
+                "{bad:?} should be rejected as a malformed api token"
+            );
+        }
     }
 
     #[test]
