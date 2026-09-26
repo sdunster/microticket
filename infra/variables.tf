@@ -19,6 +19,12 @@ variable "support_domain" {
   type        = string
 }
 
+variable "additional_mail_domains" {
+  description = "Extra domains that receive inbound mail and send instance mail (e.g. example.org for *@example.org), on top of support_domain. Each gets its own SES identity with DKIM and a custom MAIL FROM subdomain, plus an entry in the inbound receipt rule. The web app is still served only from support_domain."
+  type        = list(string)
+  default     = []
+}
+
 variable "github_repo" {
   description = "GitHub repository in \"owner/name\" form, used to scope the GitHub OIDC deploy role's trust policy"
   type        = string

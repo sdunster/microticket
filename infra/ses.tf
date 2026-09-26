@@ -38,6 +38,23 @@ resource "aws_sesv2_email_identity_mail_from_attributes" "main" {
   behavior_on_mx_failure = "USE_DEFAULT_VALUE"
 }
 
+# Additional mail domains: same shape as the primary identity above, one per
+# entry in var.additional_mail_domains.
+resource "aws_sesv2_email_identity" "additional" {
+  for_each       = toset(var.additional_mail_domains)
+  email_identity = each.value
+
+  configuration_set_name = aws_sesv2_configuration_set.main.configuration_set_name
+}
+
+resource "aws_sesv2_email_identity_mail_from_attributes" "additional" {
+  for_each         = aws_sesv2_email_identity.additional
+  email_identity   = each.value.email_identity
+  mail_from_domain = "mail.${each.value.email_identity}"
+
+  behavior_on_mx_failure = "USE_DEFAULT_VALUE"
+}
+
 # ── Inbound receiving ─────────────────────────────────────────────────────────
 #
 # An AWS account has exactly ONE active receipt rule set per region. If
@@ -54,7 +71,7 @@ resource "aws_ses_active_receipt_rule_set" "main" {
   rule_set_name = aws_ses_receipt_rule_set.main.rule_set_name
 }
 
-# recipients = [var.support_domain] (not a specific address) catches every
+# recipients = the mail domains (not a specific address) catches every
 # local part at that domain — this is what makes both plain addresses and
 # the "*@domain" wildcard inbound_address kind work; routing.rs resolves the
 # actual address -> instance mapping downstream, this rule just accepts
@@ -62,7 +79,7 @@ resource "aws_ses_active_receipt_rule_set" "main" {
 resource "aws_ses_receipt_rule" "inbound" {
   name          = "inbound"
   rule_set_name = aws_ses_receipt_rule_set.main.rule_set_name
-  recipients    = [var.support_domain]
+  recipients    = concat([var.support_domain], var.additional_mail_domains)
   enabled       = true
   scan_enabled  = true
 
