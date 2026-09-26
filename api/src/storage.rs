@@ -19,6 +19,13 @@
 //! - `pending/{instance_id}/{nanoid}/{filename}` — an agent's upload
 //!   (`createAttachmentUpload`) not yet attached to a message; moved into
 //!   its final `attachments/…` key by `replyToTicket`.
+//! - `invoices/{instance_id}/{invoice_id}/Invoice-{displayNumber}.pdf` — a
+//!   finalized invoice's rendered PDF (`graphql::mutations::download_invoice_pdf`),
+//!   written once and cached forever (`db::Invoice.pdf_s3_key`) — see
+//!   CLAUDE.md's "Invoicing" house rule. Unlike everything else in this
+//!   bucket, nothing expires this key: `infra/s3_mail.tf`'s lifecycle rule
+//!   deliberately excludes `invoices/` because a finalized invoice's PDF is
+//!   a permanent financial record, not transient mail.
 
 use anyhow::Result;
 use std::future::Future;
@@ -28,6 +35,24 @@ use std::time::Duration;
 /// or a browser tab left open, short enough that a leaked URL is not a
 /// standing liability.
 pub const PRESIGN_EXPIRY: Duration = Duration::from_secs(15 * 60);
+
+/// Keep only `[A-Za-z0-9._-]` from a caller-chosen download filename,
+/// falling back to a fixed name if that strips everything — cheap insurance
+/// against a filename built from untrusted-ish data (a display number,
+/// technically caller-controlled once instances grow enough fields feeding
+/// it) landing unescaped inside a `Content-Disposition` header, where a
+/// stray quote or CRLF would be a header-injection risk.
+pub fn sanitize_download_filename(filename: &str) -> String {
+    let cleaned: String = filename
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    if cleaned.is_empty() {
+        "download".to_string()
+    } else {
+        cleaned
+    }
+}
 
 /// `Sync` for the same reason as [`crate::db::Handler`]/[`crate::mail::Handler`]:
 /// a `&impl Handler` is held across `.await` inside the `Send` futures the
@@ -62,8 +87,54 @@ pub trait Handler: Sync {
     /// A presigned GET URL for an attachment download.
     fn presign_get(&self, key: &str) -> impl Future<Output = Result<String>> + Send;
 
+    /// A presigned GET URL that forces a download with the given filename
+    /// (`Content-Disposition: attachment; filename="…"`), rather than
+    /// letting the browser render the object inline — what
+    /// `downloadInvoicePdf` hands back so "Download PDF" saves
+    /// `Invoice-008.pdf` instead of navigating to it. `filename` is the
+    /// caller's un-sanitised choice (e.g. `Invoice-{displayNumber}.pdf`);
+    /// the implementation is responsible for making it safe to place in a
+    /// `Content-Disposition` header — see [`sanitize_download_filename`],
+    /// which `s3storage`'s implementation calls.
+    fn presign_get_download(
+        &self,
+        key: &str,
+        filename: &str,
+    ) -> impl Future<Output = Result<String>> + Send;
+
     /// The size, in bytes, of an already-stored object — used after
     /// `replyToTicket` moves a `pending/…` upload into place, to fill in
     /// `Attachment.size` without re-reading the whole object.
     fn object_size(&self, key: &str) -> impl Future<Output = Result<u64>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_download_filename_keeps_the_safe_case_unchanged() {
+        assert_eq!(
+            sanitize_download_filename("Invoice-008.pdf"),
+            "Invoice-008.pdf"
+        );
+    }
+
+    #[test]
+    fn sanitize_download_filename_strips_everything_else() {
+        assert_eq!(
+            sanitize_download_filename("Invoice \"008\"\r\n.pdf"),
+            "Invoice008.pdf"
+        );
+        assert_eq!(
+            sanitize_download_filename("../../etc/passwd"),
+            "....etcpasswd"
+        );
+    }
+
+    #[test]
+    fn sanitize_download_filename_falls_back_when_nothing_survives() {
+        assert_eq!(sanitize_download_filename("\"\r\n"), "download");
+        assert_eq!(sanitize_download_filename(""), "download");
+    }
 }

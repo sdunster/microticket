@@ -7,7 +7,8 @@ Anyone can also raise a ticket from the public web form after verifying their em
 
 A second, separate function — **invoicing** — lives in its own instances alongside support ones,
 sharing the same instance switcher and membership roles: track clients/projects, record billable
-items, and turn them into invoices (see CLAUDE.md's "Invoicing" house rule).
+items, and turn them into invoices. Once finalized, an invoice is read-only and downloadable as a
+PDF, rendered server-side from its frozen content (see CLAUDE.md's "Invoicing" house rule).
 
 **Features:**
 - Inbound email → ticket, with reply threading via `+tag` addressing and `In-Reply-To`/`References`
@@ -17,6 +18,8 @@ items, and turn them into invoices (see CLAUDE.md's "Invoicing" house rule).
   ticket submission
 - Invoicing instances: clients/projects, billable items, and invoices — a second function
   alongside support, isolated from it but sharing the same login and instance switcher
+- Finalized invoices download as a PDF, rendered server-side and cached in S3 behind a presigned,
+  filename-forcing download link
 - Runs on AWS Lambda + DynamoDB — scales to zero when idle
 
 **Stack:** Rust (GraphQL API, async-graphql) · React + Relay (frontend) · AWS (Lambda, DynamoDB,
