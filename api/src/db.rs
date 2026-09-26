@@ -469,6 +469,96 @@ pub enum ProjectUpdateShape<'a> {
     },
 }
 
+/// A `billable_item` row — one line of work recorded against a [`Project`],
+/// later collected onto an invoice. Money is integer throughout — see
+/// `crate::invoicing::money`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BillableItem {
+    pub id: String,
+    /// Denormalised from the project so the instance-wide listing
+    /// (`instance_id-date-index`) needs no join. Never changes: an item can't
+    /// move between projects.
+    pub instance_id: String,
+    pub project_id: String,
+    /// `YYYY-MM-DD`, always in exactly that form
+    /// (`invoicing::validate_item_date`) — it is the listing GSIs' sort key,
+    /// so the string order must be the date order.
+    pub date: String,
+    /// Trimmed, non-empty, ≤ 2000 chars, may be multi-line.
+    pub description: String,
+    /// Quantity × 100: `150` is 1.5. `0 < q ≤ 100_000_000`.
+    pub quantity_hundredths: i64,
+    /// GST-exclusive, `0 ≤ p ≤ 1_000_000_000`.
+    pub unit_price_cents: i64,
+    /// The invoice this item is on, if any — absent means unbilled. Nothing
+    /// sets it yet: invoices (and the transactional attach/detach that writes
+    /// this) arrive in the next PR of the invoicing stack. Until then every
+    /// item is unbilled, and the update/delete paths already refuse an item
+    /// that has one.
+    pub invoice_id: Option<String>,
+    pub created_by_user_id: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl HasID for BillableItem {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Update shapes for `billable_item`. `Fields` is `updateBillableItem`'s
+/// full replace of every editable attribute; `project_id`/`instance_id`/
+/// `invoice_id` are never touched here.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BillableItemUpdateShape<'a> {
+    Fields {
+        date: &'a str,
+        description: &'a str,
+        quantity_hundredths: i64,
+        unit_price_cents: i64,
+    },
+}
+
+/// Which partition a billable-item listing reads: every item in an
+/// instance (`instance_id-date-index`) or one project's
+/// (`project_id-date-index`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BillableItemScope<'a> {
+    Instance(&'a str),
+    Project(&'a str),
+}
+
+/// The listing filter, applied as a DynamoDB `FilterExpression`:
+/// `Unbilled` = `attribute_not_exists(invoice_id)`, `Billed` =
+/// `attribute_exists(invoice_id)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BillableItemFilter {
+    All,
+    Unbilled,
+    Billed,
+}
+
+/// Keyset cursor for a billable-item listing: `{date}:{id}`, shaped like
+/// [`TicketCursor`]. Together with the listing's own scope (which supplies
+/// the GSI hash key — `instance_id` or `project_id`), this is everything an
+/// `ExclusiveStartKey` on either `*-date-index` needs: table key `id`, GSI
+/// hash key, GSI sort key `date`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BillableItemCursor {
+    pub date: String,
+    pub id: String,
+}
+
+/// Forward-only (`first`/`after`), newest `date` first. `limit` is how many
+/// matching rows to return at most — the resolver asks for one more than a
+/// page to learn whether there's a next page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListBillableItemsPage {
+    pub after: Option<BillableItemCursor>,
+    pub limit: i32,
+}
+
 /// `inbound_address.kind`: whether a row matches one exact address or every
 /// address at a domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1328,6 +1418,48 @@ pub trait Handler: Sync {
         id: &str,
         change: ProjectUpdateShape<'_>,
     ) -> impl Future<Output = Result<()>> + Send;
+
+    // ── billable_item ─────────────────────────────────────────────────────
+    #[allow(clippy::too_many_arguments)]
+    fn create_billable_item(
+        &self,
+        instance_id: &str,
+        project_id: &str,
+        date: &str,
+        description: &str,
+        quantity_hundredths: i64,
+        unit_price_cents: i64,
+        created_by_user_id: &str,
+    ) -> impl Future<Output = Result<BillableItem>> + Send;
+    fn get_billable_items<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> impl Future<Output = Result<Vec<Option<BillableItem>>>> + Send;
+    /// Apply `change`, conditional on the row existing **and having no
+    /// `invoice_id`**. Returns `Ok(false)` (nothing written) when that
+    /// condition fails — the row vanished, or it was put on an invoice
+    /// between the caller's read and this write — so the caller can report a
+    /// conflict instead of silently editing a billed line.
+    fn update_billable_item(
+        &self,
+        id: &str,
+        change: BillableItemUpdateShape<'_>,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// Delete, with the same "exists and unbilled" condition and `Ok(false)`
+    /// contract as [`Self::update_billable_item`].
+    fn delete_billable_item(&self, id: &str) -> impl Future<Output = Result<bool>> + Send;
+    /// One page of billable items, newest `date` first (ties in DynamoDB's
+    /// own index order, i.e. by `id`), keyset-paginated. `filter` is applied
+    /// as a `FilterExpression`, which DynamoDB evaluates *after* `Limit` — so
+    /// an implementation must keep querying until it has `page.limit`
+    /// matching rows or the index is exhausted, never stop at the first
+    /// short page.
+    fn list_billable_items(
+        &self,
+        scope: BillableItemScope<'_>,
+        filter: BillableItemFilter,
+        page: ListBillableItemsPage,
+    ) -> impl Future<Output = Result<Vec<BillableItem>>> + Send;
 
     // ── ticket ────────────────────────────────────────────────────────────
     fn get_tickets<T: AsRef<str> + Sync>(

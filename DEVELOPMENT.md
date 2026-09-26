@@ -80,7 +80,7 @@ make local-clear                # deletes app-written rows (tokens, WebAuthn sta
 
 `make local-seed` (`api/src/bin/local-seed.rs apply`) writes three seeded instances (two support,
 one invoicing), an owner and an agent, a handful of inbound addresses (including a wildcard), two
-fictional invoicing projects, and a ready-made session token for each user — all as raw DynamoDB
+fictional invoicing projects with a few unbilled billable items, and a ready-made session token for each user — all as raw DynamoDB
 items from `local/seed/synthetic.json`, so their ids are exactly as committed. Nothing in the
 fixture is real: `api/tests/seed_fixtures.rs` pins that every address is
 `@example.com`/`@microticket.test` and refuses anything else.
@@ -93,7 +93,7 @@ Seeded accounts (only ever valid against a `local`-prefixed database — never r
 | agent | `agent@microticket.test`  | `acme`                           | `mtu_localdev0000000000000000000agent`  |
 
 `ledger` is the seeded **invoicing** instance (`kind: invoicing`) — fictional business/GST/payment
-details and two fictional projects, so the invoicing pages have something to look at without a
+details and two fictional projects with some billable items, so the invoicing pages have something to look at without a
 manual `instance create --kind invoicing` first. `acme`/`ridgeline` are plain support instances
 (`kind` absent, per the omit-optional-attributes house rule).
 

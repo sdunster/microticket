@@ -36,6 +36,120 @@ type AttachmentUpload {
 	uploadUrl: String!
 }
 
+type BillableItem {
+	id: ID!
+	"""
+	Dataloaded — a page of items resolves this once per node.
+	"""
+	project: Project!
+	"""
+	`YYYY-MM-DD`.
+	"""
+	date: String!
+	"""
+	Multi-line; lines starting `* ` or `- ` render as bullets on the
+	invoice.
+	"""
+	description: String!
+	"""
+	The quantity as its shortest decimal string (`"2"`, `"1.5"`,
+	`"0.25"`) — the same form `BillableItemInput.quantity` accepts, so an
+	edit form can round-trip it unchanged.
+	"""
+	quantity: String!
+	"""
+	GST-exclusive, in cents.
+	"""
+	unitPriceCents: Int!
+	"""
+	round-half-up(quantity × unit price), in cents — computed here, never
+	stored, so it can't drift from the two values it's derived from.
+	Can exceed 2^31 at the validation bounds (up to 10^15); it is
+	serialized as a JSON number, which a JS client holds exactly (it's
+	under 2^53).
+	"""
+	amountCents: Int!
+	"""
+	`UNBILLED` when not on an invoice. An item with an `invoice_id` is
+	reported `INVOICED` for now — nothing sets one until invoices land
+	(next PR), which will tell `DRAFT` from `INVOICED` by loading the
+	invoice.
+	"""
+	status: BillableItemStatusType!
+	createdAt: Int!
+	updatedAt: Int!
+}
+
+type BillableItemConnection {
+	"""
+	Information to aid in pagination.
+	"""
+	pageInfo: PageInfo!
+	"""
+	A list of edges.
+	"""
+	edges: [BillableItemEdge!]!
+	"""
+	A list of nodes.
+	"""
+	nodes: [BillableItem!]!
+}
+
+"""
+An edge in a connection.
+"""
+type BillableItemEdge {
+	"""
+	The item at the end of the edge
+	"""
+	node: BillableItem!
+	"""
+	A cursor for use in pagination
+	"""
+	cursor: String!
+}
+
+"""
+`billableItems`' filter. `BILLED` means "on any invoice, draft or
+finalized" — `attribute_exists(invoice_id)`.
+"""
+enum BillableItemFilterType {
+	ALL
+	UNBILLED
+	BILLED
+}
+
+"""
+`createBillableItem`/`updateBillableItem`'s argument — the same full set
+of editable fields for both (update is a full replace).
+
+- `date`: `YYYY-MM-DD`, a real calendar day.
+- `description`: trimmed, non-empty, ≤ 2000 chars, multi-line allowed.
+- `quantity`: a decimal **string** with at most 2 dp, `0 < q ≤ 1,000,000`
+(`"2"`, `"1.5"`, `"0.25"`) — a string so no client float ever gets
+near it; the server is the one parser (`invoicing::money::parse_quantity`).
+- `unitPriceCents`: integer cents, GST-exclusive, `0 ≤ p ≤ 1,000,000,000`.
+"""
+input BillableItemInput {
+	date: String!
+	description: String!
+	quantity: String!
+	unitPriceCents: Int!
+}
+
+"""
+Where a billable item stands relative to invoicing. Every item is
+`UNBILLED` until invoices exist (the next PR of the invoicing stack); from
+then on, an item on a draft invoice is `DRAFT` and one on a finalized
+invoice is `INVOICED`. Defined in full now so the web client's handling
+doesn't have to change shape when the other two start appearing.
+"""
+enum BillableItemStatusType {
+	UNBILLED
+	DRAFT
+	INVOICED
+}
+
 """
 `createProject`'s argument.
 """
@@ -677,6 +791,35 @@ type MutationRoot {
 	member of, is `NOT_FOUND` either way — no probing.
 	"""
 	updateProject(id: ID!, input: UpdateProjectInput!): Project!
+	"""
+	Record a billable item against a project. Any member of the project's
+	(invoicing) instance — authorised through the project, like
+	`updateProject`: `NOT_FOUND` for a missing project and a non-member
+	alike, and a superuser without a membership is a non-member. An
+	archived project takes no new items (un-archive it first). See
+	`BillableItemInput` for the validation rules.
+	"""
+	createBillableItem(projectId: ID!, input: BillableItemInput!): BillableItem!
+	"""
+	Full-replace a billable item's date/description/quantity/unit price.
+	Id-only, authorised like `updateProject` (`NOT_FOUND` for missing or
+	not yours). Refused with `CONFLICT` once the item is on an invoice —
+	checked up front for a clear message, and again atomically in the
+	write's condition, so an item attached between the two is never
+	silently edited.
+	
+	When invoices land (next PR) this narrows to "refused once the invoice
+	is *finalized*": an item on a draft stays editable, bumping the
+	draft's `version` in the same transaction.
+	"""
+	updateBillableItem(id: ID!, input: BillableItemInput!): BillableItem!
+	"""
+	Delete a billable item, returning its id (for the client's store).
+	Same authorization and on-an-invoice refusal as
+	`updateBillableItem` — including the same "only once finalized"
+	narrowing when invoices land.
+	"""
+	deleteBillableItem(id: ID!): ID!
 }
 
 """
@@ -849,6 +992,17 @@ type QueryRoot {
 	[`Self::ticket`]'s no-probing posture.
 	"""
 	project(id: ID!): Project
+	"""
+	Billable items in an invoicing instance — every project's, or one
+	project's when `projectId` is given — as a Relay connection, newest
+	`date` first (see `db::Handler::list_billable_items`). Forward-only
+	(`first`/`after`). Member of `instanceId`; a support instance is
+	rejected with a plain validation error (like `projects`), and a
+	`projectId` that doesn't exist or belongs to another instance is
+	`NOT_FOUND` either way. Superusers get nothing — they don't pass
+	`Member`.
+	"""
+	billableItems(instanceId: ID!, projectId: ID, filter: BillableItemFilterType! = ALL, first: Int, after: String): BillableItemConnection!
 	"""
 	Every instance, **including soft-deleted ones**, sorted by name — the
 	admin instance list. Superuser-only; unlike every other way an

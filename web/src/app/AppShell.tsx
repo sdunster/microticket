@@ -27,9 +27,12 @@ const DELETED_NAV_ITEM = { to: "/app/tickets/deleted", label: "Deleted" };
 // a non-superuser who navigates to `/app/admin/*` directly still gets
 // FORBIDDEN from the server on every field it would try to read.
 const ADMIN_NAV_ITEM = { to: "/app/admin", label: "Admin" };
-// Invoicing instances get their own nav. Invoices and billable items join
-// Projects here as those pages land.
-const INVOICING_NAV_ITEMS = [{ to: "/app/projects", label: "Projects" }];
+// Invoicing instances get their own nav. Invoices join these here when that
+// page lands.
+const INVOICING_NAV_ITEMS = [
+  { to: "/app/projects", label: "Projects" },
+  { to: "/app/billable-items", label: "Billable items" },
+];
 // `updateInvoicingSettings` is owner-or-superuser in the API — hidden from an
 // agent as a convenience only, like `DELETED_NAV_ITEM`; the page itself also
 // explains that only an owner can change these.

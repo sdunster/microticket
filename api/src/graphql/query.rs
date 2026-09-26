@@ -21,7 +21,8 @@ use super::auth::{AuthGuard, AuthRequirement, is_member, is_owner};
 use super::dataloader::DatabaseLoader;
 use super::error::ApiError;
 use super::pagination::{build_connection, pagination_args};
-use super::{InstanceId, UserId};
+use super::{InstanceId, ProjectId, UserId};
+use crate::invoicing::{self, money};
 
 /// Metadata for a stored passkey credential — never the credential itself (no
 /// private key material, no raw `passkey_json`).
@@ -1150,6 +1151,165 @@ impl<A: App + HasDb + Send + Sync + 'static> Project<A> {
     }
 }
 
+/// Where a billable item stands relative to invoicing. Every item is
+/// `UNBILLED` until invoices exist (the next PR of the invoicing stack); from
+/// then on, an item on a draft invoice is `DRAFT` and one on a finalized
+/// invoice is `INVOICED`. Defined in full now so the web client's handling
+/// doesn't have to change shape when the other two start appearing.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum BillableItemStatusType {
+    Unbilled,
+    Draft,
+    Invoiced,
+}
+
+/// `billableItems`' filter. `BILLED` means "on any invoice, draft or
+/// finalized" — `attribute_exists(invoice_id)`.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum BillableItemFilterType {
+    All,
+    Unbilled,
+    Billed,
+}
+
+impl From<BillableItemFilterType> for db::BillableItemFilter {
+    fn from(f: BillableItemFilterType) -> Self {
+        match f {
+            BillableItemFilterType::All => Self::All,
+            BillableItemFilterType::Unbilled => Self::Unbilled,
+            BillableItemFilterType::Billed => Self::Billed,
+        }
+    }
+}
+
+/// `createBillableItem`/`updateBillableItem`'s argument — the same full set
+/// of editable fields for both (update is a full replace).
+///
+/// - `date`: `YYYY-MM-DD`, a real calendar day.
+/// - `description`: trimmed, non-empty, ≤ 2000 chars, multi-line allowed.
+/// - `quantity`: a decimal **string** with at most 2 dp, `0 < q ≤ 1,000,000`
+///   (`"2"`, `"1.5"`, `"0.25"`) — a string so no client float ever gets
+///   near it; the server is the one parser (`invoicing::money::parse_quantity`).
+/// - `unitPriceCents`: integer cents, GST-exclusive, `0 ≤ p ≤ 1,000,000,000`.
+#[derive(InputObject, Clone, Debug)]
+pub struct BillableItemInput {
+    pub date: String,
+    pub description: String,
+    pub quantity: String,
+    pub unit_price_cents: i64,
+}
+
+/// A `billable_item` row, exposed over GraphQL to its invoicing instance's
+/// members. See `db::BillableItem`.
+#[derive(Debug, PartialEq)]
+pub struct BillableItem<A: App + HasDb + Send + Sync> {
+    _marker: PhantomData<A>,
+    rec: db::BillableItem,
+}
+
+impl<A: App + HasDb + Send + Sync> BillableItem<A> {
+    pub fn new(rec: db::BillableItem) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec,
+        }
+    }
+}
+
+impl<A: App + HasDb + Send + Sync> Clone for BillableItem<A> {
+    fn clone(&self) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec: self.rec.clone(),
+        }
+    }
+}
+
+#[Object]
+impl<A: App + HasDb + Send + Sync + 'static> BillableItem<A> {
+    async fn id(&self) -> ID {
+        ID(self.rec.id.clone())
+    }
+    /// Dataloaded — a page of items resolves this once per node.
+    async fn project(&self, ctx: &Context<'_>) -> Result<Project<A>> {
+        let loader = ctx.data_unchecked::<DataLoader<DatabaseLoader<A>>>();
+        loader
+            .load_one(ProjectId(ID(self.rec.project_id.clone())))
+            .await
+            .map_err(|e| anyhow!("Failed to load project via DataLoader: {}", e))?
+            .map(Project::new)
+            .ok_or_else(|| anyhow!("Project with ID {} missing", self.rec.project_id))
+    }
+    /// `YYYY-MM-DD`.
+    async fn date(&self) -> &str {
+        &self.rec.date
+    }
+    /// Multi-line; lines starting `* ` or `- ` render as bullets on the
+    /// invoice.
+    async fn description(&self) -> &str {
+        &self.rec.description
+    }
+    /// The quantity as its shortest decimal string (`"2"`, `"1.5"`,
+    /// `"0.25"`) — the same form `BillableItemInput.quantity` accepts, so an
+    /// edit form can round-trip it unchanged.
+    async fn quantity(&self) -> String {
+        money::format_quantity(self.rec.quantity_hundredths)
+    }
+    /// GST-exclusive, in cents.
+    async fn unit_price_cents(&self) -> i64 {
+        self.rec.unit_price_cents
+    }
+    /// round-half-up(quantity × unit price), in cents — computed here, never
+    /// stored, so it can't drift from the two values it's derived from.
+    /// Can exceed 2^31 at the validation bounds (up to 10^15); it is
+    /// serialized as a JSON number, which a JS client holds exactly (it's
+    /// under 2^53).
+    async fn amount_cents(&self) -> i64 {
+        money::line_amount_cents(self.rec.quantity_hundredths, self.rec.unit_price_cents)
+    }
+    /// `UNBILLED` when not on an invoice. An item with an `invoice_id` is
+    /// reported `INVOICED` for now — nothing sets one until invoices land
+    /// (next PR), which will tell `DRAFT` from `INVOICED` by loading the
+    /// invoice.
+    async fn status(&self) -> BillableItemStatusType {
+        if self.rec.invoice_id.is_some() {
+            BillableItemStatusType::Invoiced
+        } else {
+            BillableItemStatusType::Unbilled
+        }
+    }
+    async fn created_at(&self) -> i64 {
+        self.rec.created_at as i64
+    }
+    async fn updated_at(&self) -> i64 {
+        self.rec.updated_at as i64
+    }
+}
+
+/// Default/max page size for `billableItems` — the same numbers as
+/// `tickets`.
+const DEFAULT_BILLABLE_ITEM_PAGE_SIZE: usize = 25;
+const MAX_BILLABLE_ITEM_PAGE_SIZE: usize = 100;
+
+/// `{date}:{id}` — see `db::BillableItemCursor`'s doc comment.
+fn encode_billable_item_cursor(i: &db::BillableItem) -> String {
+    format!("{}:{}", i.date, i.id)
+}
+
+fn decode_billable_item_cursor(cursor: &str) -> Result<db::BillableItemCursor> {
+    let (date, id) = cursor
+        .split_once(':')
+        .ok_or_else(|| anyhow!("Invalid cursor"))?;
+    let date = invoicing::validate_item_date(date).map_err(|_| anyhow!("Invalid cursor"))?;
+    if id.is_empty() {
+        return Err(anyhow!("Invalid cursor"));
+    }
+    Ok(db::BillableItemCursor {
+        date,
+        id: id.to_string(),
+    })
+}
+
 /// Default/max page size for `tickets`, matching seslogin's periods
 /// convention (small default so a queue page render stays cheap; a generous
 /// but bounded max so a client can't force an unbounded scan).
@@ -1485,6 +1645,85 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
             return Ok(None);
         }
         Ok(Some(Project::new(rec)))
+    }
+
+    /// Billable items in an invoicing instance — every project's, or one
+    /// project's when `projectId` is given — as a Relay connection, newest
+    /// `date` first (see `db::Handler::list_billable_items`). Forward-only
+    /// (`first`/`after`). Member of `instanceId`; a support instance is
+    /// rejected with a plain validation error (like `projects`), and a
+    /// `projectId` that doesn't exist or belongs to another instance is
+    /// `NOT_FOUND` either way. Superusers get nothing — they don't pass
+    /// `Member`.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Member(instance_id.to_string()))")]
+    async fn billable_items(
+        &self,
+        ctx: &Context<'_>,
+        instance_id: ID,
+        project_id: Option<ID>,
+        #[graphql(default_with = "BillableItemFilterType::All")] filter: BillableItemFilterType,
+        first: Option<i32>,
+        after: Option<String>,
+    ) -> Result<Connection<String, BillableItem<A>, EmptyFields, EmptyFields>> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let instance = app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+        db::require_instance_kind(&instance, db::InstanceKind::Invoicing)
+            .map_err(|e| anyhow!(e))?;
+        if let Some(project_id) = &project_id {
+            app.db()
+                .get_projects(&[project_id.as_str()])
+                .await?
+                .into_iter()
+                .next()
+                .flatten()
+                .filter(|p| p.instance_id == instance.id)
+                .ok_or_else(|| ApiError::not_found("Project", project_id.as_str()))?;
+        }
+
+        let after_cursor = after
+            .as_deref()
+            .map(decode_billable_item_cursor)
+            .transpose()?;
+        let has_after = after_cursor.is_some();
+        let (page_size, _) = pagination_args(
+            first,
+            None,
+            DEFAULT_BILLABLE_ITEM_PAGE_SIZE,
+            MAX_BILLABLE_ITEM_PAGE_SIZE,
+        )?;
+        let fetch_limit = i32::try_from(page_size.saturating_add(1))
+            .map_err(|_| anyhow!("Requested page is too large"))?;
+        let scope = match &project_id {
+            Some(p) => db::BillableItemScope::Project(p.as_str()),
+            None => db::BillableItemScope::Instance(instance_id.as_str()),
+        };
+        let items = app
+            .db()
+            .list_billable_items(
+                scope,
+                filter.into(),
+                db::ListBillableItemsPage {
+                    after: after_cursor,
+                    limit: fetch_limit,
+                },
+            )
+            .await?;
+
+        Ok(build_connection(
+            items,
+            page_size,
+            false,
+            has_after,
+            false,
+            |i| (encode_billable_item_cursor(i), BillableItem::new(i.clone())),
+        ))
     }
 
     // ── Admin (superuser-only) ──────────────────────────────────────────────
