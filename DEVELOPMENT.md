@@ -78,18 +78,24 @@ make local-seed                 # writes local/seed/synthetic.json into the loca
 make local-clear                # deletes app-written rows (tokens, WebAuthn state, ...), keeps the seed
 ```
 
-`make local-seed` (`api/src/bin/local-seed.rs apply`) writes two seeded instances, an owner and an
-agent, a handful of inbound addresses (including a wildcard), and a ready-made session token for
-each user — all as raw DynamoDB items from `local/seed/synthetic.json`, so their ids are exactly as
-committed. Nothing in the fixture is real: `api/tests/seed_fixtures.rs` pins that every address is
+`make local-seed` (`api/src/bin/local-seed.rs apply`) writes three seeded instances (two support,
+one invoicing), an owner and an agent, a handful of inbound addresses (including a wildcard), two
+fictional invoicing projects, and a ready-made session token for each user — all as raw DynamoDB
+items from `local/seed/synthetic.json`, so their ids are exactly as committed. Nothing in the
+fixture is real: `api/tests/seed_fixtures.rs` pins that every address is
 `@example.com`/`@microticket.test` and refuses anything else.
 
 Seeded accounts (only ever valid against a `local`-prefixed database — never real):
 
-| Role  | Email                     | Instance(s)          | Ready-made token                        |
-| ----- | ------------------------- | --------------------- | ---------------------------------------- |
-| owner | `owner@microticket.test`  | `acme`, `ridgeline`   | `mtu_localdev0000000000000000000owner`  |
-| agent | `agent@microticket.test`  | `acme`                | `mtu_localdev0000000000000000000agent`  |
+| Role  | Email                     | Instance(s)                     | Ready-made token                        |
+| ----- | ------------------------- | -------------------------------- | ---------------------------------------- |
+| owner | `owner@microticket.test`  | `acme`, `ridgeline`, `ledger`    | `mtu_localdev0000000000000000000owner`  |
+| agent | `agent@microticket.test`  | `acme`                           | `mtu_localdev0000000000000000000agent`  |
+
+`ledger` is the seeded **invoicing** instance (`kind: invoicing`) — fictional business/GST/payment
+details and two fictional projects, so the invoicing pages have something to look at without a
+manual `instance create --kind invoicing` first. `acme`/`ridgeline` are plain support instances
+(`kind` absent, per the omit-optional-attributes house rule).
 
 Use a token directly (`Authorization: Bearer mtu_localdev...`) to skip the email-code flow entirely
 when poking at the API by hand (`curl`, GraphiQL at `http://localhost:8000/`), or log in normally
@@ -131,18 +137,24 @@ Bootstrap sequence for a brand-new deployment's first organisation and owner:
 #    effectively case-insensitive — see SCHEMA.md's `user` table entry.
 cargo run --bin cli -- user create owner@yourdomain.com "Your Name"
 
-# 2. Create the instance (the tenant organisation).
+# 2. Create the instance (the tenant organisation). `--kind` defaults to
+#    `support`; pass `--kind invoicing` instead for a second, separate
+#    invoicing instance (no inbound mail, no public submission — see
+#    CLAUDE.md's "Invoicing" house rule). A kind is set once at creation and
+#    is immutable after that.
 cargo run --bin cli -- instance create "Your Company Support" your-company \
     --from-name "Your Company Support" \
     --signature "Thanks, Your Company Support" \
     --public-submission-enabled
+# cargo run --bin cli -- instance create "Your Company Billing" your-company-billing --kind invoicing
 
 # 3. Grant that user the owner role in the instance (also possible over GraphQL via
 #    `addMember`, but that's superuser-only, and bootstrapping the very first
 #    superuser needs this CLI step regardless — see step 5 below).
 cargo run --bin cli -- member add --instance <instance_id> --user owner@yourdomain.com --role owner
 
-# 4. Map the instance's real inbound address(es).
+# 4. Map the instance's real inbound address(es). Support instances only —
+#    an invoicing instance has no inbound mail concept and this is rejected.
 cargo run --bin cli -- address add --instance <instance_id> support@yourdomain.com
 
 # 5. (Optional) Make that user a superuser, so they can manage instances/users/

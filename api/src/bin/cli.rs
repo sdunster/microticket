@@ -12,7 +12,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use microticket::db::{
-    self, Handler, Instance, InstanceUpdateShape, MembershipRole, User, UserUpdateShape,
+    self, Handler, Instance, InstanceKind, InstanceUpdateShape, MembershipRole, User,
+    UserUpdateShape,
 };
 use microticket::dynamodb;
 use microticket::inbound::routing;
@@ -83,9 +84,14 @@ enum InstanceCmd {
         #[arg(long)]
         signature: Option<String>,
         /// Allow anyone to submit a ticket to this instance from the public
-        /// web form, after verifying their email with a code.
+        /// web form, after verifying their email with a code. Support
+        /// instances only — see `--kind`.
         #[arg(long)]
         public_submission_enabled: bool,
+        /// Which of microticket's two functions this instance is for.
+        /// Immutable after creation — see `db::InstanceKind`'s doc comment.
+        #[arg(long, default_value = "support")]
+        kind: KindArg,
     },
     /// List every instance (active and soft-deleted).
     List,
@@ -228,6 +234,21 @@ impl From<RoleArg> for MembershipRole {
     }
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum KindArg {
+    Support,
+    Invoicing,
+}
+
+impl From<KindArg> for InstanceKind {
+    fn from(k: KindArg) -> Self {
+        match k {
+            KindArg::Support => InstanceKind::Support,
+            KindArg::Invoicing => InstanceKind::Invoicing,
+        }
+    }
+}
+
 fn bool_str(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
@@ -242,10 +263,11 @@ fn opt_str(s: &str) -> String {
 
 fn print_instance(i: &Instance) {
     println!(
-        "id: {}\nname: {}\nslug: {}\npublic_submission_enabled: {}\nfrom_name: {}\nsignature: {}\ncreated_at: {}\ndeleted: {}",
+        "id: {}\nname: {}\nslug: {}\nkind: {}\npublic_submission_enabled: {}\nfrom_name: {}\nsignature: {}\ncreated_at: {}\ndeleted: {}",
         i.id,
         i.name,
         i.slug,
+        i.kind.as_str(),
         bool_str(i.public_submission_enabled),
         opt_str(&i.from_name),
         opt_str(&i.signature),
@@ -295,17 +317,25 @@ async fn run_instance(db: &impl Handler, cmd: InstanceCmd, dry_run: bool) -> Res
             from_name,
             signature,
             public_submission_enabled,
+            kind,
         } => {
             db::validate_slug(&slug).map_err(|e| anyhow!(e))?;
             if db.get_instance_id_by_slug(&slug).await?.is_some() {
                 return Err(anyhow!("slug {slug:?} is already taken"));
             }
+            let kind: InstanceKind = kind.into();
+            if public_submission_enabled && kind != InstanceKind::Support {
+                return Err(anyhow!(
+                    "public_submission_enabled only applies to a support instance"
+                ));
+            }
             let from_name = from_name.unwrap_or_else(|| name.clone());
             let signature = signature.unwrap_or_default();
             if dry_run {
                 println!(
-                    "[dry-run] would create instance name={name:?} slug={slug:?} \
-                     from_name={from_name:?} public_submission_enabled={public_submission_enabled}"
+                    "[dry-run] would create instance name={name:?} slug={slug:?} kind={} \
+                     from_name={from_name:?} public_submission_enabled={public_submission_enabled}",
+                    kind.as_str()
                 );
                 return Ok(());
             }
@@ -316,6 +346,7 @@ async fn run_instance(db: &impl Handler, cmd: InstanceCmd, dry_run: bool) -> Res
                     &from_name,
                     &signature,
                     public_submission_enabled,
+                    kind,
                 )
                 .await?;
             print_instance(&instance);
@@ -323,15 +354,16 @@ async fn run_instance(db: &impl Handler, cmd: InstanceCmd, dry_run: bool) -> Res
         InstanceCmd::List => {
             let instances = db.list_instances().await?;
             println!(
-                "{:>12}  {:<20}  {:<20}  {:<7}  {:<7}",
-                "id", "name", "slug", "public", "deleted"
+                "{:>12}  {:<20}  {:<20}  {:<9}  {:<7}  {:<7}",
+                "id", "name", "slug", "kind", "public", "deleted"
             );
             for i in &instances {
                 println!(
-                    "{:>12}  {:<20}  {:<20}  {:<7}  {:<7}",
+                    "{:>12}  {:<20}  {:<20}  {:<9}  {:<7}  {:<7}",
                     i.id,
                     i.name,
                     i.slug,
+                    i.kind.as_str(),
                     bool_str(i.public_submission_enabled),
                     bool_str(i.deleted),
                 );
@@ -368,6 +400,9 @@ async fn run_instance(db: &impl Handler, cmd: InstanceCmd, dry_run: bool) -> Res
             let signature = signature.unwrap_or(current.signature);
             let public_submission_enabled =
                 public_submission_enabled.unwrap_or(current.public_submission_enabled);
+            if public_submission_enabled && current.kind != InstanceKind::Support {
+                bail!("public_submission_enabled only applies to a support instance");
+            }
             if dry_run {
                 println!(
                     "[dry-run] would update instance {id}: name={name:?} from_name={from_name:?} \
@@ -394,7 +429,17 @@ async fn run_instance(db: &impl Handler, cmd: InstanceCmd, dry_run: bool) -> Res
 async fn run_address(db: &impl Handler, cmd: AddressCmd, dry_run: bool) -> Result<()> {
     match cmd {
         AddressCmd::Add { instance, address } => {
-            let instance = db::resolve_instance_id(db, &instance).await?;
+            let instance_id = db::resolve_instance_id(db, &instance).await?;
+            let instance_rec = db
+                .get_instances(&[&instance_id])
+                .await?
+                .into_iter()
+                .next()
+                .flatten()
+                .ok_or_else(|| anyhow!("no instance with id {instance_id}"))?;
+            db::require_instance_kind(&instance_rec, InstanceKind::Support)
+                .map_err(|e| anyhow!(e))?;
+            let instance = instance_id;
             let (normalized, kind) =
                 routing::classify_for_storage(&address).map_err(|e| anyhow!(e))?;
             if let Some(existing) = db.get_inbound_address(&normalized).await? {

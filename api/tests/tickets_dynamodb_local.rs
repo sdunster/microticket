@@ -154,6 +154,7 @@ async fn setup_instance(db: &dynamodb::Handler, label: &str) -> (String, String)
             label,
             "",
             false,
+            db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");

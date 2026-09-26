@@ -9,6 +9,7 @@ import {
   useLazyLoadQuery,
   RelayEnvironmentProvider,
 } from "react-relay";
+import { MemoryRouter, useLocation } from "react-router";
 import { getGraphQLEndpoint } from "../lib/api";
 import { createUnauthenticatedGraphQLEnvironment } from "../lib/environments";
 import { InstanceSwitcher } from "./InstanceSwitcher";
@@ -33,60 +34,85 @@ const harnessQuery = graphql`
   }
 `;
 
-function meResponse() {
-  return {
-    data: {
-      me: {
-        id: "user-1",
-        memberships: [
-          {
-            role: "OWNER",
-            instance: { id: "inst-acme", name: "Acme Support", slug: "acme" },
-          },
-          {
-            role: "AGENT",
-            instance: {
-              id: "inst-ridge",
-              name: "Ridgeline Help Desk",
-              slug: "ridgeline",
-            },
-          },
-        ],
-      },
+const SUPPORT_MEMBERSHIPS = [
+  {
+    role: "OWNER",
+    instance: {
+      id: "inst-acme",
+      name: "Acme Support",
+      slug: "acme",
+      kind: "SUPPORT",
     },
-  };
+  },
+  {
+    role: "AGENT",
+    instance: {
+      id: "inst-ridge",
+      name: "Ridgeline Help Desk",
+      slug: "ridgeline",
+      kind: "SUPPORT",
+    },
+  },
+];
+
+const INVOICING_MEMBERSHIP = {
+  role: "OWNER",
+  instance: {
+    id: "inst-ledger",
+    name: "Ledger Invoicing",
+    slug: "ledger",
+    kind: "INVOICING",
+  },
+};
+
+function meResponse(memberships: unknown[] = SUPPORT_MEMBERSHIPS) {
+  return { data: { me: { id: "user-1", memberships } } };
+}
+
+function mockMe(memberships?: unknown[]) {
+  server.use(
+    relayEndpoint.query("InstanceSwitcherTestQuery", () =>
+      HttpResponse.json(meResponse(memberships)),
+    ),
+  );
+}
+
+function LocationProbe() {
+  return <p data-testid="location">{useLocation().pathname}</p>;
 }
 
 function Harness() {
   const data = useLazyLoadQuery<InstanceSwitcherTestQuery>(harnessQuery, {});
   const [selected, setSelected] = useState<SelectedInstance | null>(null);
   return (
-    <InstanceSwitcher
-      user={data.me}
-      selected={selected}
-      onChange={setSelected}
-    />
+    <>
+      <InstanceSwitcher
+        user={data.me}
+        selected={selected}
+        onChange={setSelected}
+      />
+      <p data-testid="selected-kind">{selected?.kind ?? ""}</p>
+    </>
   );
 }
 
-function renderHarness() {
+function renderHarness(initialPath = "/app/tickets/open") {
   const environment = createUnauthenticatedGraphQLEnvironment();
   return render(
-    <RelayEnvironmentProvider environment={environment}>
-      <Suspense fallback="loading">
-        <Harness />
-      </Suspense>
-    </RelayEnvironmentProvider>,
+    <MemoryRouter initialEntries={[initialPath]}>
+      <RelayEnvironmentProvider environment={environment}>
+        <Suspense fallback="loading">
+          <Harness />
+          <LocationProbe />
+        </Suspense>
+      </RelayEnvironmentProvider>
+    </MemoryRouter>,
   );
 }
 
 describe("InstanceSwitcher", () => {
   it("defaults to the first membership when nothing is stored", async () => {
-    server.use(
-      relayEndpoint.query("InstanceSwitcherTestQuery", () =>
-        HttpResponse.json(meResponse()),
-      ),
-    );
+    mockMe();
     renderHarness();
 
     const select = await screen.findByRole("combobox", { name: "Instance" });
@@ -94,11 +120,7 @@ describe("InstanceSwitcher", () => {
   });
 
   it("persists a selection across a remount (reload)", async () => {
-    server.use(
-      relayEndpoint.query("InstanceSwitcherTestQuery", () =>
-        HttpResponse.json(meResponse()),
-      ),
-    );
+    mockMe();
     const user = UserEvent.setup();
     const { unmount } = renderHarness();
 
@@ -115,5 +137,81 @@ describe("InstanceSwitcher", () => {
       name: "Instance",
     });
     await waitFor(() => expect(secondSelect).toHaveValue("inst-ridge"));
+  });
+
+  it("renders a flat list when every instance is the same kind", async () => {
+    mockMe();
+    renderHarness();
+
+    const select = await screen.findByRole("combobox", { name: "Instance" });
+    await waitFor(() => expect(select).toHaveValue("inst-acme"));
+    expect(select.querySelectorAll("optgroup")).toHaveLength(0);
+    expect(select.querySelectorAll("option")).toHaveLength(2);
+  });
+
+  it("groups instances by kind when the user has both kinds", async () => {
+    mockMe([...SUPPORT_MEMBERSHIPS, INVOICING_MEMBERSHIP]);
+    renderHarness();
+
+    const select = await screen.findByRole("combobox", { name: "Instance" });
+    await waitFor(() => expect(select).toHaveValue("inst-acme"));
+    const groups = select.querySelectorAll("optgroup");
+    expect(Array.from(groups, (g) => g.label)).toEqual([
+      "Support",
+      "Invoicing",
+    ]);
+    expect(
+      Array.from(groups[0].querySelectorAll("option"), (o) => o.value),
+    ).toEqual(["inst-acme", "inst-ridge"]);
+    expect(
+      Array.from(groups[1].querySelectorAll("option"), (o) => o.value),
+    ).toEqual(["inst-ledger"]);
+  });
+
+  it("takes the kind from membership data, not storage", async () => {
+    // Only the id was ever stored — including by builds that predate kinds.
+    localStorage.setItem("mt_selected_instance_id", "inst-ledger");
+    mockMe([...SUPPORT_MEMBERSHIPS, INVOICING_MEMBERSHIP]);
+    renderHarness("/app/projects");
+
+    const select = await screen.findByRole("combobox", { name: "Instance" });
+    await waitFor(() => expect(select).toHaveValue("inst-ledger"));
+    expect(screen.getByTestId("selected-kind")).toHaveTextContent("INVOICING");
+  });
+
+  it("navigates to the other kind's home when switching kind", async () => {
+    mockMe([...SUPPORT_MEMBERSHIPS, INVOICING_MEMBERSHIP]);
+    const user = UserEvent.setup();
+    renderHarness("/app/tickets/all");
+
+    const select = await screen.findByRole("combobox", { name: "Instance" });
+    await waitFor(() => expect(select).toHaveValue("inst-acme"));
+
+    // Same kind: stays on the current page.
+    await user.selectOptions(select, "inst-ridge");
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/app/tickets/all",
+    );
+
+    await user.selectOptions(select, "inst-ledger");
+    expect(screen.getByTestId("location")).toHaveTextContent("/app/projects");
+
+    await user.selectOptions(select, "inst-acme");
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/app/tickets/open",
+    );
+  });
+
+  it("stays on a kind-neutral page when switching kind", async () => {
+    mockMe([...SUPPORT_MEMBERSHIPS, INVOICING_MEMBERSHIP]);
+    const user = UserEvent.setup();
+    renderHarness("/app/settings");
+
+    const select = await screen.findByRole("combobox", { name: "Instance" });
+    await waitFor(() => expect(select).toHaveValue("inst-acme"));
+
+    await user.selectOptions(select, "inst-ledger");
+    expect(screen.getByTestId("selected-kind")).toHaveTextContent("INVOICING");
+    expect(screen.getByTestId("location")).toHaveTextContent("/app/settings");
   });
 });

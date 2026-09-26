@@ -121,6 +121,7 @@ async fn setup_instance(db: &dynamodb::Handler, label: &str) -> (db::Instance, S
             &format!("{label} Support"),
             "",
             false,
+            db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -673,6 +674,7 @@ async fn wildcard_address_routes_correctly() {
             "Wildcard Support",
             "",
             false,
+            db::InstanceKind::Support,
         )
         .await
         .unwrap();

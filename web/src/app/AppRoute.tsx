@@ -8,6 +8,11 @@ import AppShell from "./AppShell";
 import Settings from "./Settings";
 import { TicketListPage } from "./tickets/TicketListPage";
 import { TicketThreadPage } from "./tickets/TicketThreadPage";
+import { ProjectListPage } from "./invoicing/ProjectListPage";
+import { ProjectDetailPage } from "./invoicing/ProjectDetailPage";
+import { InvoicingSettingsPage } from "./invoicing/InvoicingSettingsPage";
+import { useSelectedInstance } from "./SelectedInstanceContext";
+import { homePathForKind } from "./selectedInstance";
 
 // Its own lazy chunk, loaded only once someone actually navigates under
 // `/app/admin/*` — most users are never superusers and never need this
@@ -21,15 +26,23 @@ const AdminRoute = lazyWithReload("admin", () => import("./admin/AdminRoute"));
  * forever, since a superuser gets no ticket access without a real
  * membership (see `CLAUDE.md`'s superuser boundary). Send them to the admin
  * area instead, where they actually have something to do. Anyone else
- * (including a superuser who *is* a member somewhere) keeps the original
- * behavior unchanged.
+ * (including a superuser who *is* a member somewhere) lands on the selected
+ * instance's home page — the ticket queue for a support instance, projects
+ * for an invoicing one. With memberships but no selection yet (the
+ * switcher publishes its initial pick from an effect, one render after
+ * this first mounts), it renders nothing and redirects on the next render,
+ * rather than guessing a kind and bouncing.
  */
 function AppIndexRedirect() {
   const user = useCurrentUser();
-  if (user.isSuperuser && user.memberships.length === 0) {
-    return <Navigate to="admin" replace />;
+  const selected = useSelectedInstance();
+  if (user.memberships.length === 0) {
+    return (
+      <Navigate to={user.isSuperuser ? "admin" : "tickets/open"} replace />
+    );
   }
-  return <Navigate to="tickets/open" replace />;
+  if (!selected) return null;
+  return <Navigate to={homePathForKind(selected.kind)} replace />;
 }
 
 /**
@@ -96,6 +109,12 @@ export default function AppRoute() {
             }
           />
           <Route path="tickets/:id" element={<TicketThreadPage />} />
+          <Route path="projects" element={<ProjectListPage />} />
+          <Route path="projects/:id" element={<ProjectDetailPage />} />
+          <Route
+            path="invoicing-settings"
+            element={<InvoicingSettingsPage />}
+          />
           <Route path="settings" element={<Settings />} />
           <Route
             path="admin/*"

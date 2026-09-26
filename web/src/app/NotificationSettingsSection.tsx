@@ -17,6 +17,7 @@ const notificationSettingsSectionFragment = graphql`
       instance {
         id
         name
+        kind
       }
       notificationSettings {
         newTicket
@@ -79,10 +80,12 @@ function patchFor(key: SettingKey, value: boolean): NotificationSettingsInput {
 }
 
 /**
- * Email notification preferences — one block per instance the caller
- * belongs to, five checkboxes each. `MembershipInfo.notificationSettings`
- * is self-only server-side (see its doc comment), which this only ever
- * reads via `me`, so that guard is never exercised here.
+ * Email notification preferences — one block per *support* instance the
+ * caller belongs to, five checkboxes each (invoicing instances have no
+ * tickets to notify about, so they're left out).
+ * `MembershipInfo.notificationSettings` is self-only server-side (see its
+ * doc comment), which this only ever reads via `me`, so that guard is never
+ * exercised here.
  *
  * `MembershipInfo` carries no `id` field, so a toggle's mutation response
  * can't be merged onto the query's `me.memberships` list by Relay's usual
@@ -150,10 +153,26 @@ export function NotificationSettingsSection({
     });
   }
 
+  // Staff notifications are about ticket activity, which an invoicing
+  // instance never has — its memberships would only be five toggles that
+  // can never fire.
+  const supportMemberships = data.memberships.filter(
+    (m) => m.instance.kind !== "INVOICING",
+  );
+
   if (data.memberships.length === 0) {
     return (
       <p className="text-sm text-ink-muted">
         You have no instance memberships yet.
+      </p>
+    );
+  }
+
+  if (supportMemberships.length === 0) {
+    return (
+      <p className="text-sm text-ink-muted">
+        Email notifications are about ticket activity, so they only apply to
+        support instances — and you aren&apos;t a member of any.
       </p>
     );
   }
@@ -171,7 +190,7 @@ export function NotificationSettingsSection({
         </p>
       )}
 
-      {data.memberships.map((membership) => (
+      {supportMemberships.map((membership) => (
         <div key={membership.instance.id} className="flex flex-col gap-2">
           <h3 className="text-sm font-medium text-ink">
             {membership.instance.name}

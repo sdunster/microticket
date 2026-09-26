@@ -166,7 +166,14 @@ fn build_app_and_schema(db: dynamodb::Handler) -> (Arc<TestApp>, TestSchema) {
 async fn setup_instance(db: &dynamodb::Handler, label: &str) -> (String, String, String) {
     let slug = unique_id(&format!("{label}-slug"));
     let instance = db
-        .create_instance(&unique_id(label), &slug, label, "", false)
+        .create_instance(
+            &unique_id(label),
+            &slug,
+            label,
+            "",
+            false,
+            db::InstanceKind::Support,
+        )
         .await
         .expect("create_instance");
     db.create_inbound_address(
