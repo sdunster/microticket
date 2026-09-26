@@ -21,7 +21,7 @@ use super::auth::{AuthGuard, AuthRequirement, is_member, is_owner};
 use super::dataloader::DatabaseLoader;
 use super::error::ApiError;
 use super::pagination::{build_connection, pagination_args};
-use super::{InstanceId, ProjectId, UserId};
+use super::{InstanceId, InvoiceId, ProjectId, UserId};
 use crate::invoicing::{self, money};
 
 /// Metadata for a stored passkey credential — never the credential itself (no
@@ -204,33 +204,73 @@ impl From<db::Instance> for PublicInstance {
 /// "Invoice to"/seller block and payment text, per CLAUDE.md's "Invoicing"
 /// house rule. `null` for a support instance (see
 /// [`Instance::invoicing_settings`]). Owner-or-superuser to *write*
-/// (`updateInvoicingSettings`), but readable by any member — the same
-/// posture as every other plain `Instance` field.
-#[derive(SimpleObject, Clone, Debug)]
-pub struct InvoicingSettingsInfo {
-    pub business_name: Option<String>,
-    pub business_abn: Option<String>,
-    pub business_address: Option<String>,
-    pub business_phone: Option<String>,
-    pub business_email: Option<String>,
-    pub payment_details: Option<String>,
-    pub gst_registered: bool,
-    /// Defaults to `"AUD"` — see `db::Instance::currency_or_default`.
-    pub currency: String,
+/// (`updateInvoicingSettings`/`setNextInvoiceNumber`), but readable by any
+/// member — the same posture as every other plain `Instance` field.
+///
+/// Generic over `A` (unlike a plain `SimpleObject`) so
+/// [`Self::next_invoice_number`] can read the `counter` row lazily, through
+/// `ctx` — a DB read this field alone needs, so it must not run on every
+/// plain `Instance`/`invoicingSettings` fetch that doesn't ask for it.
+#[derive(Debug, PartialEq)]
+pub struct InvoicingSettingsInfo<A: App + HasDb + Send + Sync> {
+    _marker: PhantomData<A>,
+    rec: db::Instance,
 }
 
-impl From<&db::Instance> for InvoicingSettingsInfo {
-    fn from(i: &db::Instance) -> Self {
+impl<A: App + HasDb + Send + Sync> InvoicingSettingsInfo<A> {
+    pub fn new(rec: db::Instance) -> Self {
         Self {
-            business_name: i.business_name.clone(),
-            business_abn: i.business_abn.clone(),
-            business_address: i.business_address.clone(),
-            business_phone: i.business_phone.clone(),
-            business_email: i.business_email.clone(),
-            payment_details: i.payment_details.clone(),
-            gst_registered: i.gst_registered,
-            currency: i.currency_or_default().to_string(),
+            _marker: PhantomData,
+            rec,
         }
+    }
+}
+
+impl<A: App + HasDb + Send + Sync> Clone for InvoicingSettingsInfo<A> {
+    fn clone(&self) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec: self.rec.clone(),
+        }
+    }
+}
+
+#[Object]
+impl<A: App + HasDb + Send + Sync + 'static> InvoicingSettingsInfo<A> {
+    async fn business_name(&self) -> Option<&str> {
+        self.rec.business_name.as_deref()
+    }
+    async fn business_abn(&self) -> Option<&str> {
+        self.rec.business_abn.as_deref()
+    }
+    async fn business_address(&self) -> Option<&str> {
+        self.rec.business_address.as_deref()
+    }
+    async fn business_phone(&self) -> Option<&str> {
+        self.rec.business_phone.as_deref()
+    }
+    async fn business_email(&self) -> Option<&str> {
+        self.rec.business_email.as_deref()
+    }
+    async fn payment_details(&self) -> Option<&str> {
+        self.rec.payment_details.as_deref()
+    }
+    async fn gst_registered(&self) -> bool {
+        self.rec.gst_registered
+    }
+    /// Defaults to `"AUD"` — see `db::Instance::currency_or_default`.
+    async fn currency(&self) -> String {
+        self.rec.currency_or_default().to_string()
+    }
+    /// `(counter value, or 0 if never finalized) + 1` — the number
+    /// `finalizeInvoice` will assign next, and `setNextInvoiceNumber`'s
+    /// argument shape. Read lazily here (a `counter` `GetItem`), not
+    /// carried on `db::Instance`, so a plain `Instance`/`invoicingSettings`
+    /// fetch that doesn't ask for this field costs nothing extra.
+    async fn next_invoice_number(&self, ctx: &Context<'_>) -> Result<i32> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let counter = app.db().get_invoice_counter(&self.rec.id).await?;
+        Ok(i32::try_from(counter.saturating_add(1)).unwrap_or(i32::MAX))
     }
 }
 
@@ -316,11 +356,11 @@ impl<A: App + HasDb + Send + Sync + 'static> Instance<A> {
     }
     /// This instance's invoicing settings, or `null` for a support instance.
     /// See [`InvoicingSettingsInfo`]'s doc comment.
-    async fn invoicing_settings(&self) -> Option<InvoicingSettingsInfo> {
+    async fn invoicing_settings(&self) -> Option<InvoicingSettingsInfo<A>> {
         if self.rec.kind != db::InstanceKind::Invoicing {
             return None;
         }
-        Some(InvoicingSettingsInfo::from(&self.rec))
+        Some(InvoicingSettingsInfo::new(self.rec.clone()))
     }
     async fn public_submission_enabled(&self) -> bool {
         self.rec.public_submission_enabled
@@ -1205,6 +1245,16 @@ pub struct BillableItemInput {
 pub struct BillableItem<A: App + HasDb + Send + Sync> {
     _marker: PhantomData<A>,
     rec: db::BillableItem,
+    /// Set when this item was resolved *through* an invoice that's already
+    /// been loaded (currently only [`Invoice::items`] and mutations that
+    /// already hold the invoice they just wrote) — `status`/`invoice` use it
+    /// directly, once it's confirmed to actually be this item's invoice,
+    /// instead of visiting `Loader<InvoiceId>`. That loader batches an
+    /// eventually consistent `get_invoices`, so right after a same-request
+    /// write it can serve a replica that hasn't caught up yet; the parent
+    /// invoice here is whatever this resolution just wrote or strongly-read,
+    /// so it's never stale.
+    parent_invoice: Option<db::Invoice>,
 }
 
 impl<A: App + HasDb + Send + Sync> BillableItem<A> {
@@ -1212,6 +1262,20 @@ impl<A: App + HasDb + Send + Sync> BillableItem<A> {
         Self {
             _marker: PhantomData,
             rec,
+            parent_invoice: None,
+        }
+    }
+
+    /// Same as [`Self::new`], but with `parent` — an invoice already known
+    /// (not necessarily loaded via the dataloader) — on hand for
+    /// `status`/`invoice` to use directly. Only actually used when
+    /// `rec.invoice_id` matches `parent.id`; otherwise those fields fall
+    /// back to the loader exactly as [`Self::new`] would.
+    pub fn with_parent_invoice(rec: db::BillableItem, parent: db::Invoice) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec,
+            parent_invoice: Some(parent),
         }
     }
 }
@@ -1221,6 +1285,7 @@ impl<A: App + HasDb + Send + Sync> Clone for BillableItem<A> {
         Self {
             _marker: PhantomData,
             rec: self.rec.clone(),
+            parent_invoice: self.parent_invoice.clone(),
         }
     }
 }
@@ -1267,22 +1332,350 @@ impl<A: App + HasDb + Send + Sync + 'static> BillableItem<A> {
     async fn amount_cents(&self) -> i64 {
         money::line_amount_cents(self.rec.quantity_hundredths, self.rec.unit_price_cents)
     }
-    /// `UNBILLED` when not on an invoice. An item with an `invoice_id` is
-    /// reported `INVOICED` for now — nothing sets one until invoices land
-    /// (next PR), which will tell `DRAFT` from `INVOICED` by loading the
-    /// invoice.
-    async fn status(&self) -> BillableItemStatusType {
-        if self.rec.invoice_id.is_some() {
-            BillableItemStatusType::Invoiced
-        } else {
-            BillableItemStatusType::Unbilled
+    /// `UNBILLED` when not on an invoice; otherwise `DRAFT`/`INVOICED`
+    /// according to that invoice's own status, dataloaded — a page of items
+    /// resolves this once per node, same as [`Self::project`]. Falls back to
+    /// `INVOICED` if the invoice row is somehow missing (data-integrity
+    /// problem, not a normal outcome) — the conservative reading, since an
+    /// `invoice_id` being set at all means this item is *not* plainly
+    /// unbilled.
+    async fn status(&self, ctx: &Context<'_>) -> Result<BillableItemStatusType> {
+        let Some(invoice_id) = &self.rec.invoice_id else {
+            return Ok(BillableItemStatusType::Unbilled);
+        };
+        if let Some(parent) = &self.parent_invoice
+            && &parent.id == invoice_id
+        {
+            return Ok(match parent.status {
+                db::InvoiceStatus::Draft => BillableItemStatusType::Draft,
+                db::InvoiceStatus::Finalized => BillableItemStatusType::Invoiced,
+            });
         }
+        let loader = ctx.data_unchecked::<DataLoader<DatabaseLoader<A>>>();
+        let invoice = loader
+            .load_one(InvoiceId(ID(invoice_id.clone())))
+            .await
+            .map_err(|e| anyhow!("Failed to load invoice via DataLoader: {}", e))?;
+        Ok(match invoice.map(|i| i.status) {
+            Some(db::InvoiceStatus::Draft) => BillableItemStatusType::Draft,
+            Some(db::InvoiceStatus::Finalized) | None => BillableItemStatusType::Invoiced,
+        })
+    }
+    /// The invoice this item is on, or `null` if unbilled. Dataloaded, same
+    /// batching as [`Self::status`] — except when a known parent invoice
+    /// already names it, per `parent_invoice`'s doc comment.
+    async fn invoice(&self, ctx: &Context<'_>) -> Result<Option<Invoice<A>>> {
+        let Some(invoice_id) = &self.rec.invoice_id else {
+            return Ok(None);
+        };
+        if let Some(parent) = &self.parent_invoice
+            && &parent.id == invoice_id
+        {
+            return Ok(Some(Invoice::new(parent.clone())));
+        }
+        let loader = ctx.data_unchecked::<DataLoader<DatabaseLoader<A>>>();
+        let invoice = loader
+            .load_one(InvoiceId(ID(invoice_id.clone())))
+            .await
+            .map_err(|e| anyhow!("Failed to load invoice via DataLoader: {}", e))?;
+        Ok(invoice.map(Invoice::new))
     }
     async fn created_at(&self) -> i64 {
         self.rec.created_at as i64
     }
     async fn updated_at(&self) -> i64 {
         self.rec.updated_at as i64
+    }
+}
+
+/// `invoice.status`, over GraphQL.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum InvoiceStatusType {
+    Draft,
+    Finalized,
+}
+
+impl From<db::InvoiceStatus> for InvoiceStatusType {
+    fn from(s: db::InvoiceStatus) -> Self {
+        match s {
+            db::InvoiceStatus::Draft => Self::Draft,
+            db::InvoiceStatus::Finalized => Self::Finalized,
+        }
+    }
+}
+
+/// `invoices`' filter. `UNPAID`/`PAID` both imply finalized — a draft has no
+/// paid status.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum InvoiceFilterType {
+    All,
+    Draft,
+    Unpaid,
+    Paid,
+}
+
+impl From<InvoiceFilterType> for db::InvoiceListFilter {
+    fn from(f: InvoiceFilterType) -> Self {
+        match f {
+            InvoiceFilterType::All => Self::All,
+            InvoiceFilterType::Draft => Self::Draft,
+            InvoiceFilterType::Unpaid => Self::Unpaid,
+            InvoiceFilterType::Paid => Self::Paid,
+        }
+    }
+}
+
+/// The printed "Invoice to" block — from the project's client fields, per
+/// `invoicing::snapshot::InvoiceSnapshotBillTo`.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct InvoiceBillToInfo {
+    pub name: String,
+    pub abn: Option<String>,
+    pub address: Option<String>,
+}
+
+impl From<invoicing::snapshot::InvoiceSnapshotBillTo> for InvoiceBillToInfo {
+    fn from(b: invoicing::snapshot::InvoiceSnapshotBillTo) -> Self {
+        Self {
+            name: b.name,
+            abn: b.abn,
+            address: b.address,
+        }
+    }
+}
+
+/// The printed seller block — from the instance's business settings, per
+/// `invoicing::snapshot::InvoiceSnapshotSeller`.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct InvoiceSellerInfo {
+    pub name: Option<String>,
+    pub abn: Option<String>,
+    pub address: Option<String>,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+}
+
+impl From<invoicing::snapshot::InvoiceSnapshotSeller> for InvoiceSellerInfo {
+    fn from(s: invoicing::snapshot::InvoiceSnapshotSeller) -> Self {
+        Self {
+            name: s.name,
+            abn: s.abn,
+            address: s.address,
+            phone: s.phone,
+            email: s.email,
+        }
+    }
+}
+
+/// One printed line — per `invoicing::snapshot::InvoiceSnapshotLine`.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct InvoiceLineInfo {
+    pub date: String,
+    pub description: String,
+    pub quantity: String,
+    pub unit_price_cents: i64,
+    pub amount_cents: i64,
+}
+
+impl From<invoicing::snapshot::InvoiceSnapshotLine> for InvoiceLineInfo {
+    fn from(l: invoicing::snapshot::InvoiceSnapshotLine) -> Self {
+        Self {
+            date: l.date,
+            description: l.description,
+            quantity: l.quantity,
+            unit_price_cents: l.unit_price_cents,
+            amount_cents: l.amount_cents,
+        }
+    }
+}
+
+/// An `invoice` row, exposed over GraphQL to its invoicing instance's
+/// members. Every printable field (`title`, `billTo`, `seller`, `lines`,
+/// the totals, `currency`, `gstRegistered`, `paymentDetails`) reads from the
+/// frozen `snapshot` when [`db::Invoice::status`] is `Finalized`, or builds
+/// one live (`invoicing::snapshot::build_snapshot`, `number: None`) when
+/// it's a `Draft` — see [`Self::effective`].
+#[derive(Debug, PartialEq)]
+pub struct Invoice<A: App + HasDb + Send + Sync> {
+    _marker: PhantomData<A>,
+    rec: db::Invoice,
+}
+
+impl<A: App + HasDb + Send + Sync> Invoice<A> {
+    pub fn new(rec: db::Invoice) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec,
+        }
+    }
+}
+
+impl<A: App + HasDb + Send + Sync> Clone for Invoice<A> {
+    fn clone(&self) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec: self.rec.clone(),
+        }
+    }
+}
+
+impl<A: App + HasDb + Send + Sync + 'static> Invoice<A> {
+    /// This invoice's printable content: the frozen snapshot for a
+    /// finalized invoice (a JSON parse, no I/O), or a live
+    /// `invoicing::snapshot::build_snapshot` for a draft (fetches the
+    /// project, instance, and current items). Called independently by each
+    /// content-bearing field below — for a draft, that means each such
+    /// field re-fetches/rebuilds rather than sharing one result, which is
+    /// simple and correct but not the cheapest possible query plan; fine at
+    /// this feature's v1 scale (see CLAUDE.md's "Invoicing" house rule).
+    async fn effective(&self, ctx: &Context<'_>) -> Result<invoicing::snapshot::InvoiceSnapshot> {
+        match self.rec.status {
+            db::InvoiceStatus::Finalized => {
+                let json = self.rec.snapshot.as_deref().ok_or_else(|| {
+                    anyhow!("Finalized invoice {} is missing its snapshot", self.rec.id)
+                })?;
+                serde_json::from_str(json)
+                    .map_err(|e| anyhow!("Invoice {} has a corrupt snapshot: {e}", self.rec.id))
+            }
+            db::InvoiceStatus::Draft => {
+                let app = ctx.data_unchecked::<Arc<A>>();
+                let project = app
+                    .db()
+                    .get_projects(&[self.rec.project_id.as_str()])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .ok_or_else(|| anyhow!("Project with ID {} missing", self.rec.project_id))?;
+                let instance = app
+                    .db()
+                    .get_instances(&[self.rec.instance_id.as_str()])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .ok_or_else(|| anyhow!("Instance with ID {} missing", self.rec.instance_id))?;
+                let items: Vec<db::BillableItem> = if self.rec.item_ids.is_empty() {
+                    vec![]
+                } else {
+                    app.db()
+                        .get_billable_items(&self.rec.item_ids)
+                        .await?
+                        .into_iter()
+                        .flatten()
+                        .collect()
+                };
+                Ok(invoicing::snapshot::build_snapshot(
+                    &instance, &project, &items, None, None,
+                ))
+            }
+        }
+    }
+}
+
+#[Object]
+impl<A: App + HasDb + Send + Sync + 'static> Invoice<A> {
+    async fn id(&self) -> ID {
+        ID(self.rec.id.clone())
+    }
+    async fn status(&self) -> InvoiceStatusType {
+        self.rec.status.into()
+    }
+    async fn number(&self) -> Option<i32> {
+        self.rec.number.map(|n| n as i32)
+    }
+    /// Zero-padded to 3 digits (`"008"`); `null` for a draft. Mirrors
+    /// `invoicing::snapshot::InvoiceSnapshot::display_number` exactly.
+    async fn display_number(&self) -> Option<String> {
+        self.rec.number.map(|n| format!("{n:03}"))
+    }
+    /// `YYYY-MM-DD`; `null` for a draft.
+    async fn issue_date(&self) -> Option<&str> {
+        self.rec.issue_date.as_deref()
+    }
+    /// `YYYY-MM-DD`; `null` means unpaid. Never printed on the invoice.
+    async fn paid_date(&self) -> Option<&str> {
+        self.rec.paid_date.as_deref()
+    }
+    /// Dataloaded — see `TicketMessage::author`'s doc comment.
+    async fn project(&self, ctx: &Context<'_>) -> Result<Project<A>> {
+        let loader = ctx.data_unchecked::<DataLoader<DatabaseLoader<A>>>();
+        loader
+            .load_one(ProjectId(ID(self.rec.project_id.clone())))
+            .await
+            .map_err(|e| anyhow!("Failed to load project via DataLoader: {}", e))?
+            .map(Project::new)
+            .ok_or_else(|| anyhow!("Project with ID {} missing", self.rec.project_id))
+    }
+    /// This invoice's current items — live rows fetched by `item_ids`, for
+    /// both a draft and a finalized invoice (never from the snapshot, which
+    /// carries frozen `InvoiceLine`s, not `BillableItem`s). A strongly
+    /// consistent `BatchGetItem` (`get_billable_items_consistent`), not the
+    /// (eventually consistent) `get_billable_items` — a mutation that just
+    /// attached these items (`createInvoice`/`addInvoiceItems`) returns this
+    /// field in the same response, and each item is handed this invoice as
+    /// its known parent, so `status`/`invoice` resolve from it directly
+    /// rather than the (also eventually consistent) dataloader path.
+    async fn items(&self, ctx: &Context<'_>) -> Result<Vec<BillableItem<A>>> {
+        if self.rec.item_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let items = app
+            .db()
+            .get_billable_items_consistent(&self.rec.item_ids)
+            .await?;
+        Ok(items
+            .into_iter()
+            .flatten()
+            .map(|item| BillableItem::with_parent_invoice(item, self.rec.clone()))
+            .collect())
+    }
+    /// "Tax Invoice" or "Invoice" — see [`Self::effective`].
+    async fn title(&self, ctx: &Context<'_>) -> Result<String> {
+        Ok(self.effective(ctx).await?.title)
+    }
+    async fn bill_to(&self, ctx: &Context<'_>) -> Result<InvoiceBillToInfo> {
+        Ok(self.effective(ctx).await?.bill_to.into())
+    }
+    async fn reference(&self, ctx: &Context<'_>) -> Result<Option<String>> {
+        Ok(self.effective(ctx).await?.reference)
+    }
+    async fn seller(&self, ctx: &Context<'_>) -> Result<InvoiceSellerInfo> {
+        Ok(self.effective(ctx).await?.seller.into())
+    }
+    async fn lines(&self, ctx: &Context<'_>) -> Result<Vec<InvoiceLineInfo>> {
+        Ok(self
+            .effective(ctx)
+            .await?
+            .lines
+            .into_iter()
+            .map(InvoiceLineInfo::from)
+            .collect())
+    }
+    async fn subtotal_cents(&self, ctx: &Context<'_>) -> Result<i64> {
+        Ok(self.effective(ctx).await?.subtotal_cents)
+    }
+    async fn gst_cents(&self, ctx: &Context<'_>) -> Result<i64> {
+        Ok(self.effective(ctx).await?.gst_cents)
+    }
+    async fn total_cents(&self, ctx: &Context<'_>) -> Result<i64> {
+        Ok(self.effective(ctx).await?.total_cents)
+    }
+    async fn currency(&self, ctx: &Context<'_>) -> Result<String> {
+        Ok(self.effective(ctx).await?.currency)
+    }
+    async fn gst_registered(&self, ctx: &Context<'_>) -> Result<bool> {
+        Ok(self.effective(ctx).await?.gst_registered)
+    }
+    async fn payment_details(&self, ctx: &Context<'_>) -> Result<Option<String>> {
+        Ok(self.effective(ctx).await?.payment_details)
+    }
+    async fn created_at(&self) -> i64 {
+        self.rec.created_at as i64
+    }
+    async fn finalized_at(&self) -> Option<i64> {
+        self.rec.finalized_at.map(|t| t as i64)
     }
 }
 
@@ -1306,6 +1699,33 @@ fn decode_billable_item_cursor(cursor: &str) -> Result<db::BillableItemCursor> {
     }
     Ok(db::BillableItemCursor {
         date,
+        id: id.to_string(),
+    })
+}
+
+/// Default/max page size for `invoices` — the same numbers as
+/// `billableItems`/`tickets`.
+const DEFAULT_INVOICE_PAGE_SIZE: usize = 25;
+const MAX_INVOICE_PAGE_SIZE: usize = 100;
+
+/// `{created_at}:{id}` — see `db::InvoiceCursor`'s doc comment.
+fn encode_invoice_cursor(i: &db::Invoice) -> String {
+    format!("{}:{}", i.created_at, i.id)
+}
+
+fn decode_invoice_cursor(cursor: &str) -> Result<db::InvoiceCursor> {
+    let mut parts = cursor.splitn(2, ':');
+    let created_at = parts
+        .next()
+        .ok_or_else(|| anyhow!("Invalid cursor"))?
+        .parse::<u64>()
+        .map_err(|_| anyhow!("Invalid cursor"))?;
+    let id = parts.next().ok_or_else(|| anyhow!("Invalid cursor"))?;
+    if id.is_empty() {
+        return Err(anyhow!("Invalid cursor"));
+    }
+    Ok(db::InvoiceCursor {
+        created_at,
         id: id.to_string(),
     })
 }
@@ -1724,6 +2144,114 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
             false,
             |i| (encode_billable_item_cursor(i), BillableItem::new(i.clone())),
         ))
+    }
+
+    /// Invoices in an invoicing instance — every project's, or one
+    /// project's when `projectId` is given — as a Relay connection, newest
+    /// `createdAt` first (see `db::Handler::list_invoices`). Same posture as
+    /// [`Self::billable_items`]: member of `instanceId`, support instance
+    /// rejected with a plain validation error, `projectId` from another
+    /// instance is `NOT_FOUND`, superusers get nothing.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Member(instance_id.to_string()))")]
+    async fn invoices(
+        &self,
+        ctx: &Context<'_>,
+        instance_id: ID,
+        project_id: Option<ID>,
+        #[graphql(default_with = "InvoiceFilterType::All")] filter: InvoiceFilterType,
+        first: Option<i32>,
+        after: Option<String>,
+    ) -> Result<Connection<String, Invoice<A>, EmptyFields, EmptyFields>> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let instance = app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+        db::require_instance_kind(&instance, db::InstanceKind::Invoicing)
+            .map_err(|e| anyhow!(e))?;
+        if let Some(project_id) = &project_id {
+            app.db()
+                .get_projects(&[project_id.as_str()])
+                .await?
+                .into_iter()
+                .next()
+                .flatten()
+                .filter(|p| p.instance_id == instance.id)
+                .ok_or_else(|| ApiError::not_found("Project", project_id.as_str()))?;
+        }
+
+        let after_cursor = after.as_deref().map(decode_invoice_cursor).transpose()?;
+        let has_after = after_cursor.is_some();
+        let (page_size, _) = pagination_args(
+            first,
+            None,
+            DEFAULT_INVOICE_PAGE_SIZE,
+            MAX_INVOICE_PAGE_SIZE,
+        )?;
+        let fetch_limit = i32::try_from(page_size.saturating_add(1))
+            .map_err(|_| anyhow!("Requested page is too large"))?;
+        let scope = match &project_id {
+            Some(p) => db::InvoiceScope::Project(p.as_str()),
+            None => db::InvoiceScope::Instance(instance_id.as_str()),
+        };
+        let invoices = app
+            .db()
+            .list_invoices(
+                scope,
+                filter.into(),
+                db::ListInvoicesPage {
+                    after: after_cursor,
+                    limit: fetch_limit,
+                },
+            )
+            .await?;
+
+        Ok(build_connection(
+            invoices,
+            page_size,
+            false,
+            has_after,
+            false,
+            |i| (encode_invoice_cursor(i), Invoice::new(i.clone())),
+        ))
+    }
+
+    /// Fetch a single invoice by id. Reachable only by a member of its
+    /// (invoicing) instance — missing, wrong instance, and belonging to a
+    /// support instance are all reported identically — `null` — mirroring
+    /// [`Self::project`]'s no-probing posture. A strongly consistent
+    /// `GetItem` (`get_invoice_consistent`), not the dataloader path: the web
+    /// app navigates straight here right after `createInvoice`/
+    /// `finalizeInvoice`, so an eventually consistent read could still show
+    /// "not found" for an invoice this same request just created.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn invoice(&self, ctx: &Context<'_>, id: ID) -> Result<Option<Invoice<A>>> {
+        let Some(AuthInfo::User { memberships, .. }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        };
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let Some(rec) = app.db().get_invoice_consistent(id.as_str()).await? else {
+            return Ok(None);
+        };
+        if !is_member(memberships, &rec.instance_id) {
+            return Ok(None);
+        }
+        let is_invoicing = app
+            .db()
+            .get_instances(&[rec.instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .is_some_and(|i| i.kind == db::InstanceKind::Invoicing);
+        if !is_invoicing {
+            return Ok(None);
+        }
+        Ok(Some(Invoice::new(rec)))
     }
 
     // ── Admin (superuser-only) ──────────────────────────────────────────────

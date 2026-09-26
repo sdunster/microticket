@@ -54,6 +54,7 @@ function baseItem() {
     unitPriceCents: 9876,
     amountCents: 123450,
     status: "UNBILLED",
+    invoice: null,
     project: {
       __typename: "Project",
       id: "proj-1",

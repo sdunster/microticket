@@ -559,6 +559,123 @@ pub struct ListBillableItemsPage {
     pub limit: i32,
 }
 
+/// `invoice.status`. **Strictly one-way**: `Finalized` never reverts to
+/// `Draft` — no void, no un-finalize, per CLAUDE.md's "Invoicing" house
+/// rule. The only thing that changes on a finalized invoice afterward is
+/// `paid_date`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvoiceStatus {
+    Draft,
+    Finalized,
+}
+
+impl InvoiceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Finalized => "finalized",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "draft" => Some(Self::Draft),
+            "finalized" => Some(Self::Finalized),
+            _ => None,
+        }
+    }
+}
+
+/// An `invoice` row — a project's billable items collected for billing. See
+/// CLAUDE.md's "Invoicing" house rule for the domain rules this shape
+/// exists to support: `item_ids`/`version` back the transactional attach/
+/// detach/finalize machinery in [`Handler`]'s `invoice` methods; everything
+/// from `number` onward is `None` until [`Handler::finalize_invoice`] sets
+/// it, once, forever.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Invoice {
+    pub id: String,
+    pub instance_id: String,
+    pub project_id: String,
+    pub status: InvoiceStatus,
+    /// Optimistic-concurrency counter. Bumped by every write that touches
+    /// `item_ids` (`create_invoice`/`add_invoice_items`/
+    /// `remove_invoice_items`) and by [`Handler::update_billable_item`] when
+    /// editing an item that sits on this (draft) invoice — so a concurrent
+    /// `finalize_invoice`, which conditions on the version it read, fails
+    /// cleanly rather than freezing a snapshot that's already stale.
+    pub version: u64,
+    /// The authoritative set of items on this invoice. Absent (empty)
+    /// attribute is a String Set's only way to be "empty" — see the
+    /// omit-optional-attributes house rule.
+    pub item_ids: Vec<String>,
+    pub created_by_user_id: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    /// Assigned once, at finalization, from the per-instance
+    /// `next_invoice_number` counter. Absent for a draft. Displayed
+    /// zero-padded to 3 digits (`db::Invoice::display_number`); it simply
+    /// grows past 999.
+    pub number: Option<u32>,
+    /// `YYYY-MM-DD`. Absent for a draft; set once, at finalization, never
+    /// changed afterward.
+    pub issue_date: Option<String>,
+    /// Frozen JSON (`invoicing::snapshot::InvoiceSnapshot`, `schema_version:
+    /// 1`) of everything the invoice prints — set once, at finalization.
+    /// Absent for a draft, whose printable content is instead built live
+    /// (`invoicing::snapshot::build_snapshot`) from the project/instance/
+    /// items as they stand right now.
+    pub snapshot: Option<String>,
+    /// Denormalised from the snapshot so listing/sorting never needs to
+    /// parse JSON. Absent for a draft.
+    pub total_cents: Option<i64>,
+    pub finalized_at: Option<u64>,
+    pub finalized_by_user_id: Option<String>,
+    /// Absent means unpaid. Any member may set or clear this on a finalized
+    /// invoice; it is never printed on the invoice itself.
+    pub paid_date: Option<String>,
+}
+
+impl HasID for Invoice {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Which partition an invoice listing reads — mirrors
+/// [`BillableItemScope`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvoiceScope<'a> {
+    Instance(&'a str),
+    Project(&'a str),
+}
+
+/// `invoices`' filter. `Unpaid`/`Paid` both imply `Finalized` — a draft has
+/// no paid status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvoiceListFilter {
+    All,
+    Draft,
+    Unpaid,
+    Paid,
+}
+
+/// Keyset cursor for an invoice listing: `{created_at}:{id}`, mirroring
+/// [`BillableItemCursor`]/[`TicketCursor`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvoiceCursor {
+    pub created_at: u64,
+    pub id: String,
+}
+
+/// Forward-only (`first`/`after`), newest `created_at` first — mirrors
+/// [`ListBillableItemsPage`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListInvoicesPage {
+    pub after: Option<InvoiceCursor>,
+    pub limit: i32,
+}
+
 /// `inbound_address.kind`: whether a row matches one exact address or every
 /// address at a domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1435,18 +1552,36 @@ pub trait Handler: Sync {
         &self,
         ids: &[T],
     ) -> impl Future<Output = Result<Vec<Option<BillableItem>>>> + Send;
-    /// Apply `change`, conditional on the row existing **and having no
-    /// `invoice_id`**. Returns `Ok(false)` (nothing written) when that
-    /// condition fails — the row vanished, or it was put on an invoice
-    /// between the caller's read and this write — so the caller can report a
-    /// conflict instead of silently editing a billed line.
+    /// Apply `change`. `invoice_id` must be the item's *current* `invoice_id`
+    /// (the caller already has the row, from `require_billable_item_member`
+    /// or equivalent) and decides which of two write shapes this uses:
+    ///
+    /// - `None` (unbilled item): a plain conditional `UpdateItem`
+    ///   (`attribute_exists(id) AND attribute_not_exists(invoice_id)`) —
+    ///   unchanged from before invoices existed.
+    /// - `Some(invoice_id)` (item on a draft invoice — the caller is
+    ///   expected to have already rejected a *finalized* one): a
+    ///   `TransactWriteItems` that also bumps that invoice's `version`,
+    ///   conditioned on the invoice still being `status = draft`. This is
+    ///   what makes a concurrent `finalize_invoice` (which reads a `version`
+    ///   before this call and conditions its write on it) fail cleanly
+    ///   instead of freezing a snapshot mid-edit.
+    ///
+    /// Returns `Ok(false)` (nothing written) when either path's condition(s)
+    /// fail — the row vanished, was put on an invoice between the caller's
+    /// read and this write, or (the `Some` path) its invoice was finalized
+    /// concurrently — so the caller can report a conflict instead of
+    /// silently editing a billed/frozen line.
     fn update_billable_item(
         &self,
         id: &str,
+        invoice_id: Option<&str>,
         change: BillableItemUpdateShape<'_>,
     ) -> impl Future<Output = Result<bool>> + Send;
     /// Delete, with the same "exists and unbilled" condition and `Ok(false)`
-    /// contract as [`Self::update_billable_item`].
+    /// contract as [`Self::update_billable_item`]'s `None` path. Deleting an
+    /// item on any invoice (draft or finalized) is refused — see
+    /// CLAUDE.md's "Invoicing" house rule.
     fn delete_billable_item(&self, id: &str) -> impl Future<Output = Result<bool>> + Send;
     /// One page of billable items, newest `date` first (ties in DynamoDB's
     /// own index order, i.e. by `id`), keyset-paginated. `filter` is applied
@@ -1460,6 +1595,166 @@ pub trait Handler: Sync {
         filter: BillableItemFilter,
         page: ListBillableItemsPage,
     ) -> impl Future<Output = Result<Vec<BillableItem>>> + Send;
+    /// Same contract as [`Self::get_billable_items`], but a strongly
+    /// consistent `BatchGetItem` — used only by `finalize_invoice`'s own
+    /// step 2 (CLAUDE.md's "finalize algorithm"), which must see every
+    /// item's *just-written* `invoice_id`, not a possibly-stale replica.
+    fn get_billable_items_consistent<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> impl Future<Output = Result<Vec<Option<BillableItem>>>> + Send;
+
+    // ── invoice ───────────────────────────────────────────────────────────
+    //
+    // `status`, `number`, `version`, and `snapshot` are DynamoDB reserved words: every
+    // expression that names one aliases it (`#status`, `#num`, `#v`, `#snap`).
+    //
+    /// Batch-fetch by id, eventually consistent — the dataloader path
+    /// (`Loader<InvoiceId>`, `BillableItem.invoice`/`.status`,
+    /// `Invoice.project`-shaped lookups elsewhere) and `invoice(id)`'s data
+    /// source. Use [`Self::get_invoice_consistent`] instead wherever the
+    /// *current* `version`/`status`/`item_ids` drive a subsequent
+    /// conditional write (every invoice mutation's authorization fetch).
+    fn get_invoices<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> impl Future<Output = Result<Vec<Option<Invoice>>>> + Send;
+    /// A strongly consistent `GetItem` by id — same reasoning as
+    /// [`Self::get_billable_items_consistent`]: every invoice mutation reads
+    /// the row, checks `status`/`version`, and conditions its write on what
+    /// it just read, so a replica lagging behind the caller's own most
+    /// recent write (e.g. two mutations back to back) must never be served
+    /// here.
+    fn get_invoice_consistent(
+        &self,
+        id: &str,
+    ) -> impl Future<Output = Result<Option<Invoice>>> + Send;
+    /// Create a draft invoice and attach `item_ids` to it in one
+    /// `TransactWriteItems`: `Put` the invoice (`status = draft`, `version =
+    /// 1`, `item_ids`) plus, for each item, `Update … SET invoice_id`
+    /// conditioned on `attribute_not_exists(invoice_id) AND project_id =
+    /// :project_id`. The invoice's own `Put` is conditioned on
+    /// `attribute_not_exists(id)` (the same astronomically-unlikely nanoid
+    /// guard every other `create_*` uses). `item_ids` must be non-empty and
+    /// is **not re-validated here** — the caller (`createInvoice`) is
+    /// expected to have already checked every id belongs to `project_id`
+    /// and is currently unbilled, for a clear error message; this call
+    /// re-checks it atomically via the transaction's own per-item
+    /// condition. Returns `Ok(None)` (nothing written) if that condition
+    /// failed for any item — a race between the caller's check and this
+    /// write, since the pre-check already covers the ordinary case.
+    fn create_invoice(
+        &self,
+        instance_id: &str,
+        project_id: &str,
+        item_ids: &[String],
+        created_by_user_id: &str,
+    ) -> impl Future<Output = Result<Option<Invoice>>> + Send;
+    /// Add `item_ids` to a draft invoice: one `TransactWriteItems` that `ADD`s
+    /// them to the invoice's `item_ids` set and bumps `version` (conditioned
+    /// on `status = draft AND version = expected_version`), plus, for each
+    /// item, `Update … SET invoice_id` conditioned on
+    /// `attribute_not_exists(invoice_id) AND project_id = :project_id` — the
+    /// same per-item condition as [`Self::create_invoice`]. `Ok(false)` on
+    /// any condition failure (the draft changed concurrently, or an item is
+    /// no longer eligible).
+    fn add_invoice_items(
+        &self,
+        invoice_id: &str,
+        project_id: &str,
+        item_ids: &[String],
+        expected_version: u64,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// Remove `item_ids` from a draft invoice: the mirror image of
+    /// [`Self::add_invoice_items`] — `DELETE`s them from `item_ids` (same
+    /// `status`/`version` condition and `version` bump) plus, for each item,
+    /// `REMOVE invoice_id` conditioned on `invoice_id = :invoice_id`.
+    /// Removing every item (an empty draft) is allowed; finalizing one is
+    /// not (checked in the GraphQL layer, not here).
+    fn remove_invoice_items(
+        &self,
+        invoice_id: &str,
+        item_ids: &[String],
+        expected_version: u64,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// Delete a draft invoice: `Delete` the invoice row (conditioned on
+    /// `status = draft AND version = expected_version`) plus, for each of
+    /// `item_ids` (the invoice's own, as the caller last read them),
+    /// `REMOVE invoice_id` conditioned on `invoice_id = :invoice_id` — same
+    /// per-item shape as [`Self::remove_invoice_items`].
+    fn delete_invoice(
+        &self,
+        invoice_id: &str,
+        item_ids: &[String],
+        expected_version: u64,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// The finalize write — step 6 of CLAUDE.md's "finalize algorithm". A
+    /// single conditional `UpdateItem` (**not** a transaction: nothing else
+    /// is written here, since every item's `invoice_id` already points at
+    /// this invoice from the moment it was attached), conditioned on
+    /// `status = draft AND version = expected_version`, setting
+    /// `status=finalized`, `number`, `issue_date`, `snapshot`,
+    /// `total_cents`, `finalized_at`, `finalized_by_user_id`, and bumping
+    /// `version`. Every other step of the algorithm (reading the draft and
+    /// its items, allocating `number` from the counter, building the
+    /// snapshot) happens in the caller (`graphql::mutations::finalize_invoice`)
+    /// before this is called — `number` having already been allocated by
+    /// the time this runs is exactly why a failed condition here leaves a
+    /// *gap* in the numbering, never a duplicate (see `SCHEMA.md`'s "Known
+    /// issues"). `Ok(false)` on a version/status mismatch — a concurrent
+    /// edit or a second finalize racing this one.
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_invoice(
+        &self,
+        invoice_id: &str,
+        expected_version: u64,
+        number: u32,
+        issue_date: &str,
+        snapshot_json: &str,
+        total_cents: i64,
+        finalized_by_user_id: &str,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// Set (`Some`) or clear (`None`, `REMOVE`d per the omit-optional-
+    /// attributes house rule) `paid_date` on a finalized invoice.
+    /// Conditioned on `attribute_exists(id) AND status = finalized` — a
+    /// draft cannot be marked paid. `Ok(false)` if the row is missing or not
+    /// finalized.
+    fn set_invoice_paid(
+        &self,
+        invoice_id: &str,
+        paid_date: Option<&str>,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// Atomically allocate the next invoice number via `UpdateItem ADD` on
+    /// `counter` (`id = instance_id`, attribute `next_invoice_number`) —
+    /// the invoicing counterpart of [`Self::increment_ticket_counter`], same
+    /// gap-not-duplicate reasoning.
+    fn increment_invoice_counter(
+        &self,
+        instance_id: &str,
+    ) -> impl Future<Output = Result<u64>> + Send;
+    /// Read the counter's current value without incrementing it — `0` if
+    /// the attribute is absent (no invoice finalized yet). Backs
+    /// `InvoicingSettingsInfo.nextInvoiceNumber` (`= this + 1`), read lazily
+    /// by that one field's resolver rather than on every `Instance` fetch.
+    fn get_invoice_counter(&self, instance_id: &str) -> impl Future<Output = Result<u64>> + Send;
+    /// `setNextInvoiceNumber`'s write path: set `next_invoice_number =
+    /// new_value`, conditioned on `attribute_not_exists(next_invoice_number)
+    /// OR next_invoice_number <= :new_value` — forward-only. `Ok(false)`
+    /// when the condition fails ("can only move forward").
+    fn set_next_invoice_number(
+        &self,
+        instance_id: &str,
+        new_value: u64,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// One page of an invoice listing, newest `created_at` first — mirrors
+    /// [`Self::list_billable_items`] exactly, including the "no `Limit` on a
+    /// filtered query" rule.
+    fn list_invoices(
+        &self,
+        scope: InvoiceScope<'_>,
+        filter: InvoiceListFilter,
+        page: ListInvoicesPage,
+    ) -> impl Future<Output = Result<Vec<Invoice>>> + Send;
 
     // ── ticket ────────────────────────────────────────────────────────────
     fn get_tickets<T: AsRef<str> + Sync>(

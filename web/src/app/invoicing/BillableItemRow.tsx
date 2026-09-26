@@ -25,6 +25,9 @@ const billableItemRowFragment = graphql`
     unitPriceCents
     amountCents
     status
+    invoice {
+      id
+    }
     project {
       id
       name
@@ -120,6 +123,20 @@ export function BillableItemHeader({
  * Edit/Delete. Edit swaps the row for a {@link BillableItemForm}; Delete
  * asks for a second click. `onChanged` runs after a successful edit so the
  * list can refetch (a changed date moves the row).
+ *
+ * Two more, independent affordances share the same trailing cell:
+ * - `selectable`: an unbilled row gets a checkbox (the project page's
+ *   "create invoice from selected" flow) — `onToggleSelect`/`selectedIds`
+ *   drive it, the parent owns the selection; `onDeleted` tells it to drop a
+ *   deleted item's id from that selection too.
+ * - `onRemove`: renders a "Remove" button instead of Edit/Delete — the
+ *   invoice detail page's own items-on-this-invoice list, which never edits
+ *   in place, only detaches an item back to unbilled.
+ *
+ * A `DRAFT`/`INVOICED` item's status badge links to its invoice
+ * (`data.invoice`); an `UNBILLED` one, or the data-integrity fallback where
+ * `invoice` is somehow missing (see `BillableItem.status`'s doc comment),
+ * renders as plain text instead of a dead link.
  */
 export function BillableItemRow({
   item,
@@ -128,6 +145,12 @@ export function BillableItemRow({
   currency,
   connectionId,
   onChanged,
+  selectable = false,
+  selectedIds,
+  onToggleSelect,
+  onRemove,
+  removing = false,
+  onDeleted,
 }: {
   item: BillableItemRow_item$key;
   showProject: boolean;
@@ -136,6 +159,19 @@ export function BillableItemRow({
   /** The list's connection id, for `@deleteEdge`. */
   connectionId: string;
   onChanged: () => void;
+  /** Show a checkbox on unbilled rows for bulk invoice creation. */
+  selectable?: boolean;
+  selectedIds?: ReadonlySet<string>;
+  onToggleSelect?: (id: string) => void;
+  /** Present on the invoice detail page's own items list: a "Remove"
+   * button in place of Edit/Delete, detaching the item from its invoice. */
+  onRemove?: (id: string) => void;
+  removing?: boolean;
+  /** Called after a successful delete, so a parent tracking a selection
+   * (the project page's "create invoice from selected" checkboxes) can drop
+   * this id — otherwise it lingers in that selection with no checkbox left
+   * to untick, and submitting it fails `NOT_FOUND`. */
+  onDeleted?: (id: string) => void;
 }) {
   const data = useFragment(billableItemRowFragment, item);
   const [editing, setEditing] = useState(false);
@@ -162,7 +198,12 @@ export function BillableItemRow({
     `,
   );
 
-  const canEdit = editable && data.status === "UNBILLED";
+  // A draft invoice's items stay editable (the write bumps the invoice's
+  // version — see `updateBillableItem`'s doc comment); only unbilled ones
+  // may be deleted outright, regardless of the invoice's own status.
+  const canEdit =
+    editable && (data.status === "UNBILLED" || data.status === "DRAFT");
+  const canDelete = editable && data.status === "UNBILLED";
 
   if (editing) {
     return (
@@ -229,11 +270,20 @@ export function BillableItemRow({
             </Link>
           )}
         </div>
-        <span
-          className={`${itemStatusBadgeBase} ${itemStatusBadge[data.status] ?? ""} self-start lg:order-7 lg:justify-self-start`}
-        >
-          {itemStatusLabel[data.status] ?? data.status.toLowerCase()}
-        </span>
+        {data.invoice ? (
+          <Link
+            to={`/app/invoices/${data.invoice.id}`}
+            className={`${itemStatusBadgeBase} ${itemStatusBadge[data.status] ?? ""} self-start hover:underline lg:order-7 lg:justify-self-start`}
+          >
+            {itemStatusLabel[data.status] ?? data.status.toLowerCase()}
+          </Link>
+        ) : (
+          <span
+            className={`${itemStatusBadgeBase} ${itemStatusBadge[data.status] ?? ""} self-start lg:order-7 lg:justify-self-start`}
+          >
+            {itemStatusLabel[data.status] ?? data.status.toLowerCase()}
+          </span>
+        )}
       </div>
 
       <div className="min-w-0 lg:order-3">
@@ -261,8 +311,19 @@ export function BillableItemRow({
         </span>
       </div>
 
-      {editable && (
+      {(editable || onRemove) && (
         <div className="flex flex-wrap items-center gap-1 lg:order-8 lg:-my-1 lg:justify-end">
+          {selectable && data.status === "UNBILLED" && (
+            <label className="mr-1 flex items-center gap-1.5 text-sm text-ink-muted">
+              <span className="sr-only">Select for invoice</span>
+              <input
+                type="checkbox"
+                checked={selectedIds?.has(data.id) ?? false}
+                onChange={() => onToggleSelect?.(data.id)}
+                className="size-4 rounded-sm border-line text-accent focus:ring-2 focus:ring-accent/25"
+              />
+            </label>
+          )}
           {canEdit && !confirmingDelete && (
             <>
               <button
@@ -275,16 +336,28 @@ export function BillableItemRow({
               >
                 Edit
               </button>
-              <button
-                type="button"
-                className={`${actionButton} text-red-700 dark:text-red-400`}
-                onClick={() => setConfirmingDelete(true)}
-              >
-                Delete
-              </button>
+              {canDelete && (
+                <button
+                  type="button"
+                  className={`${actionButton} text-red-700 dark:text-red-400`}
+                  onClick={() => setConfirmingDelete(true)}
+                >
+                  Delete
+                </button>
+              )}
             </>
           )}
-          {canEdit && confirmingDelete && (
+          {onRemove && (
+            <button
+              type="button"
+              className={`${actionButton} text-red-700 disabled:opacity-60 dark:text-red-400`}
+              disabled={removing}
+              onClick={() => onRemove(data.id)}
+            >
+              {removing ? "Removing…" : "Remove"}
+            </button>
+          )}
+          {canDelete && confirmingDelete && (
             <>
               <button
                 type="button"
@@ -294,6 +367,7 @@ export function BillableItemRow({
                   setError(null);
                   commitDelete({
                     variables: { id: data.id, connections: [connectionId] },
+                    onCompleted: () => onDeleted?.(data.id),
                     onError: (err) => {
                       setConfirmingDelete(false);
                       setError(

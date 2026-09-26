@@ -11,6 +11,8 @@ import { TicketThreadPage } from "./tickets/TicketThreadPage";
 import { ProjectListPage } from "./invoicing/ProjectListPage";
 import { ProjectDetailPage } from "./invoicing/ProjectDetailPage";
 import { BillableItemListPage } from "./invoicing/BillableItemListPage";
+import { InvoiceListPage } from "./invoicing/InvoiceListPage";
+import { InvoiceDetailPage } from "./invoicing/InvoiceDetailPage";
 import { InvoicingSettingsPage } from "./invoicing/InvoicingSettingsPage";
 import { useSelectedInstance } from "./SelectedInstanceContext";
 import { homePathForKind } from "./selectedInstance";
@@ -28,7 +30,7 @@ const AdminRoute = lazyWithReload("admin", () => import("./admin/AdminRoute"));
  * membership (see `CLAUDE.md`'s superuser boundary). Send them to the admin
  * area instead, where they actually have something to do. Anyone else
  * (including a superuser who *is* a member somewhere) lands on the selected
- * instance's home page — the ticket queue for a support instance, projects
+ * instance's home page — the ticket queue for a support instance, invoices
  * for an invoicing one. With memberships but no selection yet (the
  * switcher publishes its initial pick from an effect, one render after
  * this first mounts), it renders nothing and redirects on the next render,
@@ -110,6 +112,8 @@ export default function AppRoute() {
             }
           />
           <Route path="tickets/:id" element={<TicketThreadPage />} />
+          <Route path="invoices" element={<InvoiceListPage />} />
+          <Route path="invoices/:id" element={<InvoiceDetailPage />} />
           <Route path="projects" element={<ProjectListPage />} />
           <Route path="projects/:id" element={<ProjectDetailPage />} />
           <Route path="billable-items" element={<BillableItemListPage />} />

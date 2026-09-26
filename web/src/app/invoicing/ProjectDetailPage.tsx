@@ -9,6 +9,7 @@ import { ButtonLink } from "../../components/ui/Button";
 import { RequireInvoicingInstance } from "./RequireInvoicingInstance";
 import { ProjectEditForm } from "./ProjectEditForm";
 import { ProjectBillableItems } from "./ProjectBillableItems";
+import { ProjectInvoices } from "./ProjectInvoices";
 
 const projectDetailPageQuery = graphql`
   query ProjectDetailPageQuery($id: ID!) @throwOnFieldError {
@@ -80,7 +81,10 @@ function Content({ id }: { id: string }) {
         currency={project.instance.invoicingSettings?.currency ?? "AUD"}
         archived={project.archived}
       />
-      {/* The project's invoices section goes here, below its items. */}
+      <ProjectInvoices
+        instanceId={project.instance.id}
+        projectId={project.id}
+      />
     </div>
   );
 }

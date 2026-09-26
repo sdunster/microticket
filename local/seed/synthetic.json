@@ -542,7 +542,7 @@
     ],
     "billable_item": [
       {
-        "_comment": "Fictional billable items on the seeded invoicing instance, all unbilled (invoices arrive in a later PR). Quantities are hundredths (300 = 3), prices are cents (15000 = 150.00).",
+        "_comment": "Fictional billable items on the seeded invoicing instance. Quantities are hundredths (300 = 3), prices are cents (15000 = 150.00). Billed onto the seeded draft invoice below (invoice_id set) — the rest stay unbilled.",
         "id": { "S": "SeedItem0001" },
         "instance_id": { "S": "SeedLedger01" },
         "project_id": { "S": "SeedProj0001" },
@@ -550,12 +550,13 @@
         "description": { "S": "Discovery workshop" },
         "quantity_hundredths": { "N": "300" },
         "unit_price_cents": { "N": "15000" },
+        "invoice_id": { "S": "SeedInvoice1" },
         "created_by_user_id": { "S": "SeedOwnerUsr" },
         "created_at": { "N": "1785715200" },
         "updated_at": { "N": "1785715200" }
       },
       {
-        "_comment": "A multi-line description with bullet lines, quantity 1 at a fixed price.",
+        "_comment": "A multi-line description with bullet lines, quantity 1 at a fixed price. Also billed onto the seeded draft invoice below.",
         "id": { "S": "SeedItem0002" },
         "instance_id": { "S": "SeedLedger01" },
         "project_id": { "S": "SeedProj0001" },
@@ -563,6 +564,7 @@
         "description": { "S": "Homepage and product page designs\n* three homepage concepts\n* one round of revisions" },
         "quantity_hundredths": { "N": "100" },
         "unit_price_cents": { "N": "240000" },
+        "invoice_id": { "S": "SeedInvoice1" },
         "created_by_user_id": { "S": "SeedOwnerUsr" },
         "created_at": { "N": "1786320000" },
         "updated_at": { "N": "1786320000" }
@@ -629,6 +631,20 @@
         "created_by_user_id": { "S": "SeedOwnerUsr" },
         "created_at": { "N": "1788138000" },
         "updated_at": { "N": "1788138000" }
+      }
+    ],
+    "invoice": [
+      {
+        "_comment": "A fictional draft invoice on the seeded invoicing instance, collecting two of SeedProj0001's items (SeedItem0001, SeedItem0002 — both stamped with this invoice's id above) — exercises the invoice detail page's draft state without a manual createInvoice first. Deliberately left as a draft: finalizing consumes the per-instance counter, and a seeded fixture shouldn't pre-empt the counter a fresh local stack's first real finalize would use.",
+        "id": { "S": "SeedInvoice1" },
+        "instance_id": { "S": "SeedLedger01" },
+        "project_id": { "S": "SeedProj0001" },
+        "status": { "S": "draft" },
+        "version": { "N": "1" },
+        "item_ids": { "SS": ["SeedItem0001", "SeedItem0002"] },
+        "created_by_user_id": { "S": "SeedOwnerUsr" },
+        "created_at": { "N": "1787200000" },
+        "updated_at": { "N": "1787200000" }
       }
     ],
     "counter": [

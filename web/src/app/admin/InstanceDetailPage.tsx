@@ -12,6 +12,7 @@ import { MembersSection } from "./MembersSection";
 import { InboundAddressesSection } from "./InboundAddressesSection";
 import { ApiTokensSection } from "./ApiTokensSection";
 import { InvoicingSettingsForm } from "../invoicing/InvoicingSettingsForm";
+import { InvoiceNumberingForm } from "../invoicing/InvoiceNumberingForm";
 
 const instanceDetailPageQuery = graphql`
   query InstanceDetailPageQuery($id: ID!) @throwOnFieldError {
@@ -20,6 +21,7 @@ const instanceDetailPageQuery = graphql`
       kind
       ...InstanceEditForm_instance
       ...InvoicingSettingsForm_instance
+      ...InvoiceNumberingForm_instance
       ...InstanceDeleteControl_instance
       ...MembersSection_instance
       ...InboundAddressesSection_instance
@@ -65,7 +67,12 @@ function Content({ id }: { id: string }) {
         ← Back to instances
       </ButtonLink>
       <InstanceEditForm instance={data.adminInstance} />
-      {isInvoicing && <InvoicingSettingsForm instance={data.adminInstance} />}
+      {isInvoicing && (
+        <>
+          <InvoicingSettingsForm instance={data.adminInstance} />
+          <InvoiceNumberingForm instance={data.adminInstance} />
+        </>
+      )}
       <MembersSection instance={data.adminInstance} query={data} />
       {!isInvoicing && (
         <>

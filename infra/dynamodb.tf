@@ -514,6 +514,63 @@ resource "aws_dynamodb_table" "billable_item" {
   }
 }
 
+# ── invoice ──────────────────────────────────────────────────────────────────
+# A project's billable items collected for billing — see CLAUDE.md's
+# "Invoicing" house rule. `created_at` (N) is the sort key of both listing
+# GSIs, newest first. `status`, `number`, and `version` are DynamoDB
+# reserved words, so every expression that names one aliases it.
+# Attach/detach/finalize use TransactWriteItems (Update/Put/Delete items
+# only, no ConditionCheck) against this table and `billable_item` together;
+# IAM authorises each item via the existing PutItem/UpdateItem/DeleteItem grants.
+
+resource "aws_dynamodb_table" "invoice" {
+  name                        = "${var.db_prefix}_invoice"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "id"
+  deletion_protection_enabled = true
+
+  point_in_time_recovery {
+    enabled                 = true
+    recovery_period_in_days = 35
+  }
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+  attribute {
+    name = "instance_id"
+    type = "S"
+  }
+  attribute {
+    name = "project_id"
+    type = "S"
+  }
+  attribute {
+    name = "created_at"
+    type = "N"
+  }
+
+  # The instance-wide invoices list. ALL: every field the list needs (status,
+  # number, total, project) is projected, and the DRAFT/UNPAID/PAID filter
+  # runs as a FilterExpression over the projected rows.
+  global_secondary_index {
+    name            = "instance_id-created_at-index"
+    hash_key        = "instance_id"
+    range_key       = "created_at"
+    projection_type = "ALL"
+  }
+
+  # One project's invoices — the project page's list. ALL for the same
+  # reason.
+  global_secondary_index {
+    name            = "project_id-created_at-index"
+    hash_key        = "project_id"
+    range_key       = "created_at"
+    projection_type = "ALL"
+  }
+}
+
 # ── webauthn_credential ──────────────────────────────────────────────────────
 
 resource "aws_dynamodb_table" "webauthn_credential" {

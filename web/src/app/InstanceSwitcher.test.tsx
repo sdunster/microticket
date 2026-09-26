@@ -194,7 +194,7 @@ describe("InstanceSwitcher", () => {
     );
 
     await user.selectOptions(select, "inst-ledger");
-    expect(screen.getByTestId("location")).toHaveTextContent("/app/projects");
+    expect(screen.getByTestId("location")).toHaveTextContent("/app/invoices");
 
     await user.selectOptions(select, "inst-acme");
     expect(screen.getByTestId("location")).toHaveTextContent(

@@ -216,18 +216,47 @@ local setup, and `SCHEMA.md` for the data model.
     inputs. An item is authorised through its project (`createBillableItem`) or its own
     `instance_id` (id-only update/delete) — `NOT_FOUND` for missing and not-yours alike, like
     `updateProject`. An archived project takes no new items. `invoice_id` (absent = unbilled) is
-    the item↔invoice link: update/delete refuse an item that has one, with `CONFLICT`, both up
-    front and in the write's condition expression. `date` (`YYYY-MM-DD`, canonical form only) is
-    both listing GSIs' sort key **and a DynamoDB reserved word** — alias it (`#d`) in any
-    expression.
-  - **Superusers get no access to projects, billable items (or, in a later PR, invoices) — same
-    boundary as tickets, unwidened.** A superuser doesn't pass `Member`, so `projects`/`project`/
-    `createProject`/`billableItems`/`createBillableItem` all reject one exactly as they would any
-    other non-member; only a real
-    membership row grants access, mirroring the existing "superuser is admin + instance settings,
-    never ticket access" boundary this project has had since the superuser feature landed. Don't
-    add a superuser carve-out here without a matching, explicit reason — see the "Superuser
-    boundary" entry above.
+    the item↔invoice link — `delete` always refuses an item that has one, `CONFLICT`, both up front
+    and in the write's condition expression; `update` narrows that to "refuses an item on a
+    *finalized* invoice" — an item on a *draft* invoice stays editable, in a transaction that also
+    bumps the draft's `version` (see the invoices entry below). `date` (`YYYY-MM-DD`, canonical
+    form only) is both listing GSIs' sort key **and a DynamoDB reserved word** — alias it (`#d`) in
+    any expression.
+  - **Invoices (`{prefix}_invoice`): snapshot-on-finalize, strict finality, transactions.**
+    `createInvoice(projectId, itemIds)` starts a draft with ≥ 1 unbilled item from that project;
+    `addInvoiceItems`/`removeInvoiceItems` attach/detach items on a draft (removing every item —
+    an empty draft — is allowed; finalizing one is not); `deleteInvoice` removes a draft outright.
+    All four write the invoice's `item_ids` and the affected items' `invoice_id` together in one
+    `TransactWriteItems` call (`Update`/`Put`/`Delete` items only — IAM authorises each item by its own `PutItem`/
+    `UpdateItem`/`DeleteItem` grant, and there is no `ConditionCheck`, so `infra/iam.tf` needs no
+    change; adding one would need `dynamodb:ConditionCheckItem`), conditioned on the
+    invoice still being `draft` at the `version` the caller last read — the first use of DynamoDB
+    transactions in this codebase (`dynamodb.rs`'s `transact_write` helper). `finalizeInvoice`
+    freezes everything the invoice prints (seller/bill-to/reference, sorted lines, totals, GST
+    flag, currency, payment text, number, issue date) into a JSON `snapshot`
+    (`invoicing::snapshot::build_snapshot`, `schema_version: 1`) via one conditional `UpdateItem`
+    (not a transaction — every item's `invoice_id` already points here); later edits to the project
+    or instance settings never alter it. **Strictly one-way**: no void, no un-finalize — the only
+    mutation a finalized invoice still accepts is `setInvoicePaid` (any member; not printed on the
+    invoice). The number comes from `{prefix}_counter`'s `next_invoice_number`, the same atomic-`ADD`
+    counter pattern as tickets' `next_ticket_number` — allocated *before* the conditional finalize
+    write, so a version mismatch there leaves a **gap**, never a duplicate (see `SCHEMA.md`'s
+    "Known issues"). Owner-or-superuser `setNextInvoiceNumber` can move it **forward only**
+    (`CONFLICT` otherwise); `finalizeInvoice` additionally requires `businessName` to already be
+    set ("Complete the invoicing settings first" otherwise). A draft's live preview and a finalized
+    invoice's frozen content are built by the exact same `build_snapshot` function — the web
+    preview and the printed invoice can't diverge in how a value is computed, only in *when* the
+    inputs were read. `status`, `number`, `version`, and `snapshot` are all DynamoDB reserved
+    words — alias every one of them (`#status`/`#num`/`#v`/`#snap`) in any expression.
+  - **Superusers get no access to projects, billable items, or invoices — same boundary as
+    tickets, unwidened.** A superuser doesn't pass `Member`, so `projects`/`project`/
+    `createProject`/`billableItems`/`createBillableItem`/`invoices`/`invoice`/`createInvoice` and
+    friends all reject one exactly as they would any other non-member; only a real membership row
+    grants access, mirroring the existing "superuser is admin + instance settings, never ticket
+    access" boundary this project has had since the superuser feature landed. `setNextInvoiceNumber`
+    (like `updateInvoicingSettings`/`createApiToken`) is the one exception, by design —
+    `InstanceOwnerOrSuperuser`, not `Member`. Don't add any other superuser carve-out here without a
+    matching, explicit reason — see the "Superuser boundary" entry above.
 
 - **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
   every `.await`.** The process environment is global and tests run in parallel, so a test that
