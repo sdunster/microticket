@@ -112,10 +112,11 @@ describe("AppShell — kind-aware nav", () => {
     ]);
   });
 
-  it("shows projects and business settings to an invoicing owner", async () => {
+  it("shows invoices, projects and business settings to an invoicing owner", async () => {
     renderShell(true, [membership("OWNER", "INVOICING")]);
     await screen.findByRole("link", { name: "Projects" });
     expect(navLinkNames()).toEqual([
+      "Invoices",
       "Projects",
       "Billable items",
       "Settings",
@@ -127,6 +128,11 @@ describe("AppShell — kind-aware nav", () => {
   it("hides business settings from an invoicing agent", async () => {
     renderShell(false, [membership("AGENT", "INVOICING")]);
     await screen.findByRole("link", { name: "Projects" });
-    expect(navLinkNames()).toEqual(["Projects", "Billable items", "Settings"]);
+    expect(navLinkNames()).toEqual([
+      "Invoices",
+      "Projects",
+      "Billable items",
+      "Settings",
+    ]);
   });
 });

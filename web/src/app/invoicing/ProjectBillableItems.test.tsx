@@ -12,10 +12,14 @@ import UserEvent from "@testing-library/user-event";
 import { setupServer } from "msw/node";
 import { graphql as mswGraphql, HttpResponse } from "msw";
 import { RelayEnvironmentProvider } from "react-relay";
+import { MemoryRouter } from "react-router";
 import { getGraphQLEndpoint } from "../../lib/api";
 import { createUnauthenticatedGraphQLEnvironment } from "../../lib/environments";
 import { localToday } from "../../lib/dates";
-import { AddBillableItemForm } from "./ProjectBillableItems";
+import {
+  AddBillableItemForm,
+  ProjectBillableItems,
+} from "./ProjectBillableItems";
 
 const relayEndpoint = mswGraphql.link(getGraphQLEndpoint());
 const server = setupServer();
@@ -130,5 +134,103 @@ describe("AddBillableItemForm", () => {
       "Quantity can have at most 2 decimal places",
     );
     expect(onCreated).not.toHaveBeenCalled();
+  });
+});
+
+function unbilledItem(id: string, description: string) {
+  return {
+    __typename: "BillableItem",
+    id,
+    date: "2026-08-19",
+    description,
+    quantity: "1",
+    unitPriceCents: 10000,
+    amountCents: 10000,
+    status: "UNBILLED",
+    invoice: null,
+    project: { __typename: "Project", id: "proj-1", name: "Website Redesign" },
+  };
+}
+
+describe("ProjectBillableItems — create invoice from selected", () => {
+  it("sends only the checked unbilled items and navigates to the new invoice", async () => {
+    let createVariables: Record<string, unknown> | undefined;
+    server.use(
+      relayEndpoint.query("ProjectBillableItemsQuery", () =>
+        HttpResponse.json({
+          data: {
+            billableItems: {
+              edges: [
+                {
+                  node: unbilledItem("item-1", "Discovery workshop"),
+                  cursor: "1",
+                },
+                {
+                  node: unbilledItem("item-2", "Front-end build"),
+                  cursor: "2",
+                },
+              ],
+              pageInfo: {
+                hasNextPage: false,
+                hasPreviousPage: false,
+                startCursor: null,
+                endCursor: null,
+              },
+            },
+          },
+        }),
+      ),
+      relayEndpoint.mutation(
+        "ProjectBillableItemsCreateInvoiceMutation",
+        ({ variables }) => {
+          createVariables = variables;
+          return HttpResponse.json({
+            data: {
+              createInvoice: {
+                __typename: "Invoice",
+                id: "inv-new",
+                items: [],
+              },
+            },
+          });
+        },
+      ),
+    );
+    const user = UserEvent.setup();
+    render(
+      <MemoryRouter>
+        <RelayEnvironmentProvider
+          environment={createUnauthenticatedGraphQLEnvironment()}
+        >
+          <ProjectBillableItems
+            instanceId="inst-1"
+            projectId="proj-1"
+            currency="AUD"
+            archived={false}
+          />
+        </RelayEnvironmentProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Discovery workshop");
+    // Not shown until something is selected.
+    expect(
+      screen.queryByRole("button", { name: /Create invoice from selected/ }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getAllByRole("checkbox", { name: "Select for invoice" })[0],
+    );
+    const createButton = screen.getByRole("button", {
+      name: "Create invoice from selected (1)",
+    });
+    await user.click(createButton);
+
+    await waitFor(() =>
+      expect(createVariables).toEqual({
+        projectId: "proj-1",
+        itemIds: ["item-1"],
+      }),
+    );
   });
 });

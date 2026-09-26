@@ -183,6 +183,115 @@ fn synthetic_references_resolve() {
             id(item)
         );
     }
+
+    // An invoice's project_id/instance_id must resolve, and its item_ids
+    // must exactly agree with which billable_items actually carry its id as
+    // their own invoice_id — the same two-sided consistency
+    // `db::Handler::create_invoice`'s transaction enforces at write time.
+    let billable_items = rows(&doc, "billable_item");
+    let items_by_invoice: std::collections::HashMap<String, HashSet<String>> = {
+        let mut map: std::collections::HashMap<String, HashSet<String>> =
+            std::collections::HashMap::new();
+        for item in billable_items {
+            if let Some(invoice_id) = s(item, "invoice_id") {
+                map.entry(invoice_id).or_default().insert(id(item));
+            }
+        }
+        map
+    };
+    for invoice in rows(&doc, "invoice") {
+        let instance_id = s(invoice, "instance_id").expect("invoice.instance_id");
+        assert!(
+            instances.contains(&instance_id),
+            "invoice {} points at missing instance {instance_id}",
+            id(invoice)
+        );
+        let project_id = s(invoice, "project_id").expect("invoice.project_id");
+        assert_eq!(
+            project_instances.get(&project_id),
+            Some(&instance_id),
+            "invoice {} must point at an existing project in the same instance",
+            id(invoice)
+        );
+        let created_by = s(invoice, "created_by_user_id").expect("invoice.created_by_user_id");
+        assert!(
+            users.contains(&created_by),
+            "invoice {} points at missing user {created_by}",
+            id(invoice)
+        );
+
+        let declared_item_ids: HashSet<String> = invoice
+            .get("item_ids")
+            .and_then(|v| v["SS"].as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|v| {
+                        v.as_str()
+                            .expect("item_ids entries are strings")
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let items_pointing_here = items_by_invoice
+            .get(&id(invoice))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            declared_item_ids,
+            items_pointing_here,
+            "invoice {}'s item_ids must exactly match the billable_items whose invoice_id points back at it",
+            id(invoice)
+        );
+        for item_id in &declared_item_ids {
+            assert!(
+                billable_items.iter().any(|i| id(i) == *item_id),
+                "invoice {} names item_ids member {item_id} which does not exist",
+                id(invoice)
+            );
+        }
+    }
+    // Every billable_item.invoice_id must itself resolve to a seeded invoice
+    // — the inverse direction of the check above.
+    let invoice_ids: HashSet<String> = rows(&doc, "invoice").iter().map(id).collect();
+    for item in billable_items {
+        if let Some(invoice_id) = s(item, "invoice_id") {
+            assert!(
+                invoice_ids.contains(&invoice_id),
+                "billable_item {} points at missing invoice {invoice_id}",
+                id(item)
+            );
+        }
+    }
+}
+
+/// PR 3 of the invoicing feature adds a seeded draft invoice so a fresh
+/// local stack has an invoice detail page to look at without a manual
+/// `createInvoice` first — mirrors
+/// `there_is_an_invoicing_instance_with_at_least_one_project`'s reasoning.
+/// Deliberately a draft, not finalized (see the fixture's own `_comment`):
+/// finalizing would consume the per-instance counter a fresh stack's first
+/// real finalize should get to use itself.
+#[test]
+fn there_is_a_draft_invoice_with_billed_items() {
+    let doc = synthetic();
+    let invoices = rows(&doc, "invoice");
+    assert!(!invoices.is_empty(), "expected at least one seeded invoice");
+    assert!(
+        invoices
+            .iter()
+            .all(|i| s(i, "status").as_deref() == Some("draft")),
+        "expected every seeded invoice to be a draft — see the fixture's own reasoning \
+         about not pre-empting the invoice-number counter"
+    );
+    assert!(
+        invoices.iter().any(|i| {
+            i.get("item_ids")
+                .and_then(|v| v["SS"].as_array())
+                .is_some_and(|a| !a.is_empty())
+        }),
+        "expected at least one seeded invoice with items attached"
+    );
 }
 
 /// The build plan's PR 1 adds a second, separate function (invoicing) to

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useTransition } from "react";
+import { useEffect, useMemo, useRef, useTransition } from "react";
 import { graphql, usePaginationFragment } from "react-relay";
 import type { BillableItemList_query$key } from "./__generated__/BillableItemList_query.graphql";
 import type {
@@ -31,6 +31,7 @@ const billableItemListFragment = graphql`
       edges {
         node {
           id
+          status
           ...BillableItemRow_item
         }
       }
@@ -49,6 +50,12 @@ const billableItemListFragment = graphql`
  * transition, so the current rows stay (dimmed) instead of flashing a
  * Suspense fallback. A refetch deliberately goes back to the first page:
  * that's where a new or re-dated item lands in date order.
+ *
+ * `onItemDeleted`/`onVisibleUnbilledIdsChange` exist for the project page's
+ * "create invoice from selected" flow: a parent tracking a selection by id
+ * needs to know when a selected item is deleted (no checkbox left to untick
+ * it with) and which ids are currently rendered as unbilled (to defensively
+ * drop anything else from that selection before acting on it).
  */
 export function BillableItemList({
   query,
@@ -58,6 +65,11 @@ export function BillableItemList({
   currency,
   emptyMessage,
   refreshKey = 0,
+  selectable = false,
+  selectedIds,
+  onToggleSelect,
+  onItemDeleted,
+  onVisibleUnbilledIdsChange,
 }: {
   query: BillableItemList_query$key;
   filter: BillableItemFilterType;
@@ -66,6 +78,13 @@ export function BillableItemList({
   currency: string;
   emptyMessage: string;
   refreshKey?: number;
+  /** Threaded straight through to {@link BillableItemRow} — see its doc
+   * comment. Only the project page's own list passes these. */
+  selectable?: boolean;
+  selectedIds?: ReadonlySet<string>;
+  onToggleSelect?: (id: string) => void;
+  onItemDeleted?: (id: string) => void;
+  onVisibleUnbilledIdsChange?: (ids: readonly string[]) => void;
 }) {
   const { data, loadNext, hasNext, isLoadingNext, refetch } =
     usePaginationFragment<
@@ -96,6 +115,18 @@ export function BillableItemList({
 
   const connection = data.billableItems;
   const edges = connection.edges;
+
+  // Reported up for the project page's "create invoice from selected" flow
+  // to defensively intersect its selection against — see this component's
+  // doc comment.
+  const unbilledIds = useMemo(
+    () =>
+      edges.filter((e) => e.node.status === "UNBILLED").map((e) => e.node.id),
+    [edges],
+  );
+  useEffect(() => {
+    onVisibleUnbilledIdsChange?.(unbilledIds);
+  }, [unbilledIds, onVisibleUnbilledIdsChange]);
 
   if (edges.length === 0) {
     return (
@@ -128,6 +159,10 @@ export function BillableItemList({
                 currency={currency}
                 connectionId={connection.__id}
                 onChanged={() => refresh(filter)}
+                selectable={selectable}
+                selectedIds={selectedIds}
+                onToggleSelect={onToggleSelect}
+                onDeleted={onItemDeleted}
               />
             </li>
           ))}
