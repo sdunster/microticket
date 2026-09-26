@@ -397,6 +397,10 @@ impl db::Handler for Handler {
         Self::unsupported()
     }
 
+    async fn set_invoice_pdf_key(&self, _invoice_id: &str, _key: &str) -> db::Result<bool> {
+        Self::unsupported()
+    }
+
     async fn increment_invoice_counter(&self, _instance_id: &str) -> db::Result<u64> {
         Self::unsupported()
     }

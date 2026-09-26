@@ -257,6 +257,28 @@ local setup, and `SCHEMA.md` for the data model.
     (like `updateInvoicingSettings`/`createApiToken`) is the one exception, by design —
     `InstanceOwnerOrSuperuser`, not `Member`. Don't add any other superuser carve-out here without a
     matching, explicit reason — see the "Superuser boundary" entry above.
+  - **The PDF is rendered from the frozen `snapshot`, nothing else.** `downloadInvoicePdf`
+    (`Member`, `NOT_FOUND` posture like every other invoice mutation, `CONFLICT` on a draft — there
+    is nothing frozen yet to print) parses `invoice.snapshot` and calls `invoicing::pdf::render_invoice_pdf`,
+    a pure function (`api/src/invoicing/pdf.rs`) that reads no project/instance state of its own —
+    the same "can't diverge from what was frozen" guarantee finalization gives the web preview
+    extends to the PDF. The rendered bytes are cached once, at
+    `invoices/{instance_id}/{invoice_id}/Invoice-{displayNumber}.pdf` (`db::Invoice.pdf_s3_key`,
+    `db::Handler::set_invoice_pdf_key`, conditioned on `status = finalized`), and every later call
+    just presigns that key instead of re-rendering. Rendering is deterministic from the snapshot —
+    same content, same layout, same page count, every time — so two callers racing the first render
+    just overwrite each other with an equally correct rendering of the same invoice: not a race the
+    code needs to guard against. The two renders' *bytes* aren't quite identical, though: printpdf
+    0.7 has no public way to make the PDF trailer's `/ID` deterministic (a fresh random id on every
+    save, unconditionally — see `api/src/invoicing/pdf.rs`'s doc comment), so that's the one thing
+    that differs. The download URL forces
+    `Content-Disposition: attachment; filename="Invoice-{displayNumber}.pdf"`
+    (`storage::Handler::presign_get_download`, `storage::sanitize_download_filename` keeping only
+    `[A-Za-z0-9._-]`, since the filename lands unescaped in an HTTP header). Fonts are Liberation
+    Sans Regular/Bold, embedded via `include_bytes!` from `api/assets/fonts/` under the SIL Open
+    Font License 1.1 (`api/assets/fonts/OFL.txt`) — chosen because `printpdf` needs a real embedded
+    TTF for Unicode text and both the crate and the font are pure Rust/no native deps, so the
+    renderer builds standalone for `cargo lambda`.
 
 - **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
   every `.await`.** The process environment is global and tests run in parallel, so a test that

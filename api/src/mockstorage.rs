@@ -108,6 +108,17 @@ impl storage::Handler for Storage {
         let path = self.path_for(key)?;
         Ok(format!("file://{}", path.display()))
     }
+
+    /// Same shape as [`Self::presign_get`] — there's no real HTTP response
+    /// here to attach a `Content-Disposition` header to, so `filename` is
+    /// unused beyond validating it the same way the real implementation
+    /// does (cheap insurance against a caller relying on this mock to catch
+    /// a filename it never sanitised).
+    async fn presign_get_download(&self, key: &str, filename: &str) -> Result<String> {
+        let _ = storage::sanitize_download_filename(filename);
+        let path = self.path_for(key)?;
+        Ok(format!("file://{}", path.display()))
+    }
 }
 
 #[cfg(test)]
@@ -182,7 +193,12 @@ mod tests {
             .await
             .unwrap();
         let get = s.presign_get("attachments/t1/m1/0/f.txt").await.unwrap();
+        let download = s
+            .presign_get_download("invoices/inst1/inv1/Invoice-008.pdf", "Invoice-008.pdf")
+            .await
+            .unwrap();
         assert!(put.starts_with("file://"), "{put}");
         assert!(get.starts_with("file://"), "{get}");
+        assert!(download.starts_with("file://"), "{download}");
     }
 }

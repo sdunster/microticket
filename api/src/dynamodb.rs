@@ -534,6 +534,7 @@ impl TryInto<db::Invoice> for Item {
             finalized_at: self.i64_field("finalized_at")?.map(|t| t as u64),
             finalized_by_user_id: self.string_field("finalized_by_user_id")?,
             paid_date: self.string_field("paid_date")?,
+            pdf_s3_key: self.string_field("pdf_s3_key")?,
         })
     }
 }
@@ -2864,6 +2865,7 @@ impl db::Handler for Handler {
             finalized_at: None,
             finalized_by_user_id: None,
             paid_date: None,
+            pdf_s3_key: None,
         }))
     }
 
@@ -3096,6 +3098,35 @@ impl db::Handler for Handler {
         match resp {
             Ok(r) => {
                 record_capacity("set_invoice_paid", r.consumed_capacity(), CapKind::Write);
+                Ok(true)
+            }
+            Err(SdkError::ServiceError(ref se))
+                if se.err().is_conditional_check_failed_exception() =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(db::Error::Infrastructure(sdk_err_msg(e))),
+        }
+    }
+
+    async fn set_invoice_pdf_key(&self, invoice_id: &str, key: &str) -> db::Result<bool> {
+        self.ensure_writable()?;
+        let resp = self
+            .client
+            .update_item()
+            .table_name(self.table_name("invoice"))
+            .key("id", AttributeValue::S(invoice_id.to_string()))
+            .update_expression("SET pdf_s3_key = :key")
+            .condition_expression("attribute_exists(id) AND #status = :finalized")
+            .expression_attribute_names("#status", "status")
+            .expression_attribute_values(":key", AttributeValue::S(key.to_string()))
+            .expression_attribute_values(":finalized", AttributeValue::S("finalized".to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await;
+        match resp {
+            Ok(r) => {
+                record_capacity("set_invoice_pdf_key", r.consumed_capacity(), CapKind::Write);
                 Ok(true)
             }
             Err(SdkError::ServiceError(ref se))
