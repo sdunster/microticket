@@ -3730,6 +3730,70 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         }))
     }
 
+    /// Download a finalized invoice's PDF: a presigned URL with
+    /// `Content-Disposition: attachment; filename="Invoice-{displayNumber}.pdf"`
+    /// (`storage::Handler::presign_get_download`, filename sanitised there).
+    /// `CONFLICT` on a draft — finalization is what freezes the content a
+    /// PDF prints (CLAUDE.md's "Invoicing" house rule), so there's nothing
+    /// yet to render.
+    ///
+    /// This is a mutation, not a query, because the *first* call for a
+    /// given invoice writes: it parses the frozen `snapshot` (the only
+    /// input `invoicing::pdf::render_invoice_pdf` ever reads — never live
+    /// project/instance state, so a later settings/project edit can't
+    /// change what a downloaded PDF says), renders it, `put_bytes`s it to
+    /// `invoices/{instance_id}/{invoice_id}/Invoice-{displayNumber}.pdf`,
+    /// and caches that key on the invoice row
+    /// (`db::Handler::set_invoice_pdf_key`, conditioned on `status =
+    /// finalized`). Every later call for the same invoice just presigns
+    /// the cached key. Rendering is deterministic from the snapshot — same
+    /// content, same page count, same layout — so two callers racing this
+    /// on the same never-yet-downloaded invoice each render and write a
+    /// complete, correct PDF of the same invoice (see `invoicing::pdf`'s
+    /// doc comment for the one respect in which the *bytes* aren't
+    /// identical between the two: printpdf embeds a fresh random id in
+    /// each file's trailer). Never a real race to guard against with a
+    /// conditional write here — whichever write lands last is still the
+    /// right document.
+    async fn download_invoice_pdf(&self, ctx: &Context<'_>, invoice_id: ID) -> Result<String> {
+        let invoice = require_invoice_member(ctx, &*self.app, invoice_id.as_str()).await?;
+        if invoice.status != db::InvoiceStatus::Finalized {
+            return Err(ApiError::conflict("Only a finalized invoice can be downloaded").into());
+        }
+        let display_number = invoice
+            .number
+            .map(|n| format!("{n:03}"))
+            .unwrap_or_else(|| "unknown".to_string());
+        let filename = format!("Invoice-{display_number}.pdf");
+
+        let key = match invoice.pdf_s3_key.clone() {
+            Some(key) => key,
+            None => {
+                let snapshot_json = invoice.snapshot.as_deref().ok_or_else(|| {
+                    anyhow!("Finalized invoice {} is missing its snapshot", invoice.id)
+                })?;
+                let snapshot: invoicing::snapshot::InvoiceSnapshot =
+                    serde_json::from_str(snapshot_json).map_err(|e| {
+                        anyhow!("Invoice {} has a corrupt snapshot: {e}", invoice.id)
+                    })?;
+                let pdf_bytes = invoicing::pdf::render_invoice_pdf(&snapshot)?;
+                let key = format!("invoices/{}/{}/{filename}", invoice.instance_id, invoice.id);
+                self.app
+                    .storage()
+                    .put_bytes(&key, &pdf_bytes, "application/pdf")
+                    .await?;
+                self.app.db().set_invoice_pdf_key(&invoice.id, &key).await?;
+                key
+            }
+        };
+        let url = self
+            .app
+            .storage()
+            .presign_get_download(&key, &filename)
+            .await?;
+        Ok(url)
+    }
+
     /// Owner-or-superuser: set the next invoice number to be assigned by
     /// `finalizeInvoice` (`db::Handler::set_next_invoice_number` writes
     /// `next - 1` to the counter). Forward-only — `CONFLICT` if `next`

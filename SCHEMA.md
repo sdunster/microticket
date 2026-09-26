@@ -599,9 +599,17 @@ attribute names in an `Item`/`Key`/`ExclusiveStartKey` map need no alias, same e
 - `total_cents` (N) — optional; absent for a draft. Denormalised from the snapshot (rather than
   parsed out of the JSON on every list read) so the invoices list can show/sort by it cheaply.
 - `finalized_at` (N), `finalized_by_user_id` (S) — optional; absent for a draft.
-- `paid_date` (S) — optional; `YYYY-MM-DD`. Absent means unpaid. The *only* attribute that may
-  change on a finalized invoice (`setInvoicePaid`, condition `status = finalized`); never printed
-  on the invoice itself.
+- `paid_date` (S) — optional; `YYYY-MM-DD`. Absent means unpaid. Set/cleared by `setInvoicePaid`
+  (condition `status = finalized`); never printed on the invoice itself.
+- `pdf_s3_key` (S) — optional; absent until `downloadInvoicePdf` has rendered this invoice's PDF at
+  least once. Set exactly once, by `db::Handler::set_invoice_pdf_key` (condition `status =
+  finalized`), to `invoices/{instance_id}/{id}/Invoice-{displayNumber}.pdf` — see `storage.rs`'s
+  key-layout doc comment. Rendering is deterministic from `snapshot` (content, layout and page
+  count — not quite the file's raw bytes; see `api/src/invoicing/pdf.rs`'s doc comment for why),
+  so this is an unconditional `SET`, not an `attribute_not_exists` guard: a concurrent
+  double-render just writes the same key twice, with two equally correct renderings of the same
+  invoice, never a real race. Along with `paid_date`, the only attributes that may still change on
+  a finalized invoice.
 
 **Attach/detach/finalize/delete use `TransactWriteItems`** (`Put`/`Update`/`Delete` items only — IAM has no
 `TransactWriteItems` action; each item is authorised by the existing `PutItem`/`UpdateItem`/
