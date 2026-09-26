@@ -274,6 +274,49 @@ impl db::Handler for Handler {
         Self::unsupported()
     }
 
+    // ── billable_item ─────────────────────────────────────────────────────
+
+    async fn create_billable_item(
+        &self,
+        _instance_id: &str,
+        _project_id: &str,
+        _date: &str,
+        _description: &str,
+        _quantity_hundredths: i64,
+        _unit_price_cents: i64,
+        _created_by_user_id: &str,
+    ) -> db::Result<db::BillableItem> {
+        Self::unsupported()
+    }
+
+    async fn get_billable_items<T: AsRef<str> + Sync>(
+        &self,
+        _ids: &[T],
+    ) -> db::Result<Vec<Option<db::BillableItem>>> {
+        Self::unsupported()
+    }
+
+    async fn update_billable_item(
+        &self,
+        _id: &str,
+        _change: db::BillableItemUpdateShape<'_>,
+    ) -> db::Result<bool> {
+        Self::unsupported()
+    }
+
+    async fn delete_billable_item(&self, _id: &str) -> db::Result<bool> {
+        Self::unsupported()
+    }
+
+    async fn list_billable_items(
+        &self,
+        _scope: db::BillableItemScope<'_>,
+        _filter: db::BillableItemFilter,
+        _page: db::ListBillableItemsPage,
+    ) -> db::Result<Vec<db::BillableItem>> {
+        Self::unsupported()
+    }
+
     // ── ticket ────────────────────────────────────────────────────────────
 
     async fn get_tickets<T: AsRef<str> + Sync>(

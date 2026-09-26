@@ -455,6 +455,45 @@ impl TryInto<db::Project> for Item {
     }
 }
 
+impl TryInto<db::BillableItem> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::BillableItem, Self::Error> {
+        Ok(db::BillableItem {
+            id: self.id()?,
+            instance_id: self
+                .string_field("instance_id")?
+                .ok_or_else(|| anyhow!("BillableItem missing instance_id"))?,
+            project_id: self
+                .string_field("project_id")?
+                .ok_or_else(|| anyhow!("BillableItem missing project_id"))?,
+            date: self
+                .string_field("date")?
+                .ok_or_else(|| anyhow!("BillableItem missing date"))?,
+            description: self
+                .string_field("description")?
+                .ok_or_else(|| anyhow!("BillableItem missing description"))?,
+            quantity_hundredths: self
+                .i64_field("quantity_hundredths")?
+                .ok_or_else(|| anyhow!("BillableItem missing quantity_hundredths"))?,
+            unit_price_cents: self
+                .i64_field("unit_price_cents")?
+                .ok_or_else(|| anyhow!("BillableItem missing unit_price_cents"))?,
+            invoice_id: self.string_field("invoice_id")?,
+            created_by_user_id: self
+                .string_field("created_by_user_id")?
+                .ok_or_else(|| anyhow!("BillableItem missing created_by_user_id"))?,
+            created_at: self
+                .i64_field("created_at")?
+                .ok_or_else(|| anyhow!("BillableItem missing created_at"))?
+                as u64,
+            updated_at: self
+                .i64_field("updated_at")?
+                .ok_or_else(|| anyhow!("BillableItem missing updated_at"))?
+                as u64,
+        })
+    }
+}
+
 impl TryInto<db::EphemeralState> for Item {
     type Error = HydrationError;
     fn try_into(self) -> Result<db::EphemeralState, Self::Error> {
@@ -2210,6 +2249,260 @@ impl db::Handler for Handler {
             }
         }
         Ok(())
+    }
+
+    // ── billable_item ─────────────────────────────────────────────────────
+    //
+    // `date` is a DynamoDB reserved word: every expression that names it
+    // aliases it as `#d`. (Raw attribute names in an `Item`/`Key`/
+    // `ExclusiveStartKey` map are not expressions and need no alias.)
+
+    async fn create_billable_item(
+        &self,
+        instance_id: &str,
+        project_id: &str,
+        date: &str,
+        description: &str,
+        quantity_hundredths: i64,
+        unit_price_cents: i64,
+        created_by_user_id: &str,
+    ) -> db::Result<db::BillableItem> {
+        self.ensure_writable()?;
+        let id = new_id();
+        let now = crate::clock::now_sec();
+        let resp = self
+            .client
+            .put_item()
+            .table_name(self.table_name("billable_item"))
+            .item("id", AttributeValue::S(id.clone()))
+            .item("instance_id", AttributeValue::S(instance_id.to_string()))
+            .item("project_id", AttributeValue::S(project_id.to_string()))
+            .item("date", AttributeValue::S(date.to_string()))
+            .item("description", AttributeValue::S(description.to_string()))
+            .item(
+                "quantity_hundredths",
+                AttributeValue::N(quantity_hundredths.to_string()),
+            )
+            .item(
+                "unit_price_cents",
+                AttributeValue::N(unit_price_cents.to_string()),
+            )
+            .item(
+                "created_by_user_id",
+                AttributeValue::S(created_by_user_id.to_string()),
+            )
+            .item("created_at", AttributeValue::N(now.to_string()))
+            .item("updated_at", AttributeValue::N(now.to_string()))
+            .condition_expression("attribute_not_exists(id)")
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity(
+            "create_billable_item",
+            resp.consumed_capacity(),
+            CapKind::Write,
+        );
+        Ok(db::BillableItem {
+            id,
+            instance_id: instance_id.to_string(),
+            project_id: project_id.to_string(),
+            date: date.to_string(),
+            description: description.to_string(),
+            quantity_hundredths,
+            unit_price_cents,
+            invoice_id: None,
+            created_by_user_id: created_by_user_id.to_string(),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    async fn get_billable_items<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> db::Result<Vec<Option<db::BillableItem>>> {
+        self.get_records("billable_item", ids).await
+    }
+
+    async fn update_billable_item(
+        &self,
+        id: &str,
+        change: db::BillableItemUpdateShape<'_>,
+    ) -> db::Result<bool> {
+        self.ensure_writable()?;
+        match change {
+            db::BillableItemUpdateShape::Fields {
+                date,
+                description,
+                quantity_hundredths,
+                unit_price_cents,
+            } => {
+                let now = crate::clock::now_sec();
+                let resp = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("billable_item"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .update_expression(
+                        "SET #d = :date, description = :description, \
+                         quantity_hundredths = :qty, unit_price_cents = :price, \
+                         updated_at = :updated_at",
+                    )
+                    // Only an unbilled item is editable here — see
+                    // `db::Handler::update_billable_item`'s doc comment.
+                    .condition_expression(
+                        "attribute_exists(id) AND attribute_not_exists(invoice_id)",
+                    )
+                    .expression_attribute_names("#d", "date")
+                    .expression_attribute_values(":date", AttributeValue::S(date.to_string()))
+                    .expression_attribute_values(
+                        ":description",
+                        AttributeValue::S(description.to_string()),
+                    )
+                    .expression_attribute_values(
+                        ":qty",
+                        AttributeValue::N(quantity_hundredths.to_string()),
+                    )
+                    .expression_attribute_values(
+                        ":price",
+                        AttributeValue::N(unit_price_cents.to_string()),
+                    )
+                    .expression_attribute_values(":updated_at", AttributeValue::N(now.to_string()))
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) => {
+                        record_capacity(
+                            "update_billable_item",
+                            r.consumed_capacity(),
+                            CapKind::Write,
+                        );
+                        Ok(true)
+                    }
+                    Err(SdkError::ServiceError(ref se))
+                        if se.err().is_conditional_check_failed_exception() =>
+                    {
+                        Ok(false)
+                    }
+                    Err(e) => Err(db::Error::Infrastructure(sdk_err_msg(e))),
+                }
+            }
+        }
+    }
+
+    async fn delete_billable_item(&self, id: &str) -> db::Result<bool> {
+        self.ensure_writable()?;
+        let resp = self
+            .client
+            .delete_item()
+            .table_name(self.table_name("billable_item"))
+            .key("id", AttributeValue::S(id.to_string()))
+            .condition_expression("attribute_exists(id) AND attribute_not_exists(invoice_id)")
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await;
+        match resp {
+            Ok(r) => {
+                record_capacity(
+                    "delete_billable_item",
+                    r.consumed_capacity(),
+                    CapKind::Write,
+                );
+                Ok(true)
+            }
+            Err(SdkError::ServiceError(ref se))
+                if se.err().is_conditional_check_failed_exception() =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(db::Error::Infrastructure(sdk_err_msg(e))),
+        }
+    }
+
+    async fn list_billable_items(
+        &self,
+        scope: db::BillableItemScope<'_>,
+        filter: db::BillableItemFilter,
+        page: db::ListBillableItemsPage,
+    ) -> db::Result<Vec<db::BillableItem>> {
+        let fetch_limit = usize::try_from(page.limit).unwrap_or(0);
+        if fetch_limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (index_name, key_attr, key_value) = match scope {
+            db::BillableItemScope::Instance(id) => ("instance_id-date-index", "instance_id", id),
+            db::BillableItemScope::Project(id) => ("project_id-date-index", "project_id", id),
+        };
+        let filter_expression = match filter {
+            db::BillableItemFilter::All => None,
+            db::BillableItemFilter::Unbilled => Some("attribute_not_exists(invoice_id)"),
+            db::BillableItemFilter::Billed => Some("attribute_exists(invoice_id)"),
+        };
+
+        // ExclusiveStartKey on a GSI must carry the table key (`id`) *and*
+        // both index keys (the scope's hash attribute + `date`) — the same
+        // rule `list_tickets` documents; the scope supplies the hash value,
+        // the cursor supplies the rest.
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> =
+            page.after.map(|c| {
+                HashMap::from([
+                    ("id".to_string(), AttributeValue::S(c.id)),
+                    (
+                        key_attr.to_string(),
+                        AttributeValue::S(key_value.to_string()),
+                    ),
+                    ("date".to_string(), AttributeValue::S(c.date)),
+                ])
+            });
+
+        // `Limit` bounds the rows DynamoDB *examines*, and the filter runs
+        // after it — a filtered page can come back short (even empty) while
+        // matching rows remain further down the index. Keep going until the
+        // page is full or the index is exhausted.
+        let mut items: Vec<db::BillableItem> = Vec::new();
+        loop {
+            let mut builder = self
+                .client
+                .query()
+                .table_name(self.table_name("billable_item"))
+                .index_name(index_name)
+                .key_condition_expression(format!("{key_attr} = :key_value"))
+                .expression_attribute_values(":key_value", AttributeValue::S(key_value.to_string()))
+                .scan_index_forward(false)
+                .return_consumed_capacity(ReturnConsumedCapacity::Total);
+            // Unfiltered, `Limit` is exact. Filtered, a small `Limit` would
+            // make a sparse filter walk the partition a page-size at a time,
+            // so leave it off and let DynamoDB's 1 MB per-query cap bound
+            // each round instead.
+            match filter_expression {
+                Some(f) => builder = builder.filter_expression(f),
+                None => builder = builder.limit(page.limit),
+            }
+            if let Some(esk) = exclusive_start_key.take() {
+                builder = builder.set_exclusive_start_key(Some(esk));
+            }
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+            record_capacity(
+                "list_billable_items",
+                resp.consumed_capacity(),
+                CapKind::Read,
+            );
+            items.extend(hydrate_items::<db::BillableItem>(resp.items)?);
+            exclusive_start_key = resp.last_evaluated_key;
+            if items.len() >= fetch_limit || exclusive_start_key.is_none() {
+                break;
+            }
+        }
+        // A later round can overshoot; the caller's next cursor is built from
+        // the last row actually returned, so dropping the surplus loses
+        // nothing.
+        items.truncate(fetch_limit);
+        Ok(items)
     }
 
     // ── ticket ────────────────────────────────────────────────────────────

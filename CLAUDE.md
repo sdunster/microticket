@@ -206,9 +206,24 @@ local setup, and `SCHEMA.md` for the data model.
     `Instance::deleted`/`gst_registered` — there is no delete in v1). Any member — owner or agent —
     can create/update a project; this is day-to-day work, not an owner-only setting, unlike
     invoicing settings above.
-  - **Superusers get no access to projects (or, in later PRs, billable items/invoices) — same
+  - **Billable items (`{prefix}_billable_item`): money is integers, never floats.** Quantity is a
+    decimal with ≤ 2 dp, `0 < q ≤ 1,000,000`, stored as integer hundredths
+    (`quantity_hundredths`) and exchanged over GraphQL as a **string** (`"1.5"`) that only the
+    server parses (`invoicing::money::parse_quantity`; the web's `lib/money.ts` mirrors it for
+    live previews only). Unit price is integer cents, GST-exclusive, `0 ≤ p ≤ 1,000,000,000`. The
+    line amount is never stored: `amountCents` = round-half-up(`quantity_hundredths ×
+    unit_price_cents / 100`) (`invoicing::money::line_amount_cents`), so it can't drift from its
+    inputs. An item is authorised through its project (`createBillableItem`) or its own
+    `instance_id` (id-only update/delete) — `NOT_FOUND` for missing and not-yours alike, like
+    `updateProject`. An archived project takes no new items. `invoice_id` (absent = unbilled) is
+    the item↔invoice link: update/delete refuse an item that has one, with `CONFLICT`, both up
+    front and in the write's condition expression. `date` (`YYYY-MM-DD`, canonical form only) is
+    both listing GSIs' sort key **and a DynamoDB reserved word** — alias it (`#d`) in any
+    expression.
+  - **Superusers get no access to projects, billable items (or, in a later PR, invoices) — same
     boundary as tickets, unwidened.** A superuser doesn't pass `Member`, so `projects`/`project`/
-    `createProject` all reject one exactly as they would any other non-member; only a real
+    `createProject`/`billableItems`/`createBillableItem` all reject one exactly as they would any
+    other non-member; only a real
     membership row grants access, mirroring the existing "superuser is admin + instance settings,
     never ticket access" boundary this project has had since the superuser feature landed. Don't
     add a superuser carve-out here without a matching, explicit reason — see the "Superuser
