@@ -430,7 +430,7 @@ verify a signature, the settings page to render each passkey's metadata.
 ### `{prefix}_project`
 
 A client/job an invoicing instance bills against — the first invoicing-only table. See CLAUDE.md's
-"Invoicing" house rule. Billable items and invoices (later PRs) each reference a project by id.
+"Invoicing" house rule. Billable items (below) and invoices (a later PR) each reference a project by id.
 
 | Attribute     | Type | Role                  |
 | ------------- | ---- | --------------------- |
@@ -466,6 +466,61 @@ user-generated table, and every field is rendered directly from the list.
 Any member (owner or agent) of the invoicing instance can create/update a project — day-to-day
 work, not an owner-only setting, unlike the instance's own invoicing settings above. Superusers get
 no access (they don't pass `Member`) — the same superuser boundary tickets have always had.
+
+---
+
+### `{prefix}_billable_item`
+
+One line of work recorded against a project, later collected onto an invoice. See CLAUDE.md's
+"Invoicing" house rule for the money rules.
+
+| Attribute     | Type | Role                                   |
+| ------------- | ---- | -------------------------------------- |
+| `id`          | S    | Hash key (PK) — nanoid                 |
+| `instance_id` | S    | GSI hash key (denormalised from the project) |
+| `project_id`  | S    | GSI hash key                           |
+| `date`        | S    | GSI sort key — `YYYY-MM-DD`            |
+
+**GSIs:**
+
+| GSI                      | Hash key      | Sort key | Projection | Purpose                             |
+| ------------------------ | ------------- | -------- | ---------- | ----------------------------------- |
+| `instance_id-date-index` | `instance_id` | `date`   | ALL        | The instance-wide billable items list |
+| `project_id-date-index`  | `project_id`  | `date`   | ALL        | One project's items (project page; the pool an invoice draws from) |
+
+Both are read newest `date` first (`ScanIndexForward = false`), keyset-paginated with a
+`{date}:{id}` cursor — shaped like the ticket cursor. The cursor plus the listing's own scope (which
+supplies the GSI hash value) is everything an `ExclusiveStartKey` on either index needs: `id`, the
+hash attribute, and `date`. Items sharing a date come back in DynamoDB's index order for equal sort
+keys (effectively by `id`) — stable across pages, but not creation order.
+
+`ALL` because every field is rendered in the list, and the unbilled/billed filter runs as a
+`FilterExpression` over projected rows: `attribute_not_exists(invoice_id)` /
+`attribute_exists(invoice_id)`. DynamoDB applies `Limit` **before** the filter, so a filtered page
+can come back short or empty while matches remain; `list_billable_items` keeps querying until the
+page is full or the index is exhausted, and `billable_items_dynamodb_local.rs` pins that down.
+
+**Non-obvious attributes:**
+
+- `date` (S) — `YYYY-MM-DD`, always the canonical zero-padded form (`invoicing::validate_item_date`
+  rejects `2026-8-1`), since the sort key's string order must be the date order. **`date` is a
+  DynamoDB reserved word:** any update/condition/filter/key expression must alias it via
+  `ExpressionAttributeNames` (`#d`), like `project.reference`. Raw attribute names in an
+  `Item`/`Key`/`ExclusiveStartKey` map need no alias.
+- `description` (S) — trimmed, non-empty, ≤ 2000 chars, may be multi-line (lines starting `* ` or
+  `- ` render as bullets on the invoice)
+- `quantity_hundredths` (N) — quantity × 100 (`150` = 1.5), `0 < q ≤ 100,000,000`
+- `unit_price_cents` (N) — GST-exclusive, `0 ≤ p ≤ 1,000,000,000`
+- `invoice_id` (S) — optional; absent means unbilled. Not set by anything yet (invoices arrive in
+  a later PR); update/delete are conditional on `attribute_not_exists(invoice_id)` already.
+- `created_by_user_id` (S), `created_at`, `updated_at` (N)
+
+The line amount is **not stored** — the API derives it (round-half-up of `quantity_hundredths ×
+unit_price_cents / 100`) on every read. At the bounds it reaches 10^15 cents, above GraphQL's
+32-bit `Int` but exact as a JSON number in JS (under 2^53); it is served as a JSON number.
+
+Any member (owner or agent) of the invoicing instance can create/update/delete items; superusers get
+no access.
 
 ---
 

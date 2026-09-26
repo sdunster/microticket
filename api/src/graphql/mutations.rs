@@ -20,6 +20,7 @@ use crate::auth::{self, AuthInfo};
 use crate::db;
 use crate::db::Handler as _;
 use crate::inbound::{attachments, routing};
+use crate::invoicing;
 use crate::mail::Handler as _;
 use crate::outbound;
 use crate::staff_notify::{self, Actor, StaffEvent};
@@ -28,10 +29,10 @@ use crate::storage::Handler as _;
 use super::auth::{AuthGuard, AuthRequirement, is_member, is_owner};
 use super::error::ApiError;
 use super::query::{
-    ApiTokenInfo, CreateProjectInput, CreatedApiToken, InboundAddressInfo, Instance,
-    InstanceKindType, InvoicingSettingsInput, MembershipInfo, MembershipRoleType,
-    NotificationSettingsInput, PasskeyInfo, Project, Ticket, TicketMessage, TicketStatusType,
-    UpdateProjectInput, User,
+    ApiTokenInfo, BillableItem, BillableItemInput, CreateProjectInput, CreatedApiToken,
+    InboundAddressInfo, Instance, InstanceKindType, InvoicingSettingsInput, MembershipInfo,
+    MembershipRoleType, NotificationSettingsInput, PasskeyInfo, Project, Ticket, TicketMessage,
+    TicketStatusType, UpdateProjectInput, User,
 };
 
 /// One code per address per this many seconds — cheap anti-spam for
@@ -260,6 +261,53 @@ fn normalize_invoicing_field(raw: &str, field_name: &str) -> Result<Option<Strin
 /// [`MAX_INVOICING_LONG_FIELD_LEN`].
 fn normalize_invoicing_long_field(raw: &str, field_name: &str) -> Result<Option<String>> {
     normalize_project_field(Some(raw), field_name, MAX_INVOICING_LONG_FIELD_LEN)
+}
+
+/// `updateBillableItem`/`deleteBillableItem`'s per-record authorization —
+/// the same shape as [`require_project_member`]: user check before the
+/// fetch, then `NOT_FOUND` for a missing item and for one in an instance the
+/// caller isn't a member of alike. Superusers get no access (they don't
+/// pass `is_member`).
+async fn require_billable_item_member<A: App + HasDb + Send + Sync>(
+    ctx: &Context<'_>,
+    app: &A,
+    id: &str,
+) -> Result<db::BillableItem> {
+    let Some(AuthInfo::User { memberships, .. }) = ctx.data_opt::<AuthInfo>() else {
+        return Err(ApiError::forbidden("Must be authenticated as a user").into());
+    };
+    let item = app
+        .db()
+        .get_billable_items(&[id])
+        .await?
+        .into_iter()
+        .next()
+        .flatten()
+        .ok_or_else(|| ApiError::not_found("BillableItem", id))?;
+    if !is_member(memberships, &item.instance_id) {
+        return Err(ApiError::not_found("BillableItem", id).into());
+    }
+    Ok(item)
+}
+
+/// A [`BillableItemInput`] after validation — canonical date, trimmed
+/// description, quantity in hundredths.
+struct ValidBillableItem {
+    date: String,
+    description: String,
+    quantity_hundredths: i64,
+    unit_price_cents: i64,
+}
+
+fn validate_billable_item_input(input: &BillableItemInput) -> Result<ValidBillableItem> {
+    Ok(ValidBillableItem {
+        date: invoicing::validate_item_date(&input.date).map_err(|e| anyhow!(e))?,
+        description: invoicing::validate_description(&input.description).map_err(|e| anyhow!(e))?,
+        quantity_hundredths: invoicing::money::parse_quantity(&input.quantity)
+            .map_err(|e| anyhow!(e))?,
+        unit_price_cents: invoicing::validate_unit_price_cents(input.unit_price_cents)
+            .map_err(|e| anyhow!(e))?,
+    })
 }
 
 /// Move every validated `pending/…` key in `keys` into
@@ -3061,6 +3109,114 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             updated_at: crate::clock::now_sec(),
             ..project
         }))
+    }
+
+    // ── Billable items ────────────────────────────────────────────────────────
+
+    /// Record a billable item against a project. Any member of the project's
+    /// (invoicing) instance — authorised through the project, like
+    /// `updateProject`: `NOT_FOUND` for a missing project and a non-member
+    /// alike, and a superuser without a membership is a non-member. An
+    /// archived project takes no new items (un-archive it first). See
+    /// `BillableItemInput` for the validation rules.
+    async fn create_billable_item(
+        &self,
+        ctx: &Context<'_>,
+        project_id: ID,
+        input: BillableItemInput,
+    ) -> Result<BillableItem<A>> {
+        let project = require_project_member(ctx, &*self.app, project_id.as_str()).await?;
+        let Some(AuthInfo::User { id: user_id, .. }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        };
+        if project.archived {
+            return Err(anyhow!(
+                "Project is archived — un-archive it to add billable items"
+            ));
+        }
+        let fields = validate_billable_item_input(&input)?;
+        let created = self
+            .app
+            .db()
+            .create_billable_item(
+                &project.instance_id,
+                &project.id,
+                &fields.date,
+                &fields.description,
+                fields.quantity_hundredths,
+                fields.unit_price_cents,
+                user_id,
+            )
+            .await?;
+        Ok(BillableItem::new(created))
+    }
+
+    /// Full-replace a billable item's date/description/quantity/unit price.
+    /// Id-only, authorised like `updateProject` (`NOT_FOUND` for missing or
+    /// not yours). Refused with `CONFLICT` once the item is on an invoice —
+    /// checked up front for a clear message, and again atomically in the
+    /// write's condition, so an item attached between the two is never
+    /// silently edited.
+    ///
+    /// When invoices land (next PR) this narrows to "refused once the invoice
+    /// is *finalized*": an item on a draft stays editable, bumping the
+    /// draft's `version` in the same transaction.
+    async fn update_billable_item(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: BillableItemInput,
+    ) -> Result<BillableItem<A>> {
+        let item = require_billable_item_member(ctx, &*self.app, id.as_str()).await?;
+        if item.invoice_id.is_some() {
+            return Err(ApiError::conflict("Billable item is already on an invoice").into());
+        }
+        let fields = validate_billable_item_input(&input)?;
+        let written = self
+            .app
+            .db()
+            .update_billable_item(
+                &item.id,
+                db::BillableItemUpdateShape::Fields {
+                    date: &fields.date,
+                    description: &fields.description,
+                    quantity_hundredths: fields.quantity_hundredths,
+                    unit_price_cents: fields.unit_price_cents,
+                },
+            )
+            .await?;
+        if !written {
+            return Err(ApiError::conflict(
+                "Billable item changed (deleted or put on an invoice) — reload and try again",
+            )
+            .into());
+        }
+        Ok(BillableItem::new(db::BillableItem {
+            date: fields.date,
+            description: fields.description,
+            quantity_hundredths: fields.quantity_hundredths,
+            unit_price_cents: fields.unit_price_cents,
+            updated_at: crate::clock::now_sec(),
+            ..item
+        }))
+    }
+
+    /// Delete a billable item, returning its id (for the client's store).
+    /// Same authorization and on-an-invoice refusal as
+    /// `updateBillableItem` — including the same "only once finalized"
+    /// narrowing when invoices land.
+    async fn delete_billable_item(&self, ctx: &Context<'_>, id: ID) -> Result<ID> {
+        let item = require_billable_item_member(ctx, &*self.app, id.as_str()).await?;
+        if item.invoice_id.is_some() {
+            return Err(ApiError::conflict("Billable item is already on an invoice").into());
+        }
+        if !self.app.db().delete_billable_item(&item.id).await? {
+            return Err(ApiError::conflict(
+                "Billable item changed (deleted or put on an invoice) — reload and try again",
+            )
+            .into());
+        }
+        Ok(ID(item.id))
     }
 }
 

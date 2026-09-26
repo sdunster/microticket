@@ -8,6 +8,7 @@ import LoadingIndicator from "../../components/LoadingIndicator";
 import { ButtonLink } from "../../components/ui/Button";
 import { RequireInvoicingInstance } from "./RequireInvoicingInstance";
 import { ProjectEditForm } from "./ProjectEditForm";
+import { ProjectBillableItems } from "./ProjectBillableItems";
 
 const projectDetailPageQuery = graphql`
   query ProjectDetailPageQuery($id: ID!) @throwOnFieldError {
@@ -16,6 +17,12 @@ const projectDetailPageQuery = graphql`
       name
       clientName
       archived
+      instance {
+        id
+        invoicingSettings {
+          currency
+        }
+      }
       ...ProjectEditForm_project
     }
   }
@@ -43,7 +50,7 @@ function Content({ id }: { id: string }) {
 
   const project = data.project;
   return (
-    <div className="flex max-w-3xl flex-col gap-6">
+    <div className="flex max-w-6xl flex-col gap-6">
       <ButtonLink
         to="/app/projects"
         variant="ghost"
@@ -64,8 +71,16 @@ function Content({ id }: { id: string }) {
         </div>
         <p className="mt-1 text-sm text-ink-muted">{project.clientName}</p>
       </div>
-      <ProjectEditForm project={project} />
-      {/* Billable items and invoices sections go here, below the details. */}
+      <div className="max-w-3xl">
+        <ProjectEditForm project={project} />
+      </div>
+      <ProjectBillableItems
+        instanceId={project.instance.id}
+        projectId={project.id}
+        currency={project.instance.invoicingSettings?.currency ?? "AUD"}
+        archived={project.archived}
+      />
+      {/* The project's invoices section goes here, below its items. */}
     </div>
   );
 }

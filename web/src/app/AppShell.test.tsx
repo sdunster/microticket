@@ -117,6 +117,7 @@ describe("AppShell — kind-aware nav", () => {
     await screen.findByRole("link", { name: "Projects" });
     expect(navLinkNames()).toEqual([
       "Projects",
+      "Billable items",
       "Settings",
       "Business settings",
       "Admin",
@@ -126,6 +127,6 @@ describe("AppShell — kind-aware nav", () => {
   it("hides business settings from an invoicing agent", async () => {
     renderShell(false, [membership("AGENT", "INVOICING")]);
     await screen.findByRole("link", { name: "Projects" });
-    expect(navLinkNames()).toEqual(["Projects", "Settings"]);
+    expect(navLinkNames()).toEqual(["Projects", "Billable items", "Settings"]);
   });
 });
