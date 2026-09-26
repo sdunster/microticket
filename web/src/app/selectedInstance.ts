@@ -39,5 +39,5 @@ export function toInstanceKind(kind: string): InstanceKind {
 /** Where a kind's section of the app starts: the switcher navigates here
  * when the selection changes kind, and `/app`'s index redirects here. */
 export function homePathForKind(kind: InstanceKind): string {
-  return kind === "INVOICING" ? "/app/projects" : "/app/tickets/open";
+  return kind === "INVOICING" ? "/app/invoices" : "/app/tickets/open";
 }

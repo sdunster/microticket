@@ -27,9 +27,9 @@ const DELETED_NAV_ITEM = { to: "/app/tickets/deleted", label: "Deleted" };
 // a non-superuser who navigates to `/app/admin/*` directly still gets
 // FORBIDDEN from the server on every field it would try to read.
 const ADMIN_NAV_ITEM = { to: "/app/admin", label: "Admin" };
-// Invoicing instances get their own nav. Invoices join these here when that
-// page lands.
+// Invoicing instances get their own nav.
 const INVOICING_NAV_ITEMS = [
+  { to: "/app/invoices", label: "Invoices" },
   { to: "/app/projects", label: "Projects" },
   { to: "/app/billable-items", label: "Billable items" },
 ];
@@ -52,8 +52,9 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 /**
  * The authenticated shell: header (instance switcher, current user, log
  * out) plus a nav that depends on the selected instance's kind — the
- * Open/Closed/All/Mine ticket queues for a support instance, Projects and
- * Business settings for an invoicing one (Settings and Admin in both).
+ * Open/Closed/All/Mine ticket queues for a support instance, Invoices,
+ * Projects and Business settings for an invoicing one (Settings and Admin
+ * in both).
  * Child routes render into the `<Outlet/>`.
  */
 export default function AppShell() {

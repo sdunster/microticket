@@ -2,10 +2,16 @@
 //! GraphQL resolver — see CLAUDE.md's "Invoicing" house rule.
 //!
 //! - [`money`]: quantity/cents parsing, formatting, line amounts and GST.
+//! - [`snapshot`]: the frozen `InvoiceSnapshot` shape and `build_snapshot`,
+//!   the one function that produces both a finalized invoice's frozen
+//!   content and a draft's live preview.
 //! - The billable-item input validators below, shared by
 //!   `createBillableItem`/`updateBillableItem`.
+//! - [`validate_total_within_safe_integer`], shared by every mutation that
+//!   changes an invoice's item set.
 
 pub mod money;
+pub mod snapshot;
 
 use chrono::NaiveDate;
 
@@ -58,6 +64,23 @@ pub fn validate_unit_price_cents(cents: i64) -> Result<i64, String> {
     Ok(cents)
 }
 
+/// Reject a would-be invoice total (subtotal + GST, in cents) that exceeds
+/// `Number.MAX_SAFE_INTEGER` — see CLAUDE.md's "Invoicing" house rule
+/// ("Totals overflow"). `amountCents` can individually reach 10^15 within a
+/// single line's own bounds, but a JS client must be able to hold an
+/// invoice's *total* exactly, so every mutation that changes an invoice's
+/// item set (`createInvoice`, `addInvoiceItems`, `finalizeInvoice`) checks
+/// the prospective total here before writing. Practically unreachable at
+/// the 50-item-per-invoice cap, but cheap to check.
+pub fn validate_total_within_safe_integer(total_cents: i64) -> Result<(), String> {
+    if total_cents > money::MAX_SAFE_TOTAL_CENTS {
+        return Err(
+            "Invoice total would exceed the maximum value this application supports".to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +118,13 @@ mod tests {
         assert!(validate_description("   \n  ").is_err());
         assert!(validate_description(&"x".repeat(MAX_DESCRIPTION_LEN)).is_ok());
         assert!(validate_description(&"x".repeat(MAX_DESCRIPTION_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn validate_total_within_safe_integer_accepts_up_to_the_limit() {
+        assert!(validate_total_within_safe_integer(0).is_ok());
+        assert!(validate_total_within_safe_integer(money::MAX_SAFE_TOTAL_CENTS).is_ok());
+        assert!(validate_total_within_safe_integer(money::MAX_SAFE_TOTAL_CENTS + 1).is_err());
     }
 
     #[test]

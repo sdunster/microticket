@@ -70,12 +70,21 @@ type BillableItem {
 	"""
 	amountCents: Int!
 	"""
-	`UNBILLED` when not on an invoice. An item with an `invoice_id` is
-	reported `INVOICED` for now — nothing sets one until invoices land
-	(next PR), which will tell `DRAFT` from `INVOICED` by loading the
-	invoice.
+	`UNBILLED` when not on an invoice; otherwise `DRAFT`/`INVOICED`
+	according to that invoice's own status, dataloaded — a page of items
+	resolves this once per node, same as [`Self::project`]. Falls back to
+	`INVOICED` if the invoice row is somehow missing (data-integrity
+	problem, not a normal outcome) — the conservative reading, since an
+	`invoice_id` being set at all means this item is *not* plainly
+	unbilled.
 	"""
 	status: BillableItemStatusType!
+	"""
+	The invoice this item is on, or `null` if unbilled. Dataloaded, same
+	batching as [`Self::status`] — except when a known parent invoice
+	already names it, per `parent_invoice`'s doc comment.
+	"""
+	invoice: Invoice
 	createdAt: Int!
 	updatedAt: Int!
 }
@@ -246,14 +255,138 @@ enum InstanceKindType {
 	INVOICING
 }
 
+type Invoice {
+	id: ID!
+	status: InvoiceStatusType!
+	number: Int
+	"""
+	Zero-padded to 3 digits (`"008"`); `null` for a draft. Mirrors
+	`invoicing::snapshot::InvoiceSnapshot::display_number` exactly.
+	"""
+	displayNumber: String
+	"""
+	`YYYY-MM-DD`; `null` for a draft.
+	"""
+	issueDate: String
+	"""
+	`YYYY-MM-DD`; `null` means unpaid. Never printed on the invoice.
+	"""
+	paidDate: String
+	"""
+	Dataloaded — see `TicketMessage::author`'s doc comment.
+	"""
+	project: Project!
+	"""
+	This invoice's current items — live rows fetched by `item_ids`, for
+	both a draft and a finalized invoice (never from the snapshot, which
+	carries frozen `InvoiceLine`s, not `BillableItem`s). A strongly
+	consistent `BatchGetItem` (`get_billable_items_consistent`), not the
+	(eventually consistent) `get_billable_items` — a mutation that just
+	attached these items (`createInvoice`/`addInvoiceItems`) returns this
+	field in the same response, and each item is handed this invoice as
+	its known parent, so `status`/`invoice` resolve from it directly
+	rather than the (also eventually consistent) dataloader path.
+	"""
+	items: [BillableItem!]!
+	"""
+	"Tax Invoice" or "Invoice" — see [`Self::effective`].
+	"""
+	title: String!
+	billTo: InvoiceBillToInfo!
+	reference: String
+	seller: InvoiceSellerInfo!
+	lines: [InvoiceLineInfo!]!
+	subtotalCents: Int!
+	gstCents: Int!
+	totalCents: Int!
+	currency: String!
+	gstRegistered: Boolean!
+	paymentDetails: String
+	createdAt: Int!
+	finalizedAt: Int
+}
+
 """
-An invoicing instance's seller settings and payment footer — the printed
-"Invoice to"/seller block and payment text, per CLAUDE.md's "Invoicing"
-house rule. `null` for a support instance (see
-[`Instance::invoicing_settings`]). Owner-or-superuser to *write*
-(`updateInvoicingSettings`), but readable by any member — the same
-posture as every other plain `Instance` field.
+The printed "Invoice to" block — from the project's client fields, per
+`invoicing::snapshot::InvoiceSnapshotBillTo`.
 """
+type InvoiceBillToInfo {
+	name: String!
+	abn: String
+	address: String
+}
+
+type InvoiceConnection {
+	"""
+	Information to aid in pagination.
+	"""
+	pageInfo: PageInfo!
+	"""
+	A list of edges.
+	"""
+	edges: [InvoiceEdge!]!
+	"""
+	A list of nodes.
+	"""
+	nodes: [Invoice!]!
+}
+
+"""
+An edge in a connection.
+"""
+type InvoiceEdge {
+	"""
+	The item at the end of the edge
+	"""
+	node: Invoice!
+	"""
+	A cursor for use in pagination
+	"""
+	cursor: String!
+}
+
+"""
+`invoices`' filter. `UNPAID`/`PAID` both imply finalized — a draft has no
+paid status.
+"""
+enum InvoiceFilterType {
+	ALL
+	DRAFT
+	UNPAID
+	PAID
+}
+
+"""
+One printed line — per `invoicing::snapshot::InvoiceSnapshotLine`.
+"""
+type InvoiceLineInfo {
+	date: String!
+	description: String!
+	quantity: String!
+	unitPriceCents: Int!
+	amountCents: Int!
+}
+
+"""
+The printed seller block — from the instance's business settings, per
+`invoicing::snapshot::InvoiceSnapshotSeller`.
+"""
+type InvoiceSellerInfo {
+	name: String
+	abn: String
+	address: String
+	phone: String
+	email: String
+}
+
+"""
+`invoice.status`, over GraphQL.
+"""
+enum InvoiceStatusType {
+	DRAFT
+	FINALIZED
+}
+
 type InvoicingSettingsInfo {
 	businessName: String
 	businessAbn: String
@@ -266,6 +399,14 @@ type InvoicingSettingsInfo {
 	Defaults to `"AUD"` — see `db::Instance::currency_or_default`.
 	"""
 	currency: String!
+	"""
+	`(counter value, or 0 if never finalized) + 1` — the number
+	`finalizeInvoice` will assign next, and `setNextInvoiceNumber`'s
+	argument shape. Read lazily here (a `counter` `GetItem`), not
+	carried on `db::Instance`, so a plain `Instance`/`invoicingSettings`
+	fetch that doesn't ask for this field costs nothing extra.
+	"""
+	nextInvoiceNumber: Int!
 }
 
 """
@@ -803,23 +944,84 @@ type MutationRoot {
 	"""
 	Full-replace a billable item's date/description/quantity/unit price.
 	Id-only, authorised like `updateProject` (`NOT_FOUND` for missing or
-	not yours). Refused with `CONFLICT` once the item is on an invoice —
-	checked up front for a clear message, and again atomically in the
-	write's condition, so an item attached between the two is never
-	silently edited.
-	
-	When invoices land (next PR) this narrows to "refused once the invoice
-	is *finalized*": an item on a draft stays editable, bumping the
-	draft's `version` in the same transaction.
+	not yours). An unbilled item is a plain conditional update, unchanged
+	from before invoices existed. An item on a *draft* invoice stays
+	editable — the write also bumps that invoice's `version` in the same
+	transaction (`db::Handler::update_billable_item`), conditioned on it
+	still being a draft. An item on a *finalized* invoice is refused —
+	checked up front here for a clear message, and again atomically in
+	the write's condition, so a concurrent finalize is never silently
+	edited around.
 	"""
 	updateBillableItem(id: ID!, input: BillableItemInput!): BillableItem!
 	"""
 	Delete a billable item, returning its id (for the client's store).
-	Same authorization and on-an-invoice refusal as
-	`updateBillableItem` — including the same "only once finalized"
-	narrowing when invoices land.
+	Unbilled only, regardless of the item's invoice's own status — see
+	CLAUDE.md's "Invoicing" house rule.
 	"""
 	deleteBillableItem(id: ID!): ID!
+	"""
+	Create a draft invoice from a project's unbilled items, in one
+	transaction (`db::Handler::create_invoice`). Authorised through the
+	project like `createBillableItem` — `NOT_FOUND` for a missing
+	project or a non-member alike; an archived project is allowed (you
+	may be invoicing final work on a job you've since archived). Every
+	id in `itemIds` must belong to this project and be currently
+	unbilled (`CONFLICT`/`NOT_FOUND` otherwise), 1–50 of them
+	(`MAX_INVOICE_ITEMS`), no duplicates.
+	"""
+	createInvoice(projectId: ID!, itemIds: [ID!]!): Invoice!
+	"""
+	Add unbilled items to a draft invoice, in one transaction
+	(`db::Handler::add_invoice_items`) that also bumps the invoice's
+	`version`. `NOT_FOUND`/`CONFLICT` for the same reasons as
+	`createInvoice`; `CONFLICT` if the invoice is already finalized, or
+	changed concurrently (a stale `version`).
+	"""
+	addInvoiceItems(invoiceId: ID!, itemIds: [ID!]!): Invoice!
+	"""
+	Remove items from a draft invoice, in one transaction
+	(`db::Handler::remove_invoice_items`) that also bumps the invoice's
+	`version`. Removing every item (an empty draft) is allowed —
+	finalizing one is not. `CONFLICT` if the invoice is finalized, an id
+	isn't currently on it, or the invoice changed concurrently.
+	"""
+	removeInvoiceItems(invoiceId: ID!, itemIds: [ID!]!): Invoice!
+	"""
+	Delete a draft invoice, returning its id. Draft only — a `Delete` on
+	the invoice plus `REMOVE invoice_id` on each of its items, in one
+	transaction (`db::Handler::delete_invoice`) conditioned on the
+	`version` this resolver just read.
+	"""
+	deleteInvoice(invoiceId: ID!): ID!
+	"""
+	Finalize a draft invoice — CLAUDE.md's "finalize algorithm", steps
+	1–6: re-read the items this resolver's `require_invoice_member`
+	fetch named (consistently, so this sees each item's just-attached
+	`invoice_id`), read the project and instance (requiring
+	`businessName` to be set), allocate the next number from the
+	per-instance counter, build the frozen snapshot, and write it all in
+	one conditional `UpdateItem`. Strictly final — no void, no
+	un-finalize; only `setInvoicePaid` may touch a finalized invoice
+	afterward. `CONFLICT` if the draft changed concurrently (a stale
+	`version`, checked both up front — via the consistent items read —
+	and in the final write's own condition).
+	"""
+	finalizeInvoice(invoiceId: ID!, issueDate: String!): Invoice!
+	"""
+	Set (`paidDate` given) or clear (`null`) a finalized invoice's paid
+	status. Any member may call this — paid status is not printed on
+	the invoice and is not part of what finalization freezes. `CONFLICT`
+	on a draft, or if the invoice changed concurrently.
+	"""
+	setInvoicePaid(invoiceId: ID!, paidDate: String): Invoice!
+	"""
+	Owner-or-superuser: set the next invoice number to be assigned by
+	`finalizeInvoice` (`db::Handler::set_next_invoice_number` writes
+	`next - 1` to the counter). Forward-only — `CONFLICT` if `next`
+	would move the counter backward. `next` must be at least 1.
+	"""
+	setNextInvoiceNumber(instanceId: ID!, next: Int!): Instance!
 }
 
 """
@@ -1003,6 +1205,26 @@ type QueryRoot {
 	`Member`.
 	"""
 	billableItems(instanceId: ID!, projectId: ID, filter: BillableItemFilterType! = ALL, first: Int, after: String): BillableItemConnection!
+	"""
+	Invoices in an invoicing instance — every project's, or one
+	project's when `projectId` is given — as a Relay connection, newest
+	`createdAt` first (see `db::Handler::list_invoices`). Same posture as
+	[`Self::billable_items`]: member of `instanceId`, support instance
+	rejected with a plain validation error, `projectId` from another
+	instance is `NOT_FOUND`, superusers get nothing.
+	"""
+	invoices(instanceId: ID!, projectId: ID, filter: InvoiceFilterType! = ALL, first: Int, after: String): InvoiceConnection!
+	"""
+	Fetch a single invoice by id. Reachable only by a member of its
+	(invoicing) instance — missing, wrong instance, and belonging to a
+	support instance are all reported identically — `null` — mirroring
+	[`Self::project`]'s no-probing posture. A strongly consistent
+	`GetItem` (`get_invoice_consistent`), not the dataloader path: the web
+	app navigates straight here right after `createInvoice`/
+	`finalizeInvoice`, so an eventually consistent read could still show
+	"not found" for an invoice this same request just created.
+	"""
+	invoice(id: ID!): Invoice
 	"""
 	Every instance, **including soft-deleted ones**, sorted by name — the
 	admin instance list. Superuser-only; unlike every other way an

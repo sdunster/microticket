@@ -6,12 +6,14 @@ import RelayErrorBoundary from "../../components/RelayErrorBoundary";
 import LoadingIndicator from "../../components/LoadingIndicator";
 import { RequireInvoicingInstance } from "./RequireInvoicingInstance";
 import { InvoicingSettingsForm } from "./InvoicingSettingsForm";
+import { InvoiceNumberingForm } from "./InvoiceNumberingForm";
 
 const invoicingSettingsPageQuery = graphql`
   query InvoicingSettingsPageQuery($slug: String!) @throwOnFieldError {
     instance(slug: $slug) {
       id
       ...InvoicingSettingsForm_instance
+      ...InvoiceNumberingForm_instance
     }
   }
 `;
@@ -30,7 +32,12 @@ function Content({ slug }: { slug: string }) {
     );
   }
 
-  return <InvoicingSettingsForm instance={data.instance} />;
+  return (
+    <div className="flex flex-col gap-6">
+      <InvoicingSettingsForm instance={data.instance} />
+      <InvoiceNumberingForm instance={data.instance} />
+    </div>
+  );
 }
 
 /**
