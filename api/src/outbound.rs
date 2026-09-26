@@ -392,11 +392,20 @@ mod tests {
             id: "inst1".to_string(),
             name: "Acme".to_string(),
             slug: "acme".to_string(),
+            kind: db::InstanceKind::Support,
             public_submission_enabled: false,
             from_name: "Acme Support".to_string(),
             signature: "Thanks,\nAcme Support".to_string(),
             created_at: 1_000,
             deleted: false,
+            business_name: None,
+            business_abn: None,
+            business_address: None,
+            business_phone: None,
+            business_email: None,
+            payment_details: None,
+            gst_registered: false,
+            currency: None,
         }
     }
 

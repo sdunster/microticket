@@ -319,6 +319,11 @@ impl TryInto<db::WebauthnCredential> for Item {
 impl TryInto<db::Instance> for Item {
     type Error = HydrationError;
     fn try_into(self) -> Result<db::Instance, Self::Error> {
+        let kind = match self.string_field("kind")? {
+            None => db::InstanceKind::Support,
+            Some(s) => db::InstanceKind::parse(&s)
+                .ok_or_else(|| anyhow!("Instance has unrecognized kind: {s}"))?,
+        };
         Ok(db::Instance {
             id: self.id()?,
             name: self
@@ -327,6 +332,7 @@ impl TryInto<db::Instance> for Item {
             slug: self
                 .string_field("slug")?
                 .ok_or_else(|| anyhow!("Instance missing slug"))?,
+            kind,
             public_submission_enabled: self
                 .bool_field("public_submission_enabled")?
                 .unwrap_or(false),
@@ -337,6 +343,14 @@ impl TryInto<db::Instance> for Item {
                 .ok_or_else(|| anyhow!("Instance missing created_at"))?
                 as u64,
             deleted: self.bool_field("deleted")?.unwrap_or(false),
+            business_name: self.string_field("business_name")?,
+            business_abn: self.string_field("business_abn")?,
+            business_address: self.string_field("business_address")?,
+            business_phone: self.string_field("business_phone")?,
+            business_email: self.string_field("business_email")?,
+            payment_details: self.string_field("payment_details")?,
+            gst_registered: self.bool_field("gst_registered")?.unwrap_or(false),
+            currency: self.string_field("currency")?,
         })
     }
 }
@@ -407,6 +421,36 @@ impl TryInto<db::Membership> for Item {
                     .bool_field("notify_assigned_to_others_updated")?
                     .unwrap_or(defaults.assigned_to_others_updated),
             },
+        })
+    }
+}
+
+impl TryInto<db::Project> for Item {
+    type Error = HydrationError;
+    fn try_into(self) -> Result<db::Project, Self::Error> {
+        Ok(db::Project {
+            id: self.id()?,
+            instance_id: self
+                .string_field("instance_id")?
+                .ok_or_else(|| anyhow!("Project missing instance_id"))?,
+            name: self
+                .string_field("name")?
+                .ok_or_else(|| anyhow!("Project missing name"))?,
+            client_name: self
+                .string_field("client_name")?
+                .ok_or_else(|| anyhow!("Project missing client_name"))?,
+            client_abn: self.string_field("client_abn")?,
+            client_address: self.string_field("client_address")?,
+            reference: self.string_field("reference")?,
+            archived: self.bool_field("archived")?.unwrap_or(false),
+            created_at: self
+                .i64_field("created_at")?
+                .ok_or_else(|| anyhow!("Project missing created_at"))?
+                as u64,
+            updated_at: self
+                .i64_field("updated_at")?
+                .ok_or_else(|| anyhow!("Project missing updated_at"))?
+                as u64,
         })
     }
 }
@@ -1019,6 +1063,7 @@ impl db::Handler for Handler {
         from_name: &str,
         signature: &str,
         public_submission_enabled: bool,
+        kind: db::InstanceKind,
     ) -> db::Result<db::Instance> {
         self.ensure_writable()?;
         let id = new_id();
@@ -1040,9 +1085,12 @@ impl db::Handler for Handler {
             // `db::Handler::create_instance`.
             .condition_expression("attribute_not_exists(id)")
             .return_consumed_capacity(ReturnConsumedCapacity::Total);
-        // Omit-optional-attributes house rule: only written when true.
+        // Omit-optional-attributes house rule: only written when true/non-Support.
         if public_submission_enabled {
             req = req.item("public_submission_enabled", AttributeValue::Bool(true));
+        }
+        if kind == db::InstanceKind::Invoicing {
+            req = req.item("kind", AttributeValue::S(kind.as_str().to_string()));
         }
         let resp = req
             .send()
@@ -1054,11 +1102,20 @@ impl db::Handler for Handler {
             id,
             name: name.to_string(),
             slug: slug.to_string(),
+            kind,
             public_submission_enabled,
             from_name: from_name.to_string(),
             signature: signature.to_string(),
             created_at: now,
             deleted: false,
+            business_name: None,
+            business_abn: None,
+            business_address: None,
+            business_phone: None,
+            business_email: None,
+            payment_details: None,
+            gst_registered: false,
+            currency: None,
         })
     }
 
@@ -1128,6 +1185,86 @@ impl db::Handler for Handler {
                     .map_err(|e| map_update_err(e, format!("Instance {id}")))?;
                 record_capacity(
                     "update_instance_deleted",
+                    resp.consumed_capacity(),
+                    CapKind::Write,
+                );
+            }
+            db::InstanceUpdateShape::SetInvoicingSettings {
+                business_name,
+                business_abn,
+                business_address,
+                business_phone,
+                business_email,
+                payment_details,
+                gst_registered,
+                currency,
+            } => {
+                let mut sets: Vec<String> = Vec::new();
+                let mut removes: Vec<&str> = Vec::new();
+                let mut req = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("instance"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)");
+
+                let string_fields: [(&str, &str, Option<&str>); 6] = [
+                    (":bn", "business_name", business_name),
+                    (":ba", "business_abn", business_abn),
+                    (":bad", "business_address", business_address),
+                    (":bp", "business_phone", business_phone),
+                    (":be", "business_email", business_email),
+                    (":pd", "payment_details", payment_details),
+                    // currency handled separately below (own placeholder).
+                ];
+                for (placeholder, attr, value) in string_fields {
+                    match value {
+                        Some(v) => {
+                            sets.push(format!("{attr} = {placeholder}"));
+                            req = req.expression_attribute_values(
+                                placeholder,
+                                AttributeValue::S(v.to_string()),
+                            );
+                        }
+                        None => removes.push(attr),
+                    }
+                }
+                match currency {
+                    Some(c) => {
+                        sets.push("currency = :cur".to_string());
+                        req = req
+                            .expression_attribute_values(":cur", AttributeValue::S(c.to_string()));
+                    }
+                    None => removes.push("currency"),
+                }
+                // Omit-optional-attributes house rule: only ever written `true`.
+                if gst_registered {
+                    sets.push("gst_registered = :gst".to_string());
+                    req = req.expression_attribute_values(":gst", AttributeValue::Bool(true));
+                } else {
+                    removes.push("gst_registered");
+                }
+
+                let mut update_expr = String::new();
+                if !sets.is_empty() {
+                    update_expr.push_str("SET ");
+                    update_expr.push_str(&sets.join(", "));
+                }
+                if !removes.is_empty() {
+                    if !update_expr.is_empty() {
+                        update_expr.push(' ');
+                    }
+                    update_expr.push_str("REMOVE ");
+                    update_expr.push_str(&removes.join(", "));
+                }
+                let resp = req
+                    .update_expression(update_expr)
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Instance {id}")))?;
+                record_capacity(
+                    "update_instance_invoicing_settings",
                     resp.consumed_capacity(),
                     CapKind::Write,
                 );
@@ -1918,6 +2055,160 @@ impl db::Handler for Handler {
             .send()
             .await
             .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        Ok(())
+    }
+
+    // ── project ───────────────────────────────────────────────────────────
+
+    async fn create_project(
+        &self,
+        instance_id: &str,
+        name: &str,
+        client_name: &str,
+        client_abn: Option<&str>,
+        client_address: Option<&str>,
+        reference: Option<&str>,
+    ) -> db::Result<db::Project> {
+        self.ensure_writable()?;
+        let id = new_id();
+        let now = crate::clock::now_sec();
+        let mut req = self
+            .client
+            .put_item()
+            .table_name(self.table_name("project"))
+            .item("id", AttributeValue::S(id.clone()))
+            .item("instance_id", AttributeValue::S(instance_id.to_string()))
+            .item("name", AttributeValue::S(name.to_string()))
+            .item("client_name", AttributeValue::S(client_name.to_string()))
+            .item("created_at", AttributeValue::N(now.to_string()))
+            .item("updated_at", AttributeValue::N(now.to_string()))
+            .condition_expression("attribute_not_exists(id)")
+            .return_consumed_capacity(ReturnConsumedCapacity::Total);
+        if let Some(v) = client_abn {
+            req = req.item("client_abn", AttributeValue::S(v.to_string()));
+        }
+        if let Some(v) = client_address {
+            req = req.item("client_address", AttributeValue::S(v.to_string()));
+        }
+        if let Some(v) = reference {
+            req = req.item("reference", AttributeValue::S(v.to_string()));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| db::Error::Infrastructure(sdk_err_msg(e)))?;
+        record_capacity("create_project", resp.consumed_capacity(), CapKind::Write);
+        Ok(db::Project {
+            id,
+            instance_id: instance_id.to_string(),
+            name: name.to_string(),
+            client_name: client_name.to_string(),
+            client_abn: client_abn.map(str::to_string),
+            client_address: client_address.map(str::to_string),
+            reference: reference.map(str::to_string),
+            archived: false,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    async fn get_projects<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> db::Result<Vec<Option<db::Project>>> {
+        self.get_records("project", ids).await
+    }
+
+    async fn list_projects_by_instance(&self, instance_id: &str) -> db::Result<Vec<db::Project>> {
+        query_all("list_projects_by_instance", || {
+            self.client
+                .query()
+                .table_name(self.table_name("project"))
+                .index_name("instance_id-index")
+                .key_condition_expression("instance_id = :instance_id")
+                .expression_attribute_values(
+                    ":instance_id",
+                    AttributeValue::S(instance_id.to_string()),
+                )
+        })
+        .await
+    }
+
+    async fn update_project(&self, id: &str, change: db::ProjectUpdateShape<'_>) -> db::Result<()> {
+        self.ensure_writable()?;
+        match change {
+            db::ProjectUpdateShape::Fields {
+                name,
+                client_name,
+                client_abn,
+                client_address,
+                reference,
+                archived,
+            } => {
+                let now = crate::clock::now_sec();
+                let mut sets = vec![
+                    "#n = :name".to_string(),
+                    "client_name = :client_name".to_string(),
+                    "updated_at = :updated_at".to_string(),
+                ];
+                let mut removes: Vec<&str> = Vec::new();
+                let mut req = self
+                    .client
+                    .update_item()
+                    .table_name(self.table_name("project"))
+                    .key("id", AttributeValue::S(id.to_string()))
+                    .condition_expression("attribute_exists(id)")
+                    .expression_attribute_names("#n", "name")
+                    // "reference" is a DynamoDB reserved keyword and cannot
+                    // appear literally in an update/condition/projection
+                    // expression — aliased via #ref like #n above.
+                    .expression_attribute_names("#ref", "reference")
+                    .expression_attribute_values(":name", AttributeValue::S(name.to_string()))
+                    .expression_attribute_values(
+                        ":client_name",
+                        AttributeValue::S(client_name.to_string()),
+                    )
+                    .expression_attribute_values(":updated_at", AttributeValue::N(now.to_string()));
+
+                let optional_fields: [(&str, &str, Option<&str>); 3] = [
+                    (":client_abn", "client_abn", client_abn),
+                    (":client_address", "client_address", client_address),
+                    (":reference", "#ref", reference),
+                ];
+                for (placeholder, attr, value) in optional_fields {
+                    match value {
+                        Some(v) => {
+                            sets.push(format!("{attr} = {placeholder}"));
+                            req = req.expression_attribute_values(
+                                placeholder,
+                                AttributeValue::S(v.to_string()),
+                            );
+                        }
+                        None => removes.push(attr),
+                    }
+                }
+                // Omit-optional-attributes house rule: only ever written `true`.
+                if archived {
+                    sets.push("archived = :archived".to_string());
+                    req = req.expression_attribute_values(":archived", AttributeValue::Bool(true));
+                } else {
+                    removes.push("archived");
+                }
+
+                let mut update_expr = format!("SET {}", sets.join(", "));
+                if !removes.is_empty() {
+                    update_expr.push_str(" REMOVE ");
+                    update_expr.push_str(&removes.join(", "));
+                }
+                let resp = req
+                    .update_expression(update_expr)
+                    .return_consumed_capacity(ReturnConsumedCapacity::Total)
+                    .send()
+                    .await
+                    .map_err(|e| map_update_err(e, format!("Project {id}")))?;
+                record_capacity("update_project", resp.consumed_capacity(), CapKind::Write);
+            }
+        }
         Ok(())
     }
 

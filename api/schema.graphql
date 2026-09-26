@@ -36,6 +36,17 @@ type AttachmentUpload {
 	uploadUrl: String!
 }
 
+"""
+`createProject`'s argument.
+"""
+input CreateProjectInput {
+	name: String!
+	clientName: String!
+	clientAbn: String
+	clientAddress: String
+	reference: String
+}
+
 type CreatedApiToken {
 	token: String!
 	apiToken: ApiTokenInfo!
@@ -56,6 +67,15 @@ type Instance {
 	id: ID!
 	name: String!
 	slug: String!
+	"""
+	Immutable after creation — see `db::InstanceKind`'s doc comment.
+	"""
+	kind: InstanceKindType!
+	"""
+	This instance's invoicing settings, or `null` for a support instance.
+	See [`InvoicingSettingsInfo`]'s doc comment.
+	"""
+	invoicingSettings: InvoicingSettingsInfo
 	publicSubmissionEnabled: Boolean!
 	fromName: String!
 	signature: String!
@@ -101,6 +121,56 @@ type Instance {
 	here — see `createApiToken`'s doc comment for the only time it does.
 	"""
 	apiTokens: [ApiTokenInfo!]!
+}
+
+"""
+`instance.kind`, exposed over GraphQL. Immutable after creation — see
+`db::InstanceKind`'s doc comment.
+"""
+enum InstanceKindType {
+	SUPPORT
+	INVOICING
+}
+
+"""
+An invoicing instance's seller settings and payment footer — the printed
+"Invoice to"/seller block and payment text, per CLAUDE.md's "Invoicing"
+house rule. `null` for a support instance (see
+[`Instance::invoicing_settings`]). Owner-or-superuser to *write*
+(`updateInvoicingSettings`), but readable by any member — the same
+posture as every other plain `Instance` field.
+"""
+type InvoicingSettingsInfo {
+	businessName: String
+	businessAbn: String
+	businessAddress: String
+	businessPhone: String
+	businessEmail: String
+	paymentDetails: String
+	gstRegistered: Boolean!
+	"""
+	Defaults to `"AUD"` — see `db::Instance::currency_or_default`.
+	"""
+	currency: String!
+}
+
+"""
+`updateInvoicingSettings`'s argument — full-replace, unlike
+[`NotificationSettingsInput`]'s per-field patch: every call writes every
+field. Every string field is required by the schema but treated as
+"unset" when blank after trimming — see
+`graphql::mutations::update_invoicing_settings`'s doc comment for the
+REMOVE-on-blank rule this input drives.
+"""
+input InvoicingSettingsInput {
+	businessName: String!
+	businessAbn: String!
+	businessAddress: String!
+	businessPhone: String!
+	businessEmail: String!
+	paymentDetails: String!
+	gstRegistered: Boolean!
+	currency: String!
 }
 
 type MemberInfo {
@@ -211,7 +281,7 @@ type MutationRoot {
 	still leaves open, unchanged by this mutation existing. `fromName`
 	defaults to `name`, matching the CLI.
 	"""
-	createInstance(name: String!, slug: String!, fromName: String, signature: String, publicSubmissionEnabled: Boolean!): Instance!
+	createInstance(name: String!, slug: String!, fromName: String, signature: String, publicSubmissionEnabled: Boolean!, kind: InstanceKindType! = SUPPORT): Instance!
 	"""
 	Update an instance's name/from-name/signature/public-submission
 	setting (`InstanceUpdateShape::Fields`). Superuser-only. There is no
@@ -572,6 +642,41 @@ type MutationRoot {
 	"not found" as [`Self::rename_passkey`].
 	"""
 	deletePasskey(id: String!): Boolean!
+	"""
+	Full-replace an invoicing instance's seller settings/payment footer —
+	`InstanceUpdateShape::SetInvoicingSettings`. Owner-or-superuser, the
+	same posture as `addInboundAddress`/`createApiToken`: this is
+	instance settings, not something a plain agent can change. Rejects a
+	support instance (`db::require_instance_kind`) — see CLAUDE.md's
+	"Invoicing" house rule.
+	
+	Every string field in `input` is trimmed; a blank result after
+	trimming `REMOVE`s the corresponding attribute rather than writing an
+	empty string, per the omit-optional-attributes house rule — this is a
+	full replace, so a field the caller leaves blank is explicitly
+	cleared, not left alone. `gstRegistered` is written `true` or
+	`REMOVE`d — see `db::Instance::gst_registered`'s doc comment.
+	`currency` follows the same blank-means-absent rule (absent defaults
+	to `"AUD"` — `db::Instance::currency_or_default`); a non-blank value
+	must be 3 uppercase ASCII letters (`db::validate_currency_code`).
+	"""
+	updateInvoicingSettings(instanceId: ID!, input: InvoicingSettingsInput!): Instance!
+	"""
+	Create a project in an invoicing instance. Member (owner or agent) —
+	managing projects/items/draft invoices is day-to-day work, not an
+	owner-only setting, per CLAUDE.md's "Invoicing" house rule. Rejects a
+	support instance.
+	"""
+	createProject(instanceId: ID!, input: CreateProjectInput!): Project!
+	"""
+	Update a project — full replace, including `archived`. Takes only
+	`id`; the instance it belongs to is a fact of the record, so
+	authorization happens in the body after fetching the row (mirroring
+	`require_ticket_member`) rather than a static `#[graphql(guard)]`. A
+	project that doesn't exist, or whose instance the caller isn't a
+	member of, is `NOT_FOUND` either way — no probing.
+	"""
+	updateProject(id: ID!, input: UpdateProjectInput!): Project!
 }
 
 """
@@ -636,6 +741,22 @@ type PasskeyInfo {
 	name: String!
 	createdAt: Int!
 	lastUsedAt: Int
+}
+
+type Project {
+	id: ID!
+	"""
+	Dataloaded — see [`TicketMessage::author`]'s doc comment.
+	"""
+	instance: Instance!
+	name: String!
+	clientName: String!
+	clientAbn: String
+	clientAddress: String
+	reference: String
+	archived: Boolean!
+	createdAt: Int!
+	updatedAt: Int!
 }
 
 """
@@ -709,6 +830,25 @@ type QueryRoot {
 	probe which ticket ids exist in another instance.
 	"""
 	ticket(id: ID!): Ticket
+	"""
+	Every project for an invoicing instance, sorted by name
+	case-insensitively — the projects list page's data source.
+	Unpaginated, like `Instance.inboundAddresses` (see
+	`db::Handler::list_projects_by_instance`'s doc comment for why).
+	Rejects a support instance with a plain validation error — the caller
+	is a real member of a real instance, just the wrong kind, unlike
+	`addInboundAddress`'s "treat as not found" posture for the opposite
+	direction.
+	"""
+	projects(instanceId: ID!, includeArchived: Boolean! = false): [Project!]!
+	"""
+	Fetch a single project by id. Reachable only by a member of its
+	(invoicing) instance — a project that doesn't exist, belongs to an
+	instance the caller isn't a member of, or belongs to a support
+	instance, is reported identically — `null` — mirroring
+	[`Self::ticket`]'s no-probing posture.
+	"""
+	project(id: ID!): Project
 	"""
 	Every instance, **including soft-deleted ones**, sorted by name — the
 	admin instance list. Superuser-only; unlike every other way an
@@ -886,6 +1026,18 @@ enum TicketStatusType {
 	OPEN
 	CLOSED
 	DELETED
+}
+
+"""
+`updateProject`'s argument — full-replace, including `archived`.
+"""
+input UpdateProjectInput {
+	name: String!
+	clientName: String!
+	clientAbn: String
+	clientAddress: String
+	reference: String
+	archived: Boolean!
 }
 
 type User {

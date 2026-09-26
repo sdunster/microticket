@@ -21,7 +21,18 @@ afterEach(() => {
 });
 afterAll(() => server.close());
 
-function meResponse(isSuperuser: boolean) {
+function membership(role: "OWNER" | "AGENT", kind: "SUPPORT" | "INVOICING") {
+  const slug = kind === "INVOICING" ? "ledger" : "acme";
+  return {
+    role,
+    instance: { id: `inst-${slug}`, name: slug, slug, kind },
+  };
+}
+
+function meResponse(
+  isSuperuser: boolean,
+  memberships: ReturnType<typeof membership>[],
+) {
   return {
     data: {
       me: {
@@ -30,16 +41,19 @@ function meResponse(isSuperuser: boolean) {
         name: "Adrian Agent",
         enabled: true,
         isSuperuser,
-        memberships: [],
+        memberships,
       },
     },
   };
 }
 
-function renderShell(isSuperuser: boolean) {
+function renderShell(
+  isSuperuser: boolean,
+  memberships: ReturnType<typeof membership>[] = [],
+) {
   server.use(
     relayEndpoint.query("CurrentUserProviderQuery", () =>
-      HttpResponse.json(meResponse(isSuperuser)),
+      HttpResponse.json(meResponse(isSuperuser, memberships)),
     ),
   );
   const environment = createUnauthenticatedGraphQLEnvironment();
@@ -73,5 +87,45 @@ describe("AppShell — Admin nav item", () => {
     renderShell(true);
     await screen.findByText("agent@example.com");
     expect(screen.getByRole("link", { name: "Admin" })).toBeInTheDocument();
+  });
+});
+
+function navLinkNames() {
+  return screen
+    .getAllByRole("link")
+    .map((link) => link.textContent)
+    .filter(Boolean);
+}
+
+describe("AppShell — kind-aware nav", () => {
+  it("shows the ticket queues for a support instance", async () => {
+    renderShell(false, [membership("OWNER", "SUPPORT")]);
+    // Owner-only, so it appears once the switcher publishes its selection.
+    await screen.findByRole("link", { name: "Deleted" });
+    expect(navLinkNames()).toEqual([
+      "Open",
+      "Closed",
+      "All",
+      "Mine",
+      "Deleted",
+      "Settings",
+    ]);
+  });
+
+  it("shows projects and business settings to an invoicing owner", async () => {
+    renderShell(true, [membership("OWNER", "INVOICING")]);
+    await screen.findByRole("link", { name: "Projects" });
+    expect(navLinkNames()).toEqual([
+      "Projects",
+      "Settings",
+      "Business settings",
+      "Admin",
+    ]);
+  });
+
+  it("hides business settings from an invoicing agent", async () => {
+    renderShell(false, [membership("AGENT", "INVOICING")]);
+    await screen.findByRole("link", { name: "Projects" });
+    expect(navLinkNames()).toEqual(["Projects", "Settings"]);
   });
 });

@@ -27,6 +27,16 @@ const DELETED_NAV_ITEM = { to: "/app/tickets/deleted", label: "Deleted" };
 // a non-superuser who navigates to `/app/admin/*` directly still gets
 // FORBIDDEN from the server on every field it would try to read.
 const ADMIN_NAV_ITEM = { to: "/app/admin", label: "Admin" };
+// Invoicing instances get their own nav. Invoices and billable items join
+// Projects here as those pages land.
+const INVOICING_NAV_ITEMS = [{ to: "/app/projects", label: "Projects" }];
+// `updateInvoicingSettings` is owner-or-superuser in the API — hidden from an
+// agent as a convenience only, like `DELETED_NAV_ITEM`; the page itself also
+// explains that only an owner can change these.
+const BUSINESS_SETTINGS_NAV_ITEM = {
+  to: "/app/invoicing-settings",
+  label: "Business settings",
+};
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   [
@@ -38,20 +48,30 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 
 /**
  * The authenticated shell: header (instance switcher, current user, log
- * out) plus the Open/Closed/All/Mine/Settings nav. Child routes render into
- * the `<Outlet/>` — ticket lists and the thread view land in step 8b; only
- * `/app/settings` is real in this step.
+ * out) plus a nav that depends on the selected instance's kind — the
+ * Open/Closed/All/Mine ticket queues for a support instance, Projects and
+ * Business settings for an invoicing one (Settings and Admin in both).
+ * Child routes render into the `<Outlet/>`.
  */
 export default function AppShell() {
   const user = useCurrentUser();
   const logout = useLogout();
   const [selected, setSelected] = useState<SelectedInstance | null>(null);
-  const navItems = [
-    ...BASE_NAV_ITEMS,
-    ...(selected?.role === "OWNER" ? [DELETED_NAV_ITEM] : []),
-    SETTINGS_NAV_ITEM,
-    ...(user.isSuperuser ? [ADMIN_NAV_ITEM] : []),
-  ];
+  const isOwner = selected?.role === "OWNER";
+  const navItems =
+    selected?.kind === "INVOICING"
+      ? [
+          ...INVOICING_NAV_ITEMS,
+          SETTINGS_NAV_ITEM,
+          ...(isOwner ? [BUSINESS_SETTINGS_NAV_ITEM] : []),
+          ...(user.isSuperuser ? [ADMIN_NAV_ITEM] : []),
+        ]
+      : [
+          ...BASE_NAV_ITEMS,
+          ...(isOwner ? [DELETED_NAV_ITEM] : []),
+          SETTINGS_NAV_ITEM,
+          ...(user.isSuperuser ? [ADMIN_NAV_ITEM] : []),
+        ];
 
   return (
     <SelectedInstanceContext value={selected}>

@@ -44,6 +44,32 @@ impl From<db::WebauthnCredential> for PasskeyInfo {
     }
 }
 
+/// `instance.kind`, exposed over GraphQL. Immutable after creation — see
+/// `db::InstanceKind`'s doc comment.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+pub enum InstanceKindType {
+    Support,
+    Invoicing,
+}
+
+impl From<db::InstanceKind> for InstanceKindType {
+    fn from(kind: db::InstanceKind) -> Self {
+        match kind {
+            db::InstanceKind::Support => Self::Support,
+            db::InstanceKind::Invoicing => Self::Invoicing,
+        }
+    }
+}
+
+impl From<InstanceKindType> for db::InstanceKind {
+    fn from(kind: InstanceKindType) -> Self {
+        match kind {
+            InstanceKindType::Support => Self::Support,
+            InstanceKindType::Invoicing => Self::Invoicing,
+        }
+    }
+}
+
 /// `membership.role`, exposed over GraphQL.
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
 pub enum MembershipRoleType {
@@ -173,6 +199,79 @@ impl From<db::Instance> for PublicInstance {
     }
 }
 
+/// An invoicing instance's seller settings and payment footer — the printed
+/// "Invoice to"/seller block and payment text, per CLAUDE.md's "Invoicing"
+/// house rule. `null` for a support instance (see
+/// [`Instance::invoicing_settings`]). Owner-or-superuser to *write*
+/// (`updateInvoicingSettings`), but readable by any member — the same
+/// posture as every other plain `Instance` field.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct InvoicingSettingsInfo {
+    pub business_name: Option<String>,
+    pub business_abn: Option<String>,
+    pub business_address: Option<String>,
+    pub business_phone: Option<String>,
+    pub business_email: Option<String>,
+    pub payment_details: Option<String>,
+    pub gst_registered: bool,
+    /// Defaults to `"AUD"` — see `db::Instance::currency_or_default`.
+    pub currency: String,
+}
+
+impl From<&db::Instance> for InvoicingSettingsInfo {
+    fn from(i: &db::Instance) -> Self {
+        Self {
+            business_name: i.business_name.clone(),
+            business_abn: i.business_abn.clone(),
+            business_address: i.business_address.clone(),
+            business_phone: i.business_phone.clone(),
+            business_email: i.business_email.clone(),
+            payment_details: i.payment_details.clone(),
+            gst_registered: i.gst_registered,
+            currency: i.currency_or_default().to_string(),
+        }
+    }
+}
+
+/// `updateInvoicingSettings`'s argument — full-replace, unlike
+/// [`NotificationSettingsInput`]'s per-field patch: every call writes every
+/// field. Every string field is required by the schema but treated as
+/// "unset" when blank after trimming — see
+/// `graphql::mutations::update_invoicing_settings`'s doc comment for the
+/// REMOVE-on-blank rule this input drives.
+#[derive(InputObject, Clone, Debug)]
+pub struct InvoicingSettingsInput {
+    pub business_name: String,
+    pub business_abn: String,
+    pub business_address: String,
+    pub business_phone: String,
+    pub business_email: String,
+    pub payment_details: String,
+    pub gst_registered: bool,
+    pub currency: String,
+}
+
+/// `createProject`'s argument.
+#[derive(InputObject, Clone, Debug)]
+pub struct CreateProjectInput {
+    pub name: String,
+    pub client_name: String,
+    pub client_abn: Option<String>,
+    pub client_address: Option<String>,
+    pub reference: Option<String>,
+}
+
+/// `updateProject`'s argument — full-replace, including `archived`.
+#[derive(InputObject, Clone, Debug)]
+pub struct UpdateProjectInput {
+    pub name: String,
+    pub client_name: String,
+    pub client_abn: Option<String>,
+    pub client_address: Option<String>,
+    pub reference: Option<String>,
+    pub archived: bool,
+}
+
 /// An `instance` row, exposed over GraphQL to its members. Generic over `A`
 /// for the same reason as [`User`] — see that type's doc comment.
 #[derive(Debug, PartialEq)]
@@ -209,6 +308,18 @@ impl<A: App + HasDb + Send + Sync + 'static> Instance<A> {
     }
     async fn slug(&self) -> &str {
         &self.rec.slug
+    }
+    /// Immutable after creation — see `db::InstanceKind`'s doc comment.
+    async fn kind(&self) -> InstanceKindType {
+        self.rec.kind.into()
+    }
+    /// This instance's invoicing settings, or `null` for a support instance.
+    /// See [`InvoicingSettingsInfo`]'s doc comment.
+    async fn invoicing_settings(&self) -> Option<InvoicingSettingsInfo> {
+        if self.rec.kind != db::InstanceKind::Invoicing {
+            return None;
+        }
+        Some(InvoicingSettingsInfo::from(&self.rec))
     }
     async fn public_submission_enabled(&self) -> bool {
         self.rec.public_submission_enabled
@@ -972,6 +1083,73 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> Ticket<A> {
     }
 }
 
+/// A `project` row, exposed over GraphQL to its invoicing instance's
+/// members. Invoicing-only — see `db::Project`'s doc comment.
+#[derive(Debug, PartialEq)]
+pub struct Project<A: App + HasDb + Send + Sync> {
+    _marker: PhantomData<A>,
+    rec: db::Project,
+}
+
+impl<A: App + HasDb + Send + Sync> Project<A> {
+    pub fn new(rec: db::Project) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec,
+        }
+    }
+}
+
+impl<A: App + HasDb + Send + Sync> Clone for Project<A> {
+    fn clone(&self) -> Self {
+        Self {
+            _marker: PhantomData,
+            rec: self.rec.clone(),
+        }
+    }
+}
+
+#[Object]
+impl<A: App + HasDb + Send + Sync + 'static> Project<A> {
+    async fn id(&self) -> ID {
+        ID(self.rec.id.clone())
+    }
+    /// Dataloaded — see [`TicketMessage::author`]'s doc comment.
+    async fn instance(&self, ctx: &Context<'_>) -> Result<Instance<A>> {
+        let loader = ctx.data_unchecked::<DataLoader<DatabaseLoader<A>>>();
+        loader
+            .load_one(InstanceId(ID(self.rec.instance_id.clone())))
+            .await
+            .map_err(|e| anyhow!("Failed to load instance via DataLoader: {}", e))?
+            .map(Instance::new)
+            .ok_or_else(|| anyhow!("Instance with ID {} missing", self.rec.instance_id))
+    }
+    async fn name(&self) -> &str {
+        &self.rec.name
+    }
+    async fn client_name(&self) -> &str {
+        &self.rec.client_name
+    }
+    async fn client_abn(&self) -> Option<&str> {
+        self.rec.client_abn.as_deref()
+    }
+    async fn client_address(&self) -> Option<&str> {
+        self.rec.client_address.as_deref()
+    }
+    async fn reference(&self) -> Option<&str> {
+        self.rec.reference.as_deref()
+    }
+    async fn archived(&self) -> bool {
+        self.rec.archived
+    }
+    async fn created_at(&self) -> i64 {
+        self.rec.created_at as i64
+    }
+    async fn updated_at(&self) -> i64 {
+        self.rec.updated_at as i64
+    }
+}
+
 /// Default/max page size for `tickets`, matching seslogin's periods
 /// convention (small default so a queue page render stays cheap; a generous
 /// but bounded max so a client can't force an unbounded scan).
@@ -1097,7 +1275,9 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
         let instances = app.db().list_instances().await?;
         Ok(instances
             .into_iter()
-            .filter(|i| i.public_submission_enabled && !i.deleted)
+            .filter(|i| {
+                i.public_submission_enabled && !i.deleted && i.kind == db::InstanceKind::Support
+            })
             .map(PublicInstance::from)
             .collect())
     }
@@ -1230,6 +1410,81 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
             return Ok(None);
         }
         Ok(Some(Ticket::new(rec)))
+    }
+
+    /// Every project for an invoicing instance, sorted by name
+    /// case-insensitively — the projects list page's data source.
+    /// Unpaginated, like `Instance.inboundAddresses` (see
+    /// `db::Handler::list_projects_by_instance`'s doc comment for why).
+    /// Rejects a support instance with a plain validation error — the caller
+    /// is a real member of a real instance, just the wrong kind, unlike
+    /// `addInboundAddress`'s "treat as not found" posture for the opposite
+    /// direction.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Member(instance_id.to_string()))")]
+    async fn projects(
+        &self,
+        ctx: &Context<'_>,
+        instance_id: ID,
+        #[graphql(default = false)] include_archived: bool,
+    ) -> Result<Vec<Project<A>>> {
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let instance = app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+        db::require_instance_kind(&instance, db::InstanceKind::Invoicing)
+            .map_err(|e| anyhow!(e))?;
+        let mut projects = app
+            .db()
+            .list_projects_by_instance(instance_id.as_str())
+            .await?;
+        if !include_archived {
+            projects.retain(|p| !p.archived);
+        }
+        projects.sort_by_key(|p| p.name.to_lowercase());
+        Ok(projects.into_iter().map(Project::new).collect())
+    }
+
+    /// Fetch a single project by id. Reachable only by a member of its
+    /// (invoicing) instance — a project that doesn't exist, belongs to an
+    /// instance the caller isn't a member of, or belongs to a support
+    /// instance, is reported identically — `null` — mirroring
+    /// [`Self::ticket`]'s no-probing posture.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn project(&self, ctx: &Context<'_>, id: ID) -> Result<Option<Project<A>>> {
+        let Some(AuthInfo::User { memberships, .. }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        };
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let Some(rec) = app
+            .db()
+            .get_projects(&[id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        if !is_member(memberships, &rec.instance_id) {
+            return Ok(None);
+        }
+        let is_invoicing = app
+            .db()
+            .get_instances(&[rec.instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .is_some_and(|i| i.kind == db::InstanceKind::Invoicing);
+        if !is_invoicing {
+            return Ok(None);
+        }
+        Ok(Some(Project::new(rec)))
     }
 
     // ── Admin (superuser-only) ──────────────────────────────────────────────

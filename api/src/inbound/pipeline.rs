@@ -162,13 +162,19 @@ where
         .into_iter()
         .next()
         .flatten();
-    if instance.is_none_or(|i| i.deleted) {
+    // Kind isolation (CLAUDE.md): mail routed to an invoicing instance is
+    // dropped exactly like mail to a deleted one — invoicing has no inbound
+    // mail concept at all, so there is nothing legitimate for this message
+    // to become.
+    if instance.is_none_or(|i| i.deleted || i.kind != db::InstanceKind::Support) {
         tracing::info!(
             ses_message_id,
             instance_id,
-            "resolved instance is deleted; dropping"
+            "resolved instance is deleted or not a support instance; dropping"
         );
-        return Ok(Outcome::dropped("resolved instance is deleted"));
+        return Ok(Outcome::dropped(
+            "resolved instance is deleted or not a support instance",
+        ));
     }
 
     // Loop prevention, part 4: From is one of our own inbound addresses —

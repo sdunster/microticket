@@ -2,12 +2,16 @@ import { useState } from "react";
 import { graphql, useMutation } from "react-relay";
 import { useNavigate } from "react-router";
 import type { RecordSourceSelectorProxy } from "relay-runtime";
-import type { CreateInstanceFormMutation } from "./__generated__/CreateInstanceFormMutation.graphql";
+import type {
+  CreateInstanceFormMutation,
+  InstanceKindType,
+} from "./__generated__/CreateInstanceFormMutation.graphql";
 import { relayMutationErrorMessage } from "../../lib/relayMutationError";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { FormField } from "../../components/ui/FormField";
 import TextInput from "../../components/ui/TextInput";
+import { inputBase } from "../../components/ui/inputStyles";
 
 /**
  * `createInstance` is superuser-only and deliberately low-frequency — an
@@ -15,7 +19,13 @@ import TextInput from "../../components/ui/TextInput";
  * `adminInstances` is a plain list field, not a `@connection`, so appending
  * the new instance needs an explicit updater rather than Relay's connection
  * helpers. Navigates to the new instance's own page on success, where
- * members and inbound addresses get set up next.
+ * members and inbound addresses (or, for an invoicing instance, business
+ * settings) get set up next.
+ *
+ * The kind is permanent once created. From name, signature and public
+ * submission only mean anything for a support instance — the API rejects
+ * `publicSubmissionEnabled` for an invoicing one — so they're hidden, and
+ * not sent, when "Invoicing" is picked.
  */
 export function CreateInstanceForm() {
   const navigate = useNavigate();
@@ -24,6 +34,8 @@ export function CreateInstanceForm() {
   const [fromName, setFromName] = useState("");
   const [signature, setSignature] = useState("");
   const [publicSubmissionEnabled, setPublicSubmissionEnabled] = useState(false);
+  const [kind, setKind] = useState<InstanceKindType>("SUPPORT");
+  const isSupport = kind === "SUPPORT";
   const [error, setError] = useState<string | null>(null);
 
   const [commit, isSaving] = useMutation<CreateInstanceFormMutation>(graphql`
@@ -33,6 +45,7 @@ export function CreateInstanceForm() {
       $fromName: String
       $signature: String
       $publicSubmissionEnabled: Boolean!
+      $kind: InstanceKindType!
     ) {
       createInstance(
         name: $name
@@ -40,6 +53,7 @@ export function CreateInstanceForm() {
         fromName: $fromName
         signature: $signature
         publicSubmissionEnabled: $publicSubmissionEnabled
+        kind: $kind
       ) {
         id
         ...InstanceRow_instance
@@ -64,9 +78,10 @@ export function CreateInstanceForm() {
       variables: {
         name: name.trim(),
         slug: slug.trim(),
-        fromName: fromName.trim() || null,
-        signature: signature.trim() || null,
-        publicSubmissionEnabled,
+        fromName: isSupport ? fromName.trim() || null : null,
+        signature: isSupport ? signature.trim() || null : null,
+        publicSubmissionEnabled: isSupport && publicSubmissionEnabled,
+        kind,
       },
       updater,
       onCompleted: (data) => {
@@ -91,6 +106,21 @@ export function CreateInstanceForm() {
             required
           />
         </FormField>
+        <FormField label="Kind" htmlFor="new-instance-kind">
+          <select
+            id="new-instance-kind"
+            className={inputBase}
+            value={kind}
+            onChange={(e) => setKind(e.target.value as InstanceKindType)}
+          >
+            <option value="SUPPORT">Support</option>
+            <option value="INVOICING">Invoicing</option>
+          </select>
+          <p className="mt-1 text-xs text-ink-muted">
+            Support instances handle tickets; invoicing instances handle
+            projects and invoices. Can&apos;t be changed later.
+          </p>
+        </FormField>
         <FormField label="Slug" htmlFor="new-instance-slug">
           <TextInput
             id="new-instance-slug"
@@ -102,36 +132,42 @@ export function CreateInstanceForm() {
           />
           <p className="mt-1 text-xs text-ink-muted">
             Lowercase letters, digits, and hyphens only — and permanent once
-            created, since it&apos;s stamped into the &quot;[#slug-N]&quot;
-            subject tag on every ticket&apos;s mail thread.
+            created
+            {isSupport
+              ? ", since it's stamped into the \"[#slug-N]\" subject tag on every ticket's mail thread."
+              : "."}
           </p>
         </FormField>
-        <FormField label="From name" htmlFor="new-instance-from-name">
-          <TextInput
-            id="new-instance-from-name"
-            value={fromName}
-            onChange={(e) => setFromName(e.target.value)}
-            placeholder="Defaults to the instance name"
-          />
-        </FormField>
-        <FormField label="Signature" htmlFor="new-instance-signature">
-          <textarea
-            id="new-instance-signature"
-            className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink transition-colors focus:border-accent focus:ring-2 focus:ring-accent/25 focus:outline-none"
-            rows={3}
-            value={signature}
-            onChange={(e) => setSignature(e.target.value)}
-          />
-        </FormField>
-        <label className="flex items-center gap-2 text-sm text-ink">
-          <input
-            type="checkbox"
-            checked={publicSubmissionEnabled}
-            onChange={(e) => setPublicSubmissionEnabled(e.target.checked)}
-            className="size-4 rounded-sm border-line text-accent focus:ring-2 focus:ring-accent/25"
-          />
-          Public submission enabled
-        </label>
+        {isSupport && (
+          <>
+            <FormField label="From name" htmlFor="new-instance-from-name">
+              <TextInput
+                id="new-instance-from-name"
+                value={fromName}
+                onChange={(e) => setFromName(e.target.value)}
+                placeholder="Defaults to the instance name"
+              />
+            </FormField>
+            <FormField label="Signature" htmlFor="new-instance-signature">
+              <textarea
+                id="new-instance-signature"
+                className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink transition-colors focus:border-accent focus:ring-2 focus:ring-accent/25 focus:outline-none"
+                rows={3}
+                value={signature}
+                onChange={(e) => setSignature(e.target.value)}
+              />
+            </FormField>
+            <label className="flex items-center gap-2 text-sm text-ink">
+              <input
+                type="checkbox"
+                checked={publicSubmissionEnabled}
+                onChange={(e) => setPublicSubmissionEnabled(e.target.checked)}
+                className="size-4 rounded-sm border-line text-accent focus:ring-2 focus:ring-accent/25"
+              />
+              Public submission enabled
+            </label>
+          </>
+        )}
 
         {error && (
           <p role="alert" className="text-sm text-red-600 dark:text-red-400">
