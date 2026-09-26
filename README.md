@@ -5,12 +5,18 @@ gets one or more inbound email addresses; mail to those addresses opens or updat
 Requesters and CCs stay in the loop by email while agents work the queue from a web admin UI.
 Anyone can also raise a ticket from the public web form after verifying their email with a code.
 
+A second, separate function — **invoicing** — lives in its own instances alongside support ones,
+sharing the same instance switcher and membership roles: track clients/projects, record billable
+items, and turn them into invoices (see CLAUDE.md's "Invoicing" house rule).
+
 **Features:**
 - Inbound email → ticket, with reply threading via `+tag` addressing and `In-Reply-To`/`References`
 - Outbound replies mailed to requesters and CCs, with internal notes that are never emailed
 - Multiple inbound addresses per instance, including domain wildcards (`*@sub.example.com`)
 - Passwordless auth — email code or passkeys — for agents; email-code verification for public
   ticket submission
+- Invoicing instances: clients/projects, billable items, and invoices — a second function
+  alongside support, isolated from it but sharing the same login and instance switcher
 - Runs on AWS Lambda + DynamoDB — scales to zero when idle
 
 **Stack:** Rust (GraphQL API, async-graphql) · React + Relay (frontend) · AWS (Lambda, DynamoDB,

@@ -55,7 +55,12 @@ const oneMembership = {
   __typename: "User",
   memberships: [
     {
-      instance: { __typename: "Instance", id: "inst-1", name: "Acme" },
+      instance: {
+        __typename: "Instance",
+        id: "inst-1",
+        name: "Acme",
+        kind: "SUPPORT",
+      },
       notificationSettings: {
         newTicket: true,
         assignedToMe: true,
@@ -159,5 +164,63 @@ describe("NotificationSettingsSection", () => {
     // see `lib/relayMutationError.ts` — so the fallback string never shows
     // when the mutation actually returned one.
     expect(await screen.findByText("boom")).toBeInTheDocument();
+  });
+
+  it("leaves out invoicing instances", async () => {
+    const [support] = oneMembership.memberships;
+    const invoicing = {
+      ...support,
+      instance: {
+        __typename: "Instance",
+        id: "inst-2",
+        name: "Ledger",
+        kind: "INVOICING",
+      },
+    };
+    server.use(
+      relayEndpoint.query("NotificationSettingsSectionHarnessQuery", () =>
+        HttpResponse.json({
+          data: {
+            me: { ...oneMembership, memberships: [support, invoicing] },
+          },
+        }),
+      ),
+    );
+
+    renderHarness();
+
+    await screen.findByText("Acme");
+    expect(screen.queryByText("Ledger")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByRole("checkbox", { name: "A new ticket is created" }),
+    ).toHaveLength(1);
+  });
+
+  it("explains itself when every membership is an invoicing one", async () => {
+    const [support] = oneMembership.memberships;
+    server.use(
+      relayEndpoint.query("NotificationSettingsSectionHarnessQuery", () =>
+        HttpResponse.json({
+          data: {
+            me: {
+              ...oneMembership,
+              memberships: [
+                {
+                  ...support,
+                  instance: { ...support.instance, kind: "INVOICING" },
+                },
+              ],
+            },
+          },
+        }),
+      ),
+    );
+
+    renderHarness();
+
+    expect(
+      await screen.findByText(/only apply to support instances/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   });
 });

@@ -28,9 +28,10 @@ use crate::storage::Handler as _;
 use super::auth::{AuthGuard, AuthRequirement, is_member, is_owner};
 use super::error::ApiError;
 use super::query::{
-    ApiTokenInfo, CreatedApiToken, InboundAddressInfo, Instance, MembershipInfo,
-    MembershipRoleType, NotificationSettingsInput, PasskeyInfo, Ticket, TicketMessage,
-    TicketStatusType, User,
+    ApiTokenInfo, CreateProjectInput, CreatedApiToken, InboundAddressInfo, Instance,
+    InstanceKindType, InvoicingSettingsInput, MembershipInfo, MembershipRoleType,
+    NotificationSettingsInput, PasskeyInfo, Project, Ticket, TicketMessage, TicketStatusType,
+    UpdateProjectInput, User,
 };
 
 /// One code per address per this many seconds — cheap anti-spam for
@@ -55,6 +56,17 @@ const MAX_VERIFIED_TICKET_RECIPIENTS: usize = 20;
 /// human-chosen label ("Zendesk sync", "Partner portal"), not meant to be a
 /// meaningful constraint in practice.
 const MAX_API_TOKEN_NAME_LEN: usize = 100;
+/// Length cap for a short invoicing-settings/project field (name, ABN,
+/// phone, email, reference) — see the build plan's validation-limits entry.
+const MAX_INVOICING_FIELD_LEN: usize = 200;
+/// Length cap for a long, multi-line invoicing-settings/project field
+/// (address, payment details).
+const MAX_INVOICING_LONG_FIELD_LEN: usize = 2000;
+/// Alias of [`MAX_INVOICING_FIELD_LEN`] for project fields — same limit,
+/// named for the call site it reads at.
+const MAX_PROJECT_FIELD_LEN: usize = MAX_INVOICING_FIELD_LEN;
+/// Alias of [`MAX_INVOICING_LONG_FIELD_LEN`] for project fields.
+const MAX_PROJECT_LONG_FIELD_LEN: usize = MAX_INVOICING_LONG_FIELD_LEN;
 
 fn sha256_hex(input: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -146,6 +158,108 @@ async fn require_api_token_manager<A: App + HasDb + Send + Sync>(
         return Err(ApiError::not_found("ApiToken", id).into());
     }
     Ok(token)
+}
+
+/// The per-record authorization check `updateProject` uses — it takes only a
+/// project `id` (never an `instanceId`), so, like [`require_ticket_member`]/
+/// [`require_api_token_manager`], authorization happens inside the resolver
+/// body after fetching the row, not in a static `#[graphql(guard)]`. A
+/// project that doesn't exist, and one that exists but belongs to an
+/// instance the caller isn't a member of, are reported identically —
+/// `NOT_FOUND` — so this can't be used to probe another instance's projects.
+/// Superusers get **no** access here — they don't pass `is_member` either,
+/// matching the existing superuser boundary (CLAUDE.md): a superuser has no
+/// implicit access to any instance's projects/items/invoices.
+async fn require_project_member<A: App + HasDb + Send + Sync>(
+    ctx: &Context<'_>,
+    app: &A,
+    id: &str,
+) -> Result<db::Project> {
+    // Checked before the fetch, so a non-user caller learns nothing about
+    // whether `id` exists.
+    let Some(AuthInfo::User { memberships, .. }) = ctx.data_opt::<AuthInfo>() else {
+        return Err(ApiError::forbidden("Must be authenticated as a user").into());
+    };
+    let project = app
+        .db()
+        .get_projects(&[id])
+        .await?
+        .into_iter()
+        .next()
+        .flatten()
+        .ok_or_else(|| ApiError::not_found("Project", id))?;
+    if !is_member(memberships, &project.instance_id) {
+        return Err(ApiError::not_found("Project", id).into());
+    }
+    Ok(project)
+}
+
+/// Trim and length-check a required project field (`name`/`clientName`) —
+/// `createProject`/`updateProject`'s validation for the two non-optional
+/// fields. Matches [`MAX_PROJECT_FIELD_LEN`].
+fn require_project_name(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("name cannot be empty"));
+    }
+    if trimmed.chars().count() > MAX_PROJECT_FIELD_LEN {
+        return Err(anyhow!(
+            "name cannot be longer than {MAX_PROJECT_FIELD_LEN} characters"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn require_project_client_name(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("clientName cannot be empty"));
+    }
+    if trimmed.chars().count() > MAX_PROJECT_FIELD_LEN {
+        return Err(anyhow!(
+            "clientName cannot be longer than {MAX_PROJECT_FIELD_LEN} characters"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Trim an optional project field (`clientAbn`/`clientAddress`/`reference`);
+/// a blank result is `None` (the caller `REMOVE`s the attribute), matching
+/// the omit-optional-attributes house rule. `field_name` names the argument
+/// in the error message; `max_len` is [`MAX_PROJECT_FIELD_LEN`] or
+/// [`MAX_PROJECT_LONG_FIELD_LEN`] depending on the field.
+fn normalize_project_field(
+    raw: Option<&str>,
+    field_name: &str,
+    max_len: usize,
+) -> Result<Option<String>> {
+    let Some(raw) = raw else { return Ok(None) };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > max_len {
+        return Err(anyhow!(
+            "{field_name} cannot be longer than {max_len} characters"
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Trim an invoicing-settings string field; a blank result is `None` (the
+/// caller `REMOVE`s the attribute), matching the omit-optional-attributes
+/// house rule — `updateInvoicingSettings` is a full replace, so a field the
+/// caller leaves blank is explicitly cleared, not left alone. Capped at
+/// [`MAX_INVOICING_FIELD_LEN`].
+fn normalize_invoicing_field(raw: &str, field_name: &str) -> Result<Option<String>> {
+    normalize_project_field(Some(raw), field_name, MAX_INVOICING_FIELD_LEN)
+}
+
+/// Same as [`normalize_invoicing_field`], for the two long/multi-line fields
+/// (`businessAddress`/`paymentDetails`), capped at
+/// [`MAX_INVOICING_LONG_FIELD_LEN`].
+fn normalize_invoicing_long_field(raw: &str, field_name: &str) -> Result<Option<String>> {
+    normalize_project_field(Some(raw), field_name, MAX_INVOICING_LONG_FIELD_LEN)
 }
 
 /// Move every validated `pending/…` key in `keys` into
@@ -714,7 +828,13 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
 
         let instance = match self.app.db().get_instances(&[&instance_id]).await {
             Ok(instances) => match instances.into_iter().next().flatten() {
-                Some(i) if i.public_submission_enabled && !i.deleted => i,
+                Some(i)
+                    if i.public_submission_enabled
+                        && !i.deleted
+                        && i.kind == db::InstanceKind::Support =>
+                {
+                    i
+                }
                 _ => {
                     info!(
                         "request_submit_code: instance not public or missing id={}",
@@ -917,6 +1037,18 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         instance_id: ID,
         address: String,
     ) -> Result<InboundAddressInfo> {
+        // Support-only — see CLAUDE.md's kind-isolation house rule. An
+        // invoicing instance is treated identically to "not found", never a
+        // distinct error, so this can't be used to probe an instance's kind.
+        self.app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .filter(|i| !i.deleted && i.kind == db::InstanceKind::Support)
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
         let (normalized, kind) =
             routing::classify_for_storage(&address).map_err(ApiError::forbidden)?;
         if let Some(existing) = self.app.db().get_inbound_address(&normalized).await? {
@@ -978,6 +1110,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
     /// slug-uniqueness race entry for the pre-check-then-write window this
     /// still leaves open, unchanged by this mutation existing. `fromName`
     /// defaults to `name`, matching the CLI.
+    #[allow(clippy::too_many_arguments)]
     #[graphql(guard = "AuthGuard::new(AuthRequirement::Superuser)")]
     async fn create_instance(
         &self,
@@ -986,6 +1119,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         from_name: Option<String>,
         signature: Option<String>,
         public_submission_enabled: bool,
+        #[graphql(default_with = "InstanceKindType::Support")] kind: InstanceKindType,
     ) -> Result<Instance<A>> {
         let name = name.trim();
         if name.is_empty() {
@@ -1008,6 +1142,12 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             .filter(|s| !s.is_empty())
             .unwrap_or(name);
         let signature = signature.unwrap_or_default();
+        let kind: db::InstanceKind = kind.into();
+        if public_submission_enabled && kind != db::InstanceKind::Support {
+            return Err(anyhow!(
+                "publicSubmissionEnabled only applies to a support instance"
+            ));
+        }
         let created = self
             .app
             .db()
@@ -1017,6 +1157,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
                 from_name,
                 &signature,
                 public_submission_enabled,
+                kind,
             )
             .await?;
         Ok(Instance::new(created))
@@ -1051,6 +1192,11 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             .next()
             .flatten()
             .ok_or_else(|| ApiError::not_found("Instance", id.as_str()))?;
+        if public_submission_enabled && current.kind != db::InstanceKind::Support {
+            return Err(anyhow!(
+                "publicSubmissionEnabled only applies to a support instance"
+            ));
+        }
         self.app
             .db()
             .update_instance(
@@ -1405,6 +1551,8 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             ));
         }
 
+        // Support-only — see CLAUDE.md's kind-isolation house rule. An
+        // invoicing instance is treated identically to "not found".
         self.app
             .db()
             .get_instances(&[instance_id.as_str()])
@@ -1412,7 +1560,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             .into_iter()
             .next()
             .flatten()
-            .filter(|i| !i.deleted)
+            .filter(|i| !i.deleted && i.kind == db::InstanceKind::Support)
             .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
 
         let (token, secret) =
@@ -1512,7 +1660,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             .into_iter()
             .next()
             .flatten()
-            .filter(|i| !i.deleted)
+            .filter(|i| !i.deleted && i.kind == db::InstanceKind::Support)
             .ok_or_else(|| ApiError::not_found("Instance", instance_id))?;
 
         let ticket = open_submitted_ticket(
@@ -1623,7 +1771,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             .into_iter()
             .next()
             .flatten()
-            .filter(|i| !i.deleted)
+            .filter(|i| !i.deleted && i.kind == db::InstanceKind::Support)
             .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
 
         let addresses = self
@@ -2711,6 +2859,208 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
 
         self.app.db().delete_webauthn_credential(&id).await?;
         Ok(true)
+    }
+
+    // ── Invoicing settings ────────────────────────────────────────────────────
+
+    /// Full-replace an invoicing instance's seller settings/payment footer —
+    /// `InstanceUpdateShape::SetInvoicingSettings`. Owner-or-superuser, the
+    /// same posture as `addInboundAddress`/`createApiToken`: this is
+    /// instance settings, not something a plain agent can change. Rejects a
+    /// support instance (`db::require_instance_kind`) — see CLAUDE.md's
+    /// "Invoicing" house rule.
+    ///
+    /// Every string field in `input` is trimmed; a blank result after
+    /// trimming `REMOVE`s the corresponding attribute rather than writing an
+    /// empty string, per the omit-optional-attributes house rule — this is a
+    /// full replace, so a field the caller leaves blank is explicitly
+    /// cleared, not left alone. `gstRegistered` is written `true` or
+    /// `REMOVE`d — see `db::Instance::gst_registered`'s doc comment.
+    /// `currency` follows the same blank-means-absent rule (absent defaults
+    /// to `"AUD"` — `db::Instance::currency_or_default`); a non-blank value
+    /// must be 3 uppercase ASCII letters (`db::validate_currency_code`).
+    #[graphql(
+        guard = "AuthGuard::new(AuthRequirement::InstanceOwnerOrSuperuser(instance_id.to_string()))"
+    )]
+    async fn update_invoicing_settings(
+        &self,
+        instance_id: ID,
+        input: InvoicingSettingsInput,
+    ) -> Result<Instance<A>> {
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+        db::require_instance_kind(&instance, db::InstanceKind::Invoicing)
+            .map_err(|e| anyhow!(e))?;
+
+        let business_name = normalize_invoicing_field(&input.business_name, "businessName")?;
+        let business_abn = normalize_invoicing_field(&input.business_abn, "businessAbn")?;
+        let business_address =
+            normalize_invoicing_long_field(&input.business_address, "businessAddress")?;
+        let business_phone = normalize_invoicing_field(&input.business_phone, "businessPhone")?;
+        let business_email = normalize_invoicing_field(&input.business_email, "businessEmail")?;
+        let payment_details =
+            normalize_invoicing_long_field(&input.payment_details, "paymentDetails")?;
+        let currency = {
+            let trimmed = input.currency.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                db::validate_currency_code(trimmed).map_err(|e| anyhow!(e))?;
+                Some(trimmed.to_string())
+            }
+        };
+
+        self.app
+            .db()
+            .update_instance(
+                instance_id.as_str(),
+                db::InstanceUpdateShape::SetInvoicingSettings {
+                    business_name: business_name.as_deref(),
+                    business_abn: business_abn.as_deref(),
+                    business_address: business_address.as_deref(),
+                    business_phone: business_phone.as_deref(),
+                    business_email: business_email.as_deref(),
+                    payment_details: payment_details.as_deref(),
+                    gst_registered: input.gst_registered,
+                    currency: currency.as_deref(),
+                },
+            )
+            .await?;
+
+        Ok(Instance::new(db::Instance {
+            business_name,
+            business_abn,
+            business_address,
+            business_phone,
+            business_email,
+            payment_details,
+            gst_registered: input.gst_registered,
+            currency,
+            ..instance
+        }))
+    }
+
+    // ── Projects ──────────────────────────────────────────────────────────────
+
+    /// Create a project in an invoicing instance. Member (owner or agent) —
+    /// managing projects/items/draft invoices is day-to-day work, not an
+    /// owner-only setting, per CLAUDE.md's "Invoicing" house rule. Rejects a
+    /// support instance.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Member(instance_id.to_string()))")]
+    async fn create_project(
+        &self,
+        instance_id: ID,
+        input: CreateProjectInput,
+    ) -> Result<Project<A>> {
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+        db::require_instance_kind(&instance, db::InstanceKind::Invoicing)
+            .map_err(|e| anyhow!(e))?;
+
+        let name = require_project_name(&input.name)?;
+        let client_name = require_project_client_name(&input.client_name)?;
+        let client_abn = normalize_project_field(
+            input.client_abn.as_deref(),
+            "clientAbn",
+            MAX_PROJECT_FIELD_LEN,
+        )?;
+        let client_address = normalize_project_field(
+            input.client_address.as_deref(),
+            "clientAddress",
+            MAX_PROJECT_LONG_FIELD_LEN,
+        )?;
+        let reference = normalize_project_field(
+            input.reference.as_deref(),
+            "reference",
+            MAX_PROJECT_FIELD_LEN,
+        )?;
+
+        let created = self
+            .app
+            .db()
+            .create_project(
+                instance_id.as_str(),
+                &name,
+                &client_name,
+                client_abn.as_deref(),
+                client_address.as_deref(),
+                reference.as_deref(),
+            )
+            .await?;
+        Ok(Project::new(created))
+    }
+
+    /// Update a project — full replace, including `archived`. Takes only
+    /// `id`; the instance it belongs to is a fact of the record, so
+    /// authorization happens in the body after fetching the row (mirroring
+    /// `require_ticket_member`) rather than a static `#[graphql(guard)]`. A
+    /// project that doesn't exist, or whose instance the caller isn't a
+    /// member of, is `NOT_FOUND` either way — no probing.
+    async fn update_project(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: UpdateProjectInput,
+    ) -> Result<Project<A>> {
+        let project = require_project_member(ctx, &*self.app, id.as_str()).await?;
+
+        let name = require_project_name(&input.name)?;
+        let client_name = require_project_client_name(&input.client_name)?;
+        let client_abn = normalize_project_field(
+            input.client_abn.as_deref(),
+            "clientAbn",
+            MAX_PROJECT_FIELD_LEN,
+        )?;
+        let client_address = normalize_project_field(
+            input.client_address.as_deref(),
+            "clientAddress",
+            MAX_PROJECT_LONG_FIELD_LEN,
+        )?;
+        let reference = normalize_project_field(
+            input.reference.as_deref(),
+            "reference",
+            MAX_PROJECT_FIELD_LEN,
+        )?;
+
+        self.app
+            .db()
+            .update_project(
+                &project.id,
+                db::ProjectUpdateShape::Fields {
+                    name: &name,
+                    client_name: &client_name,
+                    client_abn: client_abn.as_deref(),
+                    client_address: client_address.as_deref(),
+                    reference: reference.as_deref(),
+                    archived: input.archived,
+                },
+            )
+            .await?;
+
+        Ok(Project::new(db::Project {
+            name,
+            client_name,
+            client_abn,
+            client_address,
+            reference,
+            archived: input.archived,
+            updated_at: crate::clock::now_sec(),
+            ..project
+        }))
     }
 }
 

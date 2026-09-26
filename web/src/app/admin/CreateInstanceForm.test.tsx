@@ -58,6 +58,49 @@ describe("CreateInstanceForm", () => {
       name: "Acme Support",
       slug: "acme",
       publicSubmissionEnabled: true,
+      kind: "SUPPORT",
+    });
+  });
+
+  it("sends the invoicing kind and hides the support-only fields", async () => {
+    let receivedVariables: Record<string, unknown> | undefined;
+    server.use(
+      relayEndpoint.mutation("CreateInstanceFormMutation", ({ variables }) => {
+        receivedVariables = variables;
+        return HttpResponse.json({
+          data: null,
+          errors: [{ message: "stop here" }],
+        });
+      }),
+    );
+
+    const user = UserEvent.setup();
+    renderForm();
+
+    await user.type(screen.getByLabelText("Name"), "Ledger");
+    await user.type(screen.getByLabelText("Slug"), "ledger");
+    // Ticked while still a support instance, then switched away from.
+    await user.click(
+      screen.getByRole("checkbox", { name: "Public submission enabled" }),
+    );
+    await user.selectOptions(screen.getByLabelText("Kind"), "INVOICING");
+
+    expect(
+      screen.queryByRole("checkbox", { name: "Public submission enabled" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("From name")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Signature")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Create instance" }));
+    expect(await screen.findByText("stop here")).toBeInTheDocument();
+
+    expect(receivedVariables).toEqual({
+      name: "Ledger",
+      slug: "ledger",
+      fromName: null,
+      signature: null,
+      publicSubmissionEnabled: false,
+      kind: "INVOICING",
     });
   });
 });

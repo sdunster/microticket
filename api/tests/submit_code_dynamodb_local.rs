@@ -142,6 +142,7 @@ async fn verify_auth_code_rejects_a_code_minted_by_request_submit_code() {
             "Cross Co",
             "",
             true,
+            microticket::db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -216,6 +217,7 @@ async fn verify_submit_code_rejects_a_code_minted_by_request_auth_code() {
             "Cross Co 2",
             "",
             true,
+            microticket::db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -284,6 +286,7 @@ async fn request_submit_code_is_a_noop_for_an_instance_without_public_submission
             "Private Co",
             "",
             /* public_submission_enabled */ false,
+            microticket::db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");

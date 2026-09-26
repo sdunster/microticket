@@ -83,7 +83,7 @@ const fn keys_only(name: &'static str, hash: &'static str) -> Gsi {
     }
 }
 
-/// The 13 tables, in the same order as `infra/dynamodb.tf`.
+/// The 14 tables, in the same order as `infra/dynamodb.tf`.
 const TABLES: &[Table] = &[
     Table {
         name: "instance",
@@ -189,6 +189,13 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "api_token",
+        hash: "id",
+        attrs: &[Attr("id", S), Attr("instance_id", S)],
+        gsis: &[all("instance_id-index", "instance_id", None)],
+        ttl: None,
+    },
+    Table {
+        name: "project",
         hash: "id",
         attrs: &[Attr("id", S), Attr("instance_id", S)],
         gsis: &[all("instance_id-index", "instance_id", None)],

@@ -170,6 +170,50 @@ local setup, and `SCHEMA.md` for the data model.
   - No expiry: a long-lived integration credential, not a session. Revocation is
     `updateApiToken(enabled: false)` or `deleteApiToken`.
 
+- **Invoicing: a second, separate function from support, living in its own instances.**
+  `db::InstanceKind` (`Support`/`Invoicing`) is set once at `createInstance`/`instance create
+  --kind` time and is **immutable after creation** — no mutation, and no CLI command, changes it.
+  Per the omit-optional-attributes house rule, `kind` is written to the row only for `Invoicing`;
+  every instance created before invoicing existed is implicitly `Support`, no migration needed.
+  Invoicing instances reuse the existing instance/membership machinery (same instance switcher,
+  same `Member`/`InstanceOwner` roles) — there is no separate tenant or membership concept.
+  - **Kind isolation, enforced structurally, not just in the web UI.** A support-only operation
+    (`addInboundAddress`, `createApiToken`, `submitTicket`/`submitVerifiedTicket`, the requester
+    submit-code flow, `publicInstances`/the `/submit` list, and the inbound-mail pipeline's
+    instance resolution) rejects an invoicing instance **identically to how it already treats a
+    missing or deleted one** — `NOT_FOUND`/dropped mail/excluded from a list, never a distinct
+    "wrong kind" error, so none of these can be used to probe an instance's kind. An
+    invoicing-only operation (projects, `updateInvoicingSettings`) rejects a support instance with
+    a plain `anyhow!` validation error instead — the caller is a real member of a real instance,
+    just the wrong kind for what they're asking to do. Both directions go through the one shared
+    `db::require_instance_kind` helper, so a future invoicing operation can't independently drift
+    on the check.
+  - **Invoicing settings are instance settings, not ticket-adjacent data.** The seller
+    details/payment footer an invoice prints (`business_name`, `business_abn`, `business_address`,
+    `business_phone`, `business_email`, `payment_details`, `gst_registered`, `currency`) live as
+    optional attributes on the `instance` row itself, guarded `InstanceOwnerOrSuperuser` to write
+    (`updateInvoicingSettings`) — the same posture as `addInboundAddress`/`createApiToken` — but
+    readable by any member, like every other plain `Instance` field. `updateInvoicingSettings` is a
+    **full replace**: every call writes every field, and a blank string `REMOVE`s the
+    corresponding attribute rather than storing an empty one, per the omit-optional-attributes
+    house rule. `gst_registered` follows `Instance::deleted`'s convention: only ever written
+    `true`; absent means not registered. `currency` absent means `"AUD"`
+    (`db::Instance::currency_or_default`); a non-blank value must pass `db::validate_currency_code`
+    (3 uppercase ASCII letters).
+  - **Projects (`{prefix}_project`) are the first invoicing-only table.** A project belongs to one
+    invoicing instance and holds a client/job's billing identity (name, client name, optional ABN/
+    address/reference) plus an `archived` flag (same only-ever-`true` convention as
+    `Instance::deleted`/`gst_registered` — there is no delete in v1). Any member — owner or agent —
+    can create/update a project; this is day-to-day work, not an owner-only setting, unlike
+    invoicing settings above.
+  - **Superusers get no access to projects (or, in later PRs, billable items/invoices) — same
+    boundary as tickets, unwidened.** A superuser doesn't pass `Member`, so `projects`/`project`/
+    `createProject` all reject one exactly as they would any other non-member; only a real
+    membership row grants access, mirroring the existing "superuser is admin + instance settings,
+    never ticket access" boundary this project has had since the superuser feature landed. Don't
+    add a superuser carve-out here without a matching, explicit reason — see the "Superuser
+    boundary" entry above.
+
 - **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
   every `.await`.** The process environment is global and tests run in parallel, so a test that
   sets a var, releases its lock, and only then awaits leaves a window for another test to change

@@ -48,6 +48,7 @@ impl db::Handler for Handler {
         _from_name: &str,
         _signature: &str,
         _public_submission_enabled: bool,
+        _kind: db::InstanceKind,
     ) -> db::Result<db::Instance> {
         Self::unsupported()
     }
@@ -237,6 +238,39 @@ impl db::Handler for Handler {
     }
 
     async fn delete_api_token(&self, _id: &str) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    // ── project ───────────────────────────────────────────────────────────
+
+    async fn create_project(
+        &self,
+        _instance_id: &str,
+        _name: &str,
+        _client_name: &str,
+        _client_abn: Option<&str>,
+        _client_address: Option<&str>,
+        _reference: Option<&str>,
+    ) -> db::Result<db::Project> {
+        Self::unsupported()
+    }
+
+    async fn get_projects<T: AsRef<str> + Sync>(
+        &self,
+        _ids: &[T],
+    ) -> db::Result<Vec<Option<db::Project>>> {
+        Self::unsupported()
+    }
+
+    async fn list_projects_by_instance(&self, _instance_id: &str) -> db::Result<Vec<db::Project>> {
+        Self::unsupported()
+    }
+
+    async fn update_project(
+        &self,
+        _id: &str,
+        _change: db::ProjectUpdateShape<'_>,
+    ) -> db::Result<()> {
         Self::unsupported()
     }
 

@@ -200,9 +200,16 @@ async fn create_instance_rejects_an_already_taken_slug() {
     let prefix = require_local_db!();
     let db = dynamodb::Handler::new(&prefix, false).await;
     let slug = unique_id("taken-slug");
-    db.create_instance("Existing", &slug, "Existing", "", false)
-        .await
-        .expect("create_instance");
+    db.create_instance(
+        "Existing",
+        &slug,
+        "Existing",
+        "",
+        false,
+        db::InstanceKind::Support,
+    )
+    .await
+    .expect("create_instance");
     let (_my_app, schema) = build_app_and_schema(db);
 
     let response = schema
@@ -273,7 +280,14 @@ async fn deleting_an_instance_hides_it_from_slug_resolution_and_member_membershi
     let db = dynamodb::Handler::new(&prefix, false).await;
     let slug = unique_id("vanish");
     let instance = db
-        .create_instance("Vanish Co", &slug, "Vanish Co", "", false)
+        .create_instance(
+            "Vanish Co",
+            &slug,
+            "Vanish Co",
+            "",
+            false,
+            db::InstanceKind::Support,
+        )
         .await
         .expect("create_instance");
     let member = db
@@ -581,11 +595,25 @@ async fn delete_user_disables_and_removes_every_membership() {
         .await
         .expect("create_user");
     let inst_a = db
-        .create_instance("A", &unique_id("a"), "A", "", false)
+        .create_instance(
+            "A",
+            &unique_id("a"),
+            "A",
+            "",
+            false,
+            db::InstanceKind::Support,
+        )
         .await
         .expect("create_instance");
     let inst_b = db
-        .create_instance("B", &unique_id("b"), "B", "", false)
+        .create_instance(
+            "B",
+            &unique_id("b"),
+            "B",
+            "",
+            false,
+            db::InstanceKind::Support,
+        )
         .await
         .expect("create_instance");
     db.create_membership(&target.id, &inst_a.id, db::MembershipRole::Agent)
@@ -660,7 +688,14 @@ async fn add_member_then_change_role_then_remove() {
     let prefix = require_local_db!();
     let db = dynamodb::Handler::new(&prefix, false).await;
     let instance = db
-        .create_instance("Membership Co", &unique_id("membership-co"), "M", "", false)
+        .create_instance(
+            "Membership Co",
+            &unique_id("membership-co"),
+            "M",
+            "",
+            false,
+            db::InstanceKind::Support,
+        )
         .await
         .expect("create_instance");
     let user = db
@@ -797,7 +832,14 @@ async fn admin_instances_includes_deleted_ones_and_requires_superuser() {
     let prefix = require_local_db!();
     let db = dynamodb::Handler::new(&prefix, false).await;
     let instance = db
-        .create_instance("Listed", &unique_id("listed"), "Listed", "", false)
+        .create_instance(
+            "Listed",
+            &unique_id("listed"),
+            "Listed",
+            "",
+            false,
+            db::InstanceKind::Support,
+        )
         .await
         .expect("create_instance");
     db.update_instance(&instance.id, db::InstanceUpdateShape::SetDeleted(true))
