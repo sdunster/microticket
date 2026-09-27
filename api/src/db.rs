@@ -634,6 +634,14 @@ pub struct Invoice {
     /// Absent means unpaid. Any member may set or clear this on a finalized
     /// invoice; it is never printed on the invoice itself.
     pub paid_date: Option<String>,
+    /// The S3 key of this invoice's rendered PDF, once
+    /// `downloadInvoicePdf` has rendered it for the first time. Absent for
+    /// a draft, and absent for a finalized invoice that has never been
+    /// downloaded. Set exactly once, by [`Handler::set_invoice_pdf_key`] —
+    /// rendering is deterministic from the frozen `snapshot`, so a
+    /// concurrent double-render just overwrites this with the same key and
+    /// identical bytes, never a real race.
+    pub pdf_s3_key: Option<String>,
 }
 
 impl HasID for Invoice {
@@ -1723,6 +1731,21 @@ pub trait Handler: Sync {
         &self,
         invoice_id: &str,
         paid_date: Option<&str>,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// Cache a finalized invoice's rendered PDF key
+    /// (`graphql::mutations::download_invoice_pdf`'s first render).
+    /// Conditioned on `attribute_exists(id) AND status = finalized` — a
+    /// draft has no PDF to cache a key for. `Ok(false)` if the row is
+    /// missing or not finalized (shouldn't happen: the caller already read
+    /// the row via `require_invoice_member` and rejected a draft before
+    /// rendering). Rendering is deterministic from the frozen `snapshot`,
+    /// so a second caller racing this one writes the same key — this is
+    /// an unconditional `SET`, not a `attribute_not_exists` guard, on
+    /// purpose.
+    fn set_invoice_pdf_key(
+        &self,
+        invoice_id: &str,
+        key: &str,
     ) -> impl Future<Output = Result<bool>> + Send;
     /// Atomically allocate the next invoice number via `UpdateItem ADD` on
     /// `counter` (`id = instance_id`, attribute `next_invoice_number`) —

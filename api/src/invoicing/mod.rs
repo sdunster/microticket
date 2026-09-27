@@ -5,12 +5,14 @@
 //! - [`snapshot`]: the frozen `InvoiceSnapshot` shape and `build_snapshot`,
 //!   the one function that produces both a finalized invoice's frozen
 //!   content and a draft's live preview.
+//! - [`pdf`]: rendering a finalized invoice's snapshot to a PDF.
 //! - The billable-item input validators below, shared by
 //!   `createBillableItem`/`updateBillableItem`.
 //! - [`validate_total_within_safe_integer`], shared by every mutation that
 //!   changes an invoice's item set.
 
 pub mod money;
+pub mod pdf;
 pub mod snapshot;
 
 use chrono::NaiveDate;

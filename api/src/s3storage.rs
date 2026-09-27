@@ -128,4 +128,20 @@ impl storage::Handler for Storage {
             .with_context(|| format!("presigning GET for {key}"))?;
         Ok(req.uri().to_string())
     }
+
+    async fn presign_get_download(&self, key: &str, filename: &str) -> Result<String> {
+        let presign_config =
+            PresigningConfig::expires_in(PRESIGN_EXPIRY).map_err(|e| anyhow!("{e}"))?;
+        let safe = storage::sanitize_download_filename(filename);
+        let req = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .response_content_disposition(format!("attachment; filename=\"{safe}\""))
+            .presigned(presign_config)
+            .await
+            .with_context(|| format!("presigning download GET for {key}"))?;
+        Ok(req.uri().to_string())
+    }
 }

@@ -1016,6 +1016,34 @@ type MutationRoot {
 	"""
 	setInvoicePaid(invoiceId: ID!, paidDate: String): Invoice!
 	"""
+	Download a finalized invoice's PDF: a presigned URL with
+	`Content-Disposition: attachment; filename="Invoice-{displayNumber}.pdf"`
+	(`storage::Handler::presign_get_download`, filename sanitised there).
+	`CONFLICT` on a draft — finalization is what freezes the content a
+	PDF prints (CLAUDE.md's "Invoicing" house rule), so there's nothing
+	yet to render.
+	
+	This is a mutation, not a query, because the *first* call for a
+	given invoice writes: it parses the frozen `snapshot` (the only
+	input `invoicing::pdf::render_invoice_pdf` ever reads — never live
+	project/instance state, so a later settings/project edit can't
+	change what a downloaded PDF says), renders it, `put_bytes`s it to
+	`invoices/{instance_id}/{invoice_id}/Invoice-{displayNumber}.pdf`,
+	and caches that key on the invoice row
+	(`db::Handler::set_invoice_pdf_key`, conditioned on `status =
+	finalized`). Every later call for the same invoice just presigns
+	the cached key. Rendering is deterministic from the snapshot — same
+	content, same page count, same layout — so two callers racing this
+	on the same never-yet-downloaded invoice each render and write a
+	complete, correct PDF of the same invoice (see `invoicing::pdf`'s
+	doc comment for the one respect in which the *bytes* aren't
+	identical between the two: printpdf embeds a fresh random id in
+	each file's trailer). Never a real race to guard against with a
+	conditional write here — whichever write lands last is still the
+	right document.
+	"""
+	downloadInvoicePdf(invoiceId: ID!): String!
+	"""
 	Owner-or-superuser: set the next invoice number to be assigned by
 	`finalizeInvoice` (`db::Handler::set_next_invoice_number` writes
 	`next - 1` to the counter). Forward-only — `CONFLICT` if `next`

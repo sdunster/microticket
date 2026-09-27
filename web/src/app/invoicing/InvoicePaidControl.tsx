@@ -7,6 +7,7 @@ import { FormField } from "../../components/ui/FormField";
 import TextInput from "../../components/ui/TextInput";
 import { relayMutationErrorMessage } from "../../lib/relayMutationError";
 import { formatDate, localToday } from "../../lib/dates";
+import { InvoiceDownloadButton } from "./InvoiceDownloadButton";
 
 const invoicePaidControlFragment = graphql`
   fragment InvoicePaidControl_invoice on Invoice {
@@ -17,9 +18,8 @@ const invoicePaidControlFragment = graphql`
 
 /**
  * A finalized invoice's paid status: any member may set or clear it (it's
- * not printed, and isn't part of what finalization froze). Also the spot
- * where PR 4 adds "Download PDF" — deliberately left as a comment, not a
- * disabled button, until that mutation exists.
+ * not printed, and isn't part of what finalization froze). Also renders the
+ * "Download PDF" button (`InvoiceDownloadButton`) alongside it.
  */
 export function InvoicePaidControl({
   invoice,
@@ -89,7 +89,7 @@ export function InvoicePaidControl({
           {error}
         </p>
       )}
-      {/* PR 4 adds a "Download PDF" button here, alongside the paid control. */}
+      <InvoiceDownloadButton invoiceId={data.id} />
     </div>
   );
 }

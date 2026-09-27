@@ -10,6 +10,15 @@
 #                                                   createAttachmentUpload,
 #                                                   moved into attachments/
 #                                                   by replyToTicket
+#   invoices/{instance_id}/{invoice_id}/Invoice-{displayNumber}.pdf
+#                                                   a finalized invoice's
+#                                                   rendered PDF, cached by
+#                                                   downloadInvoicePdf. NOT
+#                                                   covered by any lifecycle
+#                                                   rule below — an invoice
+#                                                   PDF is a permanent
+#                                                   financial record, not
+#                                                   transient mail.
 
 resource "aws_s3_bucket" "mail" {
   bucket = "microticket-mail-${var.aws_account_id}"

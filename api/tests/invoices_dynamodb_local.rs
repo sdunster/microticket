@@ -45,6 +45,7 @@ use microticket::dynamodb;
 use microticket::graphql;
 use microticket::mockmail;
 use microticket::mockstorage;
+use microticket::storage::Handler as _;
 use serde_json::{Value, json};
 
 type TestApp = app::MyApp<dynamodb::Handler, mockmail::Handler, mockstorage::Storage>;
@@ -329,6 +330,19 @@ fn set_invoice_paid_mutation() -> String {
             setInvoicePaid(invoiceId: $invoiceId, paidDate: $paidDate) {{ {INVOICE_FIELDS} }}
         }}"
     )
+}
+
+const DOWNLOAD_INVOICE_PDF_MUTATION: &str =
+    "mutation($invoiceId: ID!) { downloadInvoicePdf(invoiceId: $invoiceId) }";
+
+async fn download_invoice_pdf(schema: &TestSchema, invoice_id: &str, auth: AuthInfo) -> Response {
+    schema
+        .execute(
+            Request::new(DOWNLOAD_INVOICE_PDF_MUTATION)
+                .variables(Variables::from_json(json!({ "invoiceId": invoice_id })))
+                .data(auth),
+        )
+        .await
 }
 
 const SET_NEXT_INVOICE_NUMBER_MUTATION: &str = "mutation($instanceId: ID!, $next: Int!) {
@@ -1282,6 +1296,131 @@ async fn invoice_list_filters_and_paginates() {
 
     let paid = collect_all(&schema, &instance_id, "PAID", 5, &auth).await;
     assert_eq!(paid, vec![finalized_ids[0].clone()]);
+}
+
+/// `downloadInvoicePdf`: the first call renders from the frozen snapshot,
+/// stores it, and caches `pdf_s3_key`; the second call just re-presigns the
+/// same cached key. Both calls return a non-empty URL, and the stored
+/// object is a real (if mock-storage-backed) PDF.
+#[tokio::test]
+async fn download_invoice_pdf_renders_caches_and_presigns_twice() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance_id, _owner_id, agent_id, project_id) = setup(&db, "pdf").await;
+    let schema = build_schema(db.clone());
+    let auth = || member_auth(&agent_id, &instance_id);
+
+    let items = create_items(&db, &instance_id, &project_id, &agent_id, 1).await;
+    let created = create_invoice(&schema, &project_id, &items, auth()).await;
+    let invoice_id = expect_data(&created, "createInvoice")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    finalize(&schema, &invoice_id, "2026-08-19", auth()).await;
+
+    // Before the first download, no key is cached yet.
+    let before = db
+        .get_invoice_consistent(&invoice_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.pdf_s3_key, None);
+
+    let first = download_invoice_pdf(&schema, &invoice_id, auth()).await;
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    let first_url = expect_data(&first, "downloadInvoicePdf")
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!first_url.is_empty());
+
+    let after_first = db
+        .get_invoice_consistent(&invoice_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let key = after_first
+        .pdf_s3_key
+        .clone()
+        .expect("pdf_s3_key set after first download");
+    assert_eq!(
+        key,
+        format!("invoices/{instance_id}/{invoice_id}/Invoice-001.pdf")
+    );
+
+    // The mock storage's stored object is a real PDF.
+    let storage = mockstorage::Storage::new();
+    let bytes = storage.get_bytes(&key).await.expect("stored PDF bytes");
+    assert!(bytes.starts_with(b"%PDF"), "expected a PDF, got {bytes:?}");
+    assert!(bytes.len() > 500);
+
+    // The second call reuses the cached key rather than re-rendering — the
+    // key (and the underlying bytes) are unchanged.
+    let second = download_invoice_pdf(&schema, &invoice_id, auth()).await;
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    let second_url = expect_data(&second, "downloadInvoicePdf")
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!second_url.is_empty());
+
+    let after_second = db
+        .get_invoice_consistent(&invoice_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_second.pdf_s3_key, Some(key));
+}
+
+#[tokio::test]
+async fn download_invoice_pdf_rejects_a_draft() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance_id, _owner_id, agent_id, project_id) = setup(&db, "pdfdraft").await;
+    let schema = build_schema(db.clone());
+    let auth = || member_auth(&agent_id, &instance_id);
+
+    let items = create_items(&db, &instance_id, &project_id, &agent_id, 1).await;
+    let created = create_invoice(&schema, &project_id, &items, auth()).await;
+    let invoice_id = expect_data(&created, "createInvoice")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let attempt = download_invoice_pdf(&schema, &invoice_id, auth()).await;
+    assert_eq!(expect_error_code(&attempt), "CONFLICT");
+}
+
+#[tokio::test]
+async fn download_invoice_pdf_non_member_gets_not_found() {
+    let prefix = require_local_db!();
+    let db = dynamodb::Handler::new(&prefix, false).await;
+    let (instance_id, _owner_id, agent_id, project_id) = setup(&db, "pdfoutsider").await;
+    let schema = build_schema(db.clone());
+
+    let items = create_items(&db, &instance_id, &project_id, &agent_id, 1).await;
+    let created = create_invoice(
+        &schema,
+        &project_id,
+        &items,
+        member_auth(&agent_id, &instance_id),
+    )
+    .await;
+    let invoice_id = expect_data(&created, "createInvoice")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    finalize(
+        &schema,
+        &invoice_id,
+        "2026-08-19",
+        member_auth(&agent_id, &instance_id),
+    )
+    .await;
+
+    let attempt =
+        download_invoice_pdf(&schema, &invoice_id, outsider_auth(&unique_id("outsider"))).await;
+    assert_eq!(expect_error_code(&attempt), "NOT_FOUND");
 }
 
 /// `db::Handler`-level checks of the optimistic-concurrency machinery: a
