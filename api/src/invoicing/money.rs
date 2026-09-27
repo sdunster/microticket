@@ -20,6 +20,11 @@ pub const MAX_QUANTITY_HUNDREDTHS: i64 = 100_000_000;
 /// Largest unit price, in cents: 10,000,000.00.
 pub const MAX_UNIT_PRICE_CENTS: i64 = 1_000_000_000;
 
+/// `Number.MAX_SAFE_INTEGER` (2^53 − 1) — the largest invoice *total*
+/// (subtotal + GST, in cents) a JS client can hold exactly. See
+/// `invoicing::validate_total_within_safe_integer`.
+pub const MAX_SAFE_TOTAL_CENTS: i64 = 9_007_199_254_740_991;
+
 /// Parse a user-typed quantity (`"2"`, `"1.5"`, `"0.25"`, `".5"`) into
 /// integer hundredths. Rejects blank input, anything but ASCII digits and at
 /// most one `.`, more than 2 decimal places, zero, negatives, and anything

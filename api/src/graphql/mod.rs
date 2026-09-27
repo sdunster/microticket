@@ -49,6 +49,12 @@ pub struct InstanceId(pub async_graphql::ID);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectId(pub async_graphql::ID);
 
+/// `BillableItem.status`/`BillableItem.invoice` — telling `DRAFT` from
+/// `INVOICED` (and resolving `invoice` itself) needs the invoice's current
+/// `status`, batched the same way.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InvoiceId(pub async_graphql::ID);
+
 /// Client IP for the current request, threaded from the HTTP layer so resolvers
 /// (e.g. a future Turnstile verification) can forward it to external services.
 /// `None` when the transport didn't supply one.

@@ -299,6 +299,14 @@ instance and there is no other access pattern to support.
 
 - `next_ticket_number` (N) — incremented with an atomic `UpdateItem ADD`, never read-then-written;
   see "Known issues and risks" below for what happens if that rule is broken
+- `next_invoice_number` (N) — the invoicing counterpart, same atomic-`ADD`-only rule, incremented
+  by `finalizeInvoice` (`db::Handler::increment_invoice_counter`) and settable forward-only via
+  `setNextInvoiceNumber` (`db::Handler::set_next_invoice_number`, condition
+  `attribute_not_exists(next_invoice_number) OR next_invoice_number <= :new_value`). Absent means
+  `0` (no invoice finalized yet, and `nextInvoiceNumber` has never been set) —
+  `InvoicingSettingsInfo.nextInvoiceNumber` reads this lazily (a single `GetItem`, not carried on
+  every `Instance` fetch) and reports `this + 1`. See "Known issues and risks" for the same
+  gap-not-duplicate reasoning as `next_ticket_number`.
 
 ---
 
@@ -511,8 +519,15 @@ page is full or the index is exhausted, and `billable_items_dynamodb_local.rs` p
   `- ` render as bullets on the invoice)
 - `quantity_hundredths` (N) — quantity × 100 (`150` = 1.5), `0 < q ≤ 100,000,000`
 - `unit_price_cents` (N) — GST-exclusive, `0 ≤ p ≤ 1,000,000,000`
-- `invoice_id` (S) — optional; absent means unbilled. Not set by anything yet (invoices arrive in
-  a later PR); update/delete are conditional on `attribute_not_exists(invoice_id)` already.
+- `invoice_id` (S) — optional; absent means unbilled. Set by the transactional attach path
+  (`createInvoice`/`addInvoiceItems`, `db::Handler`'s `create_invoice`/`add_invoice_items`) and
+  cleared by the transactional detach path (`removeInvoiceItems`/`deleteInvoice`), always together
+  with the owning `{prefix}_invoice` row's `item_ids` — see that table's entry below. `delete`
+  stays conditional on `attribute_not_exists(invoice_id)` regardless of the invoice's own status
+  (an item on any invoice, draft or finalized, can't be deleted); `update` is conditional on either
+  that (unbilled) or, when the item is on a *draft* invoice, on the invoice still being a draft
+  (checked atomically in the same transaction that bumps the invoice's `version` — see
+  `db::Handler::update_billable_item`'s doc comment).
 - `created_by_user_id` (S), `created_at`, `updated_at` (N)
 
 The line amount is **not stored** — the API derives it (round-half-up of `quantity_hundredths ×
@@ -521,6 +536,84 @@ unit_price_cents / 100`) on every read. At the bounds it reaches 10^15 cents, ab
 
 Any member (owner or agent) of the invoicing instance can create/update/delete items; superusers get
 no access.
+
+---
+
+### `{prefix}_invoice`
+
+A project's billable items collected for billing — see CLAUDE.md's "Invoicing" house rule for the
+domain rules (snapshot-on-finalize, strict finality, the transactional attach/detach machinery).
+
+| Attribute     | Type | Role                                          |
+| ------------- | ---- | ---------------------------------------------- |
+| `id`          | S    | Hash key (PK) — nanoid                          |
+| `instance_id` | S    | GSI hash key                                    |
+| `project_id`  | S    | GSI hash key                                    |
+| `created_at`  | N    | GSI sort key (both GSIs)                        |
+
+**GSIs:**
+
+| GSI                          | Hash key      | Sort key     | Projection | Purpose                                   |
+| ----------------------------- | ------------- | ------------ | ---------- | ------------------------------------------ |
+| `instance_id-created_at-index` | `instance_id` | `created_at` | ALL        | The instance-wide invoices list            |
+| `project_id-created_at-index`  | `project_id`  | `created_at` | ALL        | One project's invoices (project page)      |
+
+Both read newest `created_at` first (`ScanIndexForward = false`), keyset-paginated with a
+`{created_at}:{id}` cursor — the same shape as `billable_item`'s `{date}:{id}`. `ALL`: the list's
+DRAFT/UNPAID/PAID filter (below) runs as a `FilterExpression` over the projected rows, and
+`list_invoices` follows `list_billable_items`'s "no `Limit` on a filtered query, keep querying
+until the page is full or the index is exhausted" rule for the same reason.
+
+**`status`, `number`, `version`, and `snapshot` are all DynamoDB reserved words** — every
+expression that names one aliases it (`#status`, `#num`, `#v`, `#snap` respectively). Raw
+attribute names in an `Item`/`Key`/`ExclusiveStartKey` map need no alias, same exception as
+`date`/`reference` elsewhere in this schema.
+
+**Non-obvious attributes:**
+
+- `status` (S) — `draft` or `finalized`. **Strictly one-way**: nothing ever writes `finalized` ->
+  `draft` — no void, no un-finalize. The only field a finalized invoice's row can still change is
+  `paid_date`.
+- `version` (N) — optimistic-concurrency counter, starting at 1. Bumped by every write that touches
+  `item_ids` (attach/detach) and by editing an item that sits on this (draft) invoice
+  (`update_billable_item`'s transactional path) — so a `finalizeInvoice` that read a `version`
+  before either kind of change fails its own conditional write cleanly instead of freezing a
+  snapshot that's already stale. See "Known issues and risks" for the gap this (deliberately)
+  still leaves in the *numbering*, not in `version` itself.
+- `item_ids` (SS) — the authoritative set of items on this invoice; absent (empty) is the only way
+  a String Set represents "no items". `createInvoice` requires at least one item to start with, but
+  `removeInvoiceItems` may empty a draft afterward (finalizing one is refused instead). Every
+  `{prefix}_billable_item` row whose `invoice_id` equals this row's `id` must appear here, and vice
+  versa — enforced structurally by the transactional writes, never by a separate consistency pass.
+- `created_by_user_id` (S), `created_at`, `updated_at` (N)
+- `number` (N) — optional; absent for a draft. Assigned exactly once, at finalization, from
+  `{prefix}_counter`'s `next_invoice_number` (see that table's entry). Displayed zero-padded to 3
+  digits (`invoicingSettings`'s convention; it simply grows past 999).
+- `issue_date` (S) — optional; `YYYY-MM-DD`. Absent for a draft; set once, at finalization, never
+  changed afterward.
+- `snapshot` (S) — optional; JSON (`invoicing::snapshot::InvoiceSnapshot`, `schema_version: 1`).
+  Absent for a draft (whose printable content is instead built live,
+  `invoicing::snapshot::build_snapshot`, from the project/instance/items as they currently stand).
+  Set once, at finalization, and never touched again — this is the entire mechanism behind "a
+  project/settings edit after finalize never changes an already-finalized invoice".
+- `total_cents` (N) — optional; absent for a draft. Denormalised from the snapshot (rather than
+  parsed out of the JSON on every list read) so the invoices list can show/sort by it cheaply.
+- `finalized_at` (N), `finalized_by_user_id` (S) — optional; absent for a draft.
+- `paid_date` (S) — optional; `YYYY-MM-DD`. Absent means unpaid. The *only* attribute that may
+  change on a finalized invoice (`setInvoicePaid`, condition `status = finalized`); never printed
+  on the invoice itself.
+
+**Attach/detach/finalize/delete use `TransactWriteItems`** (`Put`/`Update`/`Delete` items only — IAM has no
+`TransactWriteItems` action; each item is authorised by the existing `PutItem`/`UpdateItem`/
+`DeleteItem` grants, and with no `ConditionCheck` no `dynamodb:ConditionCheckItem` grant is needed)
+across this table and
+`billable_item` together, via a small `transact_write` helper in `dynamodb.rs` — the first use of
+DynamoDB transactions in this codebase. `finalizeInvoice`'s own write is a single conditional
+`UpdateItem`, not a transaction: by the time it runs, every item's `invoice_id` already points at
+this invoice (from the moment it was attached), so nothing else needs writing alongside it.
+
+Any member (owner or agent) of the invoicing instance can create/attach/detach/delete a draft, and
+finalize or mark paid; superusers get no access — same boundary as `project`/`billable_item`.
 
 ---
 
@@ -613,6 +706,26 @@ The fix is what this table exists for: `UpdateItem` with `ADD next_ticket_number
 server-side — no two concurrent `ADD`s can observe the same "before" value. The counter table has
 no other access pattern, so there is no legitimate reason for a resolver to `GetItem` it directly;
 if one ever does, that is the bug to look for first.
+
+#### `counter` — finalizing an invoice can leave a gap in the numbering, never a duplicate
+
+`finalizeInvoice`'s algorithm allocates `next_invoice_number` (the same atomic `ADD`, same
+gap-not-duplicate guarantee as `next_ticket_number` above) *before* it knows whether the
+conditional `UpdateItem` that actually finalizes the invoice will succeed. If that write's
+condition fails — the draft's `version` no longer matches, because another edit or another
+finalize attempt raced this one and won — the number that was just allocated is never written onto
+any invoice: it is permanently skipped, and the caller sees `CONFLICT` ("invoice changed, reload").
+This is a deliberate trade, not a bug to fix: allocating the number only *after* confirming the
+write would succeed would need either a second round trip inside the same logical operation (its
+own new race) or folding the counter `ADD` into the same transaction as the invoice write — but the
+counter row isn't a per-item condition the invoice's own `TransactWriteItems` participates in (the
+finalize write is a plain `UpdateItem`, not a transaction; see that table's entry above), and
+`ADD`ing a shared per-instance counter inside a transaction would serialize every concurrent
+finalize across the whole instance on that one row, for a purely cosmetic guarantee (a gap in
+`008, 010, 011, …` costs nothing an accountant cares about; a duplicate `010, 010` would). Two
+invoices sharing the same `number` is the failure mode this must prevent, and it does: the number
+is never reused, because the counter itself never moves backward and a failed finalize never writes
+the number it allocated onto anything.
 
 #### `processed_message` — the idempotency check has a window, not a guarantee, against non-SQS redelivery
 

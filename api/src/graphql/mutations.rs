@@ -30,9 +30,9 @@ use super::auth::{AuthGuard, AuthRequirement, is_member, is_owner};
 use super::error::ApiError;
 use super::query::{
     ApiTokenInfo, BillableItem, BillableItemInput, CreateProjectInput, CreatedApiToken,
-    InboundAddressInfo, Instance, InstanceKindType, InvoicingSettingsInput, MembershipInfo,
-    MembershipRoleType, NotificationSettingsInput, PasskeyInfo, Project, Ticket, TicketMessage,
-    TicketStatusType, UpdateProjectInput, User,
+    InboundAddressInfo, Instance, InstanceKindType, Invoice, InvoicingSettingsInput,
+    MembershipInfo, MembershipRoleType, NotificationSettingsInput, PasskeyInfo, Project, Ticket,
+    TicketMessage, TicketStatusType, UpdateProjectInput, User,
 };
 
 /// One code per address per this many seconds — cheap anti-spam for
@@ -68,6 +68,10 @@ const MAX_INVOICING_LONG_FIELD_LEN: usize = 2000;
 const MAX_PROJECT_FIELD_LEN: usize = MAX_INVOICING_FIELD_LEN;
 /// Alias of [`MAX_INVOICING_LONG_FIELD_LEN`] for project fields.
 const MAX_PROJECT_LONG_FIELD_LEN: usize = MAX_INVOICING_LONG_FIELD_LEN;
+/// Most items one invoice may carry — see CLAUDE.md's "Invoicing" house
+/// rule ("Validation limits"): a `TransactWriteItems` call caps out at 100
+/// actions, and one item is always taken by the invoice row itself.
+const MAX_INVOICE_ITEMS: usize = 50;
 
 fn sha256_hex(input: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -288,6 +292,136 @@ async fn require_billable_item_member<A: App + HasDb + Send + Sync>(
         return Err(ApiError::not_found("BillableItem", id).into());
     }
     Ok(item)
+}
+
+/// The per-record authorization check every invoice mutation uses — the
+/// same shape as [`require_project_member`]/[`require_billable_item_member`]:
+/// user check before the fetch, then `NOT_FOUND` for a missing invoice and
+/// for one in an instance the caller isn't a member of alike. Superusers
+/// get no access (they don't pass `is_member`). Uses
+/// [`db::Handler::get_invoice_consistent`], not the (eventually consistent)
+/// dataloader path — every caller conditions a subsequent write on the
+/// `status`/`version` this returns.
+async fn require_invoice_member<A: App + HasDb + Send + Sync>(
+    ctx: &Context<'_>,
+    app: &A,
+    id: &str,
+) -> Result<db::Invoice> {
+    let Some(AuthInfo::User { memberships, .. }) = ctx.data_opt::<AuthInfo>() else {
+        return Err(ApiError::forbidden("Must be authenticated as a user").into());
+    };
+    let invoice = app
+        .db()
+        .get_invoice_consistent(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Invoice", id))?;
+    if !is_member(memberships, &invoice.instance_id) {
+        return Err(ApiError::not_found("Invoice", id).into());
+    }
+    Ok(invoice)
+}
+
+/// Validate a set of billable-item ids to add to an invoice
+/// (`createInvoice`'s `itemIds`, or `addInvoiceItems`'): at least one, no
+/// duplicates against each other or `existing` (the invoice's current
+/// `item_ids` — empty for `createInvoice`), and the combined total capped at
+/// [`MAX_INVOICE_ITEMS`].
+fn validate_new_invoice_item_ids(ids: &[ID], existing: &[String]) -> Result<Vec<String>> {
+    if ids.is_empty() {
+        return Err(anyhow!("At least one item id is required"));
+    }
+    if existing.len() + ids.len() > MAX_INVOICE_ITEMS {
+        return Err(anyhow!(
+            "An invoice can have at most {MAX_INVOICE_ITEMS} items"
+        ));
+    }
+    let mut seen: HashSet<String> = existing.iter().cloned().collect();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let s = id.as_str().to_string();
+        if !seen.insert(s.clone()) {
+            return Err(anyhow!("Item {s} is duplicated"));
+        }
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// Validate a set of billable-item ids to remove from an invoice
+/// (`removeInvoiceItems`): at least one, no duplicates, and every id must
+/// currently be on `current` (the invoice's own `item_ids`) — a clearer
+/// error than letting the transaction's own condition fail on an id that
+/// was never on this invoice.
+fn validate_remove_invoice_item_ids(ids: &[ID], current: &[String]) -> Result<Vec<String>> {
+    if ids.is_empty() {
+        return Err(anyhow!("At least one item id is required"));
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let s = id.as_str().to_string();
+        if !seen.insert(s.clone()) {
+            return Err(anyhow!("Item {s} is duplicated"));
+        }
+        if !current.iter().any(|x| x == &s) {
+            return Err(anyhow!("Item {s} is not on this invoice"));
+        }
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// Fetch and validate a set of billable items being attached to an invoice
+/// (`createInvoice`/`addInvoiceItems`): every id must resolve to a row that
+/// belongs to `project_id` and is currently unbilled. `NOT_FOUND` for a
+/// missing id (it never existed, or belongs to another instance entirely);
+/// `CONFLICT` for one that exists but isn't eligible (wrong project, or
+/// already on an invoice) — this is a pre-check for a clear message, not
+/// the sole guard: the transaction's own per-item condition re-checks both
+/// atomically.
+async fn fetch_eligible_items<A: App + HasDb + Send + Sync>(
+    app: &A,
+    project_id: &str,
+    ids: &[String],
+) -> Result<Vec<db::BillableItem>> {
+    let fetched = app.db().get_billable_items(ids).await?;
+    let mut items = Vec::with_capacity(ids.len());
+    for (id, item) in ids.iter().zip(fetched) {
+        let item = item.ok_or_else(|| ApiError::not_found("BillableItem", id))?;
+        if item.project_id != project_id {
+            return Err(ApiError::conflict(format!(
+                "Billable item {id} does not belong to this invoice's project"
+            ))
+            .into());
+        }
+        if item.invoice_id.is_some() {
+            return Err(
+                ApiError::conflict(format!("Billable item {id} is already on an invoice")).into(),
+            );
+        }
+        items.push(item);
+    }
+    Ok(items)
+}
+
+/// Reject a prospective invoice total (subtotal + GST, in cents) that would
+/// exceed `Number.MAX_SAFE_INTEGER` — see CLAUDE.md's "Invoicing" house
+/// rule ("Totals overflow") and `invoicing::validate_total_within_safe_integer`.
+fn check_invoice_total_within_safe_integer(
+    items: &[db::BillableItem],
+    gst_registered: bool,
+) -> Result<()> {
+    let subtotal: i64 = items
+        .iter()
+        .map(|it| invoicing::money::line_amount_cents(it.quantity_hundredths, it.unit_price_cents))
+        .sum();
+    let gst = if gst_registered {
+        invoicing::money::gst_cents(subtotal)
+    } else {
+        0
+    };
+    let total = subtotal.saturating_add(gst);
+    invoicing::validate_total_within_safe_integer(total).map_err(|e| anyhow!(e))
 }
 
 /// A [`BillableItemInput`] after validation — canonical date, trimmed
@@ -3153,14 +3287,14 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
 
     /// Full-replace a billable item's date/description/quantity/unit price.
     /// Id-only, authorised like `updateProject` (`NOT_FOUND` for missing or
-    /// not yours). Refused with `CONFLICT` once the item is on an invoice —
-    /// checked up front for a clear message, and again atomically in the
-    /// write's condition, so an item attached between the two is never
-    /// silently edited.
-    ///
-    /// When invoices land (next PR) this narrows to "refused once the invoice
-    /// is *finalized*": an item on a draft stays editable, bumping the
-    /// draft's `version` in the same transaction.
+    /// not yours). An unbilled item is a plain conditional update, unchanged
+    /// from before invoices existed. An item on a *draft* invoice stays
+    /// editable — the write also bumps that invoice's `version` in the same
+    /// transaction (`db::Handler::update_billable_item`), conditioned on it
+    /// still being a draft. An item on a *finalized* invoice is refused —
+    /// checked up front here for a clear message, and again atomically in
+    /// the write's condition, so a concurrent finalize is never silently
+    /// edited around.
     async fn update_billable_item(
         &self,
         ctx: &Context<'_>,
@@ -3168,15 +3302,35 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         input: BillableItemInput,
     ) -> Result<BillableItem<A>> {
         let item = require_billable_item_member(ctx, &*self.app, id.as_str()).await?;
-        if item.invoice_id.is_some() {
-            return Err(ApiError::conflict("Billable item is already on an invoice").into());
-        }
+        // Kept (not just checked) when present, so the returned item below
+        // can use it as its known parent invoice — see `BillableItem`'s
+        // `parent_invoice` doc comment.
+        let invoice = if let Some(invoice_id) = &item.invoice_id {
+            let invoice = self
+                .app
+                .db()
+                .get_invoice_consistent(invoice_id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::conflict("Billable item's invoice is missing — reload and try again")
+                })?;
+            if invoice.status != db::InvoiceStatus::Draft {
+                return Err(ApiError::conflict(
+                    "Billable item is on a finalized invoice and can no longer be edited",
+                )
+                .into());
+            }
+            Some(invoice)
+        } else {
+            None
+        };
         let fields = validate_billable_item_input(&input)?;
         let written = self
             .app
             .db()
             .update_billable_item(
                 &item.id,
+                item.invoice_id.as_deref(),
                 db::BillableItemUpdateShape::Fields {
                     date: &fields.date,
                     description: &fields.description,
@@ -3186,25 +3340,32 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             )
             .await?;
         if !written {
+            // Covers both write shapes' condition failures — the item was
+            // deleted, attached to an invoice (unbilled path), or its
+            // invoice was finalized concurrently (draft-item path) — so
+            // this can't claim a specific cause it hasn't actually checked.
             return Err(ApiError::conflict(
-                "Billable item changed (deleted or put on an invoice) — reload and try again",
+                "Billable item changed concurrently — reload and try again",
             )
             .into());
         }
-        Ok(BillableItem::new(db::BillableItem {
+        let updated = db::BillableItem {
             date: fields.date,
             description: fields.description,
             quantity_hundredths: fields.quantity_hundredths,
             unit_price_cents: fields.unit_price_cents,
             updated_at: crate::clock::now_sec(),
             ..item
-        }))
+        };
+        Ok(match invoice {
+            Some(invoice) => BillableItem::with_parent_invoice(updated, invoice),
+            None => BillableItem::new(updated),
+        })
     }
 
     /// Delete a billable item, returning its id (for the client's store).
-    /// Same authorization and on-an-invoice refusal as
-    /// `updateBillableItem` — including the same "only once finalized"
-    /// narrowing when invoices land.
+    /// Unbilled only, regardless of the item's invoice's own status — see
+    /// CLAUDE.md's "Invoicing" house rule.
     async fn delete_billable_item(&self, ctx: &Context<'_>, id: ID) -> Result<ID> {
         let item = require_billable_item_member(ctx, &*self.app, id.as_str()).await?;
         if item.invoice_id.is_some() {
@@ -3217,6 +3378,390 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             .into());
         }
         Ok(ID(item.id))
+    }
+
+    // ── Invoices ──────────────────────────────────────────────────────────────
+
+    /// Create a draft invoice from a project's unbilled items, in one
+    /// transaction (`db::Handler::create_invoice`). Authorised through the
+    /// project like `createBillableItem` — `NOT_FOUND` for a missing
+    /// project or a non-member alike; an archived project is allowed (you
+    /// may be invoicing final work on a job you've since archived). Every
+    /// id in `itemIds` must belong to this project and be currently
+    /// unbilled (`CONFLICT`/`NOT_FOUND` otherwise), 1–50 of them
+    /// (`MAX_INVOICE_ITEMS`), no duplicates.
+    async fn create_invoice(
+        &self,
+        ctx: &Context<'_>,
+        project_id: ID,
+        item_ids: Vec<ID>,
+    ) -> Result<Invoice<A>> {
+        let project = require_project_member(ctx, &*self.app, project_id.as_str()).await?;
+        let Some(AuthInfo::User { id: user_id, .. }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        };
+        let ids = validate_new_invoice_item_ids(&item_ids, &[])?;
+        let items = fetch_eligible_items(&*self.app, &project.id, &ids).await?;
+
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[project.instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", project.instance_id.as_str()))?;
+        check_invoice_total_within_safe_integer(&items, instance.gst_registered)?;
+
+        let created = self
+            .app
+            .db()
+            .create_invoice(&project.instance_id, &project.id, &ids, user_id)
+            .await?
+            .ok_or_else(|| {
+                ApiError::conflict(
+                    "One or more items changed (deleted or put on another invoice) — reload and try again",
+                )
+            })?;
+        Ok(Invoice::new(created))
+    }
+
+    /// Add unbilled items to a draft invoice, in one transaction
+    /// (`db::Handler::add_invoice_items`) that also bumps the invoice's
+    /// `version`. `NOT_FOUND`/`CONFLICT` for the same reasons as
+    /// `createInvoice`; `CONFLICT` if the invoice is already finalized, or
+    /// changed concurrently (a stale `version`).
+    async fn add_invoice_items(
+        &self,
+        ctx: &Context<'_>,
+        invoice_id: ID,
+        item_ids: Vec<ID>,
+    ) -> Result<Invoice<A>> {
+        let invoice = require_invoice_member(ctx, &*self.app, invoice_id.as_str()).await?;
+        if invoice.status != db::InvoiceStatus::Draft {
+            return Err(
+                ApiError::conflict("Invoice is finalized and can no longer be edited").into(),
+            );
+        }
+        let new_ids = validate_new_invoice_item_ids(&item_ids, &invoice.item_ids)?;
+        let new_items = fetch_eligible_items(&*self.app, &invoice.project_id, &new_ids).await?;
+
+        let existing_items: Vec<db::BillableItem> = if invoice.item_ids.is_empty() {
+            vec![]
+        } else {
+            self.app
+                .db()
+                .get_billable_items(&invoice.item_ids)
+                .await?
+                .into_iter()
+                .flatten()
+                .collect()
+        };
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[invoice.instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", invoice.instance_id.as_str()))?;
+        let mut all_items = existing_items;
+        all_items.extend(new_items);
+        check_invoice_total_within_safe_integer(&all_items, instance.gst_registered)?;
+
+        let committed = self
+            .app
+            .db()
+            .add_invoice_items(&invoice.id, &invoice.project_id, &new_ids, invoice.version)
+            .await?;
+        if !committed {
+            return Err(
+                ApiError::conflict("Invoice changed concurrently — reload and try again").into(),
+            );
+        }
+        let mut item_ids_result = invoice.item_ids.clone();
+        item_ids_result.extend(new_ids);
+        Ok(Invoice::new(db::Invoice {
+            item_ids: item_ids_result,
+            version: invoice.version + 1,
+            updated_at: crate::clock::now_sec(),
+            ..invoice
+        }))
+    }
+
+    /// Remove items from a draft invoice, in one transaction
+    /// (`db::Handler::remove_invoice_items`) that also bumps the invoice's
+    /// `version`. Removing every item (an empty draft) is allowed —
+    /// finalizing one is not. `CONFLICT` if the invoice is finalized, an id
+    /// isn't currently on it, or the invoice changed concurrently.
+    async fn remove_invoice_items(
+        &self,
+        ctx: &Context<'_>,
+        invoice_id: ID,
+        item_ids: Vec<ID>,
+    ) -> Result<Invoice<A>> {
+        let invoice = require_invoice_member(ctx, &*self.app, invoice_id.as_str()).await?;
+        if invoice.status != db::InvoiceStatus::Draft {
+            return Err(
+                ApiError::conflict("Invoice is finalized and can no longer be edited").into(),
+            );
+        }
+        let remove_ids = validate_remove_invoice_item_ids(&item_ids, &invoice.item_ids)?;
+        let committed = self
+            .app
+            .db()
+            .remove_invoice_items(&invoice.id, &remove_ids, invoice.version)
+            .await?;
+        if !committed {
+            return Err(
+                ApiError::conflict("Invoice changed concurrently — reload and try again").into(),
+            );
+        }
+        let item_ids_result: Vec<String> = invoice
+            .item_ids
+            .iter()
+            .filter(|id| !remove_ids.contains(id))
+            .cloned()
+            .collect();
+        Ok(Invoice::new(db::Invoice {
+            item_ids: item_ids_result,
+            version: invoice.version + 1,
+            updated_at: crate::clock::now_sec(),
+            ..invoice
+        }))
+    }
+
+    /// Delete a draft invoice, returning its id. Draft only — a `Delete` on
+    /// the invoice plus `REMOVE invoice_id` on each of its items, in one
+    /// transaction (`db::Handler::delete_invoice`) conditioned on the
+    /// `version` this resolver just read.
+    async fn delete_invoice(&self, ctx: &Context<'_>, invoice_id: ID) -> Result<ID> {
+        let invoice = require_invoice_member(ctx, &*self.app, invoice_id.as_str()).await?;
+        if invoice.status != db::InvoiceStatus::Draft {
+            return Err(ApiError::conflict("Only a draft invoice can be deleted").into());
+        }
+        let committed = self
+            .app
+            .db()
+            .delete_invoice(&invoice.id, &invoice.item_ids, invoice.version)
+            .await?;
+        if !committed {
+            return Err(
+                ApiError::conflict("Invoice changed concurrently — reload and try again").into(),
+            );
+        }
+        Ok(ID(invoice.id))
+    }
+
+    /// Finalize a draft invoice — CLAUDE.md's "finalize algorithm", steps
+    /// 1–6: re-read the items this resolver's `require_invoice_member`
+    /// fetch named (consistently, so this sees each item's just-attached
+    /// `invoice_id`), read the project and instance (requiring
+    /// `businessName` to be set), allocate the next number from the
+    /// per-instance counter, build the frozen snapshot, and write it all in
+    /// one conditional `UpdateItem`. Strictly final — no void, no
+    /// un-finalize; only `setInvoicePaid` may touch a finalized invoice
+    /// afterward. `CONFLICT` if the draft changed concurrently (a stale
+    /// `version`, checked both up front — via the consistent items read —
+    /// and in the final write's own condition).
+    async fn finalize_invoice(
+        &self,
+        ctx: &Context<'_>,
+        invoice_id: ID,
+        issue_date: String,
+    ) -> Result<Invoice<A>> {
+        let invoice = require_invoice_member(ctx, &*self.app, invoice_id.as_str()).await?;
+        let Some(AuthInfo::User { id: user_id, .. }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        };
+        if invoice.status != db::InvoiceStatus::Draft {
+            return Err(ApiError::conflict("Invoice is already finalized").into());
+        }
+        if invoice.item_ids.is_empty() {
+            return Err(anyhow!("Add at least one item before finalizing"));
+        }
+        let issue_date = invoicing::validate_item_date(&issue_date).map_err(|e| anyhow!(e))?;
+
+        // Step 2: a consistent BatchGetItem, verifying every item still
+        // points back at this invoice — closes the race between this
+        // resolver's own (consistent) invoice read and a concurrent detach.
+        let fetched = self
+            .app
+            .db()
+            .get_billable_items_consistent(&invoice.item_ids)
+            .await?;
+        let mut resolved_items = Vec::with_capacity(invoice.item_ids.len());
+        for (id, item) in invoice.item_ids.iter().zip(fetched) {
+            let item = item.ok_or_else(|| {
+                ApiError::conflict(format!(
+                    "Billable item {id} is missing — reload and try again"
+                ))
+            })?;
+            if item.invoice_id.as_deref() != Some(invoice.id.as_str()) {
+                return Err(ApiError::conflict(
+                    "Invoice changed concurrently — reload and try again",
+                )
+                .into());
+            }
+            resolved_items.push(item);
+        }
+
+        // Step 3: project + instance, requiring business_name.
+        let project = self
+            .app
+            .db()
+            .get_projects(&[invoice.project_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Project", invoice.project_id.as_str()))?;
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[invoice.instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", invoice.instance_id.as_str()))?;
+        if instance
+            .business_name
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            return Err(anyhow!("Complete the invoicing settings first"));
+        }
+
+        // Step 4: allocate the number.
+        let number = self
+            .app
+            .db()
+            .increment_invoice_counter(&invoice.instance_id)
+            .await?;
+        let number = u32::try_from(number).unwrap_or(u32::MAX);
+
+        // Step 5: build the snapshot.
+        let snapshot = invoicing::snapshot::build_snapshot(
+            &instance,
+            &project,
+            &resolved_items,
+            Some(number),
+            Some(&issue_date),
+        );
+        invoicing::validate_total_within_safe_integer(snapshot.total_cents)
+            .map_err(|e| anyhow!(e))?;
+        let snapshot_json = serde_json::to_string(&snapshot)
+            .map_err(|e| anyhow!("Failed to serialize invoice snapshot: {e}"))?;
+
+        // Step 6: the conditional write. A failure here leaves `number`
+        // allocated but unused — a gap, never a duplicate (see
+        // `SCHEMA.md`'s "Known issues").
+        let committed = self
+            .app
+            .db()
+            .finalize_invoice(
+                &invoice.id,
+                invoice.version,
+                number,
+                &issue_date,
+                &snapshot_json,
+                snapshot.total_cents,
+                user_id,
+            )
+            .await?;
+        if !committed {
+            return Err(
+                ApiError::conflict("Invoice changed concurrently — reload and try again").into(),
+            );
+        }
+
+        let now = crate::clock::now_sec();
+        Ok(Invoice::new(db::Invoice {
+            status: db::InvoiceStatus::Finalized,
+            version: invoice.version + 1,
+            number: Some(number),
+            issue_date: Some(issue_date),
+            snapshot: Some(snapshot_json),
+            total_cents: Some(snapshot.total_cents),
+            finalized_at: Some(now),
+            finalized_by_user_id: Some(user_id.clone()),
+            updated_at: now,
+            ..invoice
+        }))
+    }
+
+    /// Set (`paidDate` given) or clear (`null`) a finalized invoice's paid
+    /// status. Any member may call this — paid status is not printed on
+    /// the invoice and is not part of what finalization freezes. `CONFLICT`
+    /// on a draft, or if the invoice changed concurrently.
+    async fn set_invoice_paid(
+        &self,
+        ctx: &Context<'_>,
+        invoice_id: ID,
+        paid_date: Option<String>,
+    ) -> Result<Invoice<A>> {
+        let invoice = require_invoice_member(ctx, &*self.app, invoice_id.as_str()).await?;
+        if invoice.status != db::InvoiceStatus::Finalized {
+            return Err(ApiError::conflict("Only a finalized invoice can be marked paid").into());
+        }
+        let validated = match &paid_date {
+            Some(d) => Some(invoicing::validate_item_date(d).map_err(|e| anyhow!(e))?),
+            None => None,
+        };
+        let committed = self
+            .app
+            .db()
+            .set_invoice_paid(&invoice.id, validated.as_deref())
+            .await?;
+        if !committed {
+            return Err(
+                ApiError::conflict("Invoice changed concurrently — reload and try again").into(),
+            );
+        }
+        Ok(Invoice::new(db::Invoice {
+            paid_date: validated,
+            updated_at: crate::clock::now_sec(),
+            ..invoice
+        }))
+    }
+
+    /// Owner-or-superuser: set the next invoice number to be assigned by
+    /// `finalizeInvoice` (`db::Handler::set_next_invoice_number` writes
+    /// `next - 1` to the counter). Forward-only — `CONFLICT` if `next`
+    /// would move the counter backward. `next` must be at least 1.
+    #[graphql(
+        guard = "AuthGuard::new(AuthRequirement::InstanceOwnerOrSuperuser(instance_id.to_string()))"
+    )]
+    async fn set_next_invoice_number(&self, instance_id: ID, next: i32) -> Result<Instance<A>> {
+        let instance = self
+            .app
+            .db()
+            .get_instances(&[instance_id.as_str()])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| ApiError::not_found("Instance", instance_id.as_str()))?;
+        db::require_instance_kind(&instance, db::InstanceKind::Invoicing)
+            .map_err(|e| anyhow!(e))?;
+        if next < 1 {
+            return Err(anyhow!("next must be at least 1"));
+        }
+        let new_value = u64::try_from(next - 1).unwrap_or(0);
+        let committed = self
+            .app
+            .db()
+            .set_next_invoice_number(&instance.id, new_value)
+            .await?;
+        if !committed {
+            return Err(ApiError::conflict("The next invoice number can only move forward").into());
+        }
+        Ok(Instance::new(instance))
     }
 }
 

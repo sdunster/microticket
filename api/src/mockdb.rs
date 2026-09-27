@@ -299,6 +299,7 @@ impl db::Handler for Handler {
     async fn update_billable_item(
         &self,
         _id: &str,
+        _invoice_id: Option<&str>,
         _change: db::BillableItemUpdateShape<'_>,
     ) -> db::Result<bool> {
         Self::unsupported()
@@ -314,6 +315,110 @@ impl db::Handler for Handler {
         _filter: db::BillableItemFilter,
         _page: db::ListBillableItemsPage,
     ) -> db::Result<Vec<db::BillableItem>> {
+        Self::unsupported()
+    }
+
+    async fn get_billable_items_consistent<T: AsRef<str> + Sync>(
+        &self,
+        _ids: &[T],
+    ) -> db::Result<Vec<Option<db::BillableItem>>> {
+        Self::unsupported()
+    }
+
+    // ── invoice ───────────────────────────────────────────────────────────
+
+    async fn get_invoices<T: AsRef<str> + Sync>(
+        &self,
+        _ids: &[T],
+    ) -> db::Result<Vec<Option<db::Invoice>>> {
+        Self::unsupported()
+    }
+
+    async fn get_invoice_consistent(&self, _id: &str) -> db::Result<Option<db::Invoice>> {
+        Self::unsupported()
+    }
+
+    async fn create_invoice(
+        &self,
+        _instance_id: &str,
+        _project_id: &str,
+        _item_ids: &[String],
+        _created_by_user_id: &str,
+    ) -> db::Result<Option<db::Invoice>> {
+        Self::unsupported()
+    }
+
+    async fn add_invoice_items(
+        &self,
+        _invoice_id: &str,
+        _project_id: &str,
+        _item_ids: &[String],
+        _expected_version: u64,
+    ) -> db::Result<bool> {
+        Self::unsupported()
+    }
+
+    async fn remove_invoice_items(
+        &self,
+        _invoice_id: &str,
+        _item_ids: &[String],
+        _expected_version: u64,
+    ) -> db::Result<bool> {
+        Self::unsupported()
+    }
+
+    async fn delete_invoice(
+        &self,
+        _invoice_id: &str,
+        _item_ids: &[String],
+        _expected_version: u64,
+    ) -> db::Result<bool> {
+        Self::unsupported()
+    }
+
+    async fn finalize_invoice(
+        &self,
+        _invoice_id: &str,
+        _expected_version: u64,
+        _number: u32,
+        _issue_date: &str,
+        _snapshot_json: &str,
+        _total_cents: i64,
+        _finalized_by_user_id: &str,
+    ) -> db::Result<bool> {
+        Self::unsupported()
+    }
+
+    async fn set_invoice_paid(
+        &self,
+        _invoice_id: &str,
+        _paid_date: Option<&str>,
+    ) -> db::Result<bool> {
+        Self::unsupported()
+    }
+
+    async fn increment_invoice_counter(&self, _instance_id: &str) -> db::Result<u64> {
+        Self::unsupported()
+    }
+
+    async fn get_invoice_counter(&self, _instance_id: &str) -> db::Result<u64> {
+        Self::unsupported()
+    }
+
+    async fn set_next_invoice_number(
+        &self,
+        _instance_id: &str,
+        _new_value: u64,
+    ) -> db::Result<bool> {
+        Self::unsupported()
+    }
+
+    async fn list_invoices(
+        &self,
+        _scope: db::InvoiceScope<'_>,
+        _filter: db::InvoiceListFilter,
+        _page: db::ListInvoicesPage,
+    ) -> db::Result<Vec<db::Invoice>> {
         Self::unsupported()
     }
 
