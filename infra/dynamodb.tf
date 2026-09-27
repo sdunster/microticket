@@ -460,6 +460,60 @@ resource "aws_dynamodb_table" "project" {
   }
 }
 
+# ── billable_item ────────────────────────────────────────────────────────────
+# One line of work recorded against a project, later collected onto an
+# invoice — see CLAUDE.md's "Invoicing" house rule. `date` (YYYY-MM-DD) is
+# the sort key of both listing GSIs, newest first; it is also a DynamoDB
+# reserved word, so every expression that names it aliases it (`#d`).
+
+resource "aws_dynamodb_table" "billable_item" {
+  name                        = "${var.db_prefix}_billable_item"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "id"
+  deletion_protection_enabled = true
+
+  point_in_time_recovery {
+    enabled                 = true
+    recovery_period_in_days = 35
+  }
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+  attribute {
+    name = "instance_id"
+    type = "S"
+  }
+  attribute {
+    name = "project_id"
+    type = "S"
+  }
+  attribute {
+    name = "date"
+    type = "S"
+  }
+
+  # The instance-wide billable items page. ALL: every field is rendered in
+  # the list, and the unbilled/billed filter (`invoice_id` presence) runs as
+  # a FilterExpression over the projected rows.
+  global_secondary_index {
+    name            = "instance_id-date-index"
+    hash_key        = "instance_id"
+    range_key       = "date"
+    projection_type = "ALL"
+  }
+
+  # One project's items — the project page's list, and (next) the pool an
+  # invoice is drawn from. ALL for the same reason.
+  global_secondary_index {
+    name            = "project_id-date-index"
+    hash_key        = "project_id"
+    range_key       = "date"
+    projection_type = "ALL"
+  }
+}
+
 # ── webauthn_credential ──────────────────────────────────────────────────────
 
 resource "aws_dynamodb_table" "webauthn_credential" {

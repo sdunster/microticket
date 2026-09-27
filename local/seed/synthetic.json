@@ -540,6 +540,97 @@
         "updated_at": { "N": "1735693200" }
       }
     ],
+    "billable_item": [
+      {
+        "_comment": "Fictional billable items on the seeded invoicing instance, all unbilled (invoices arrive in a later PR). Quantities are hundredths (300 = 3), prices are cents (15000 = 150.00).",
+        "id": { "S": "SeedItem0001" },
+        "instance_id": { "S": "SeedLedger01" },
+        "project_id": { "S": "SeedProj0001" },
+        "date": { "S": "2026-08-03" },
+        "description": { "S": "Discovery workshop" },
+        "quantity_hundredths": { "N": "300" },
+        "unit_price_cents": { "N": "15000" },
+        "created_by_user_id": { "S": "SeedOwnerUsr" },
+        "created_at": { "N": "1785715200" },
+        "updated_at": { "N": "1785715200" }
+      },
+      {
+        "_comment": "A multi-line description with bullet lines, quantity 1 at a fixed price.",
+        "id": { "S": "SeedItem0002" },
+        "instance_id": { "S": "SeedLedger01" },
+        "project_id": { "S": "SeedProj0001" },
+        "date": { "S": "2026-08-10" },
+        "description": { "S": "Homepage and product page designs\n* three homepage concepts\n* one round of revisions" },
+        "quantity_hundredths": { "N": "100" },
+        "unit_price_cents": { "N": "240000" },
+        "created_by_user_id": { "S": "SeedOwnerUsr" },
+        "created_at": { "N": "1786320000" },
+        "updated_at": { "N": "1786320000" }
+      },
+      {
+        "_comment": "A fractional quantity: 12.5 hours.",
+        "id": { "S": "SeedItem0003" },
+        "instance_id": { "S": "SeedLedger01" },
+        "project_id": { "S": "SeedProj0001" },
+        "date": { "S": "2026-08-19" },
+        "description": { "S": "Front-end build" },
+        "quantity_hundredths": { "N": "1250" },
+        "unit_price_cents": { "N": "12500" },
+        "created_by_user_id": { "S": "SeedOwnerUsr" },
+        "created_at": { "N": "1787097600" },
+        "updated_at": { "N": "1787097600" }
+      },
+      {
+        "_comment": "A zero-price line on the same date as the one above \u2014 exercises the same-date tie in the date-sorted listing.",
+        "id": { "S": "SeedItem0004" },
+        "instance_id": { "S": "SeedLedger01" },
+        "project_id": { "S": "SeedProj0001" },
+        "date": { "S": "2026-08-19" },
+        "description": { "S": "Hosting setup (no charge)" },
+        "quantity_hundredths": { "N": "100" },
+        "unit_price_cents": { "N": "0" },
+        "created_by_user_id": { "S": "SeedOwnerUsr" },
+        "created_at": { "N": "1787101200" },
+        "updated_at": { "N": "1787101200" }
+      },
+      {
+        "id": { "S": "SeedItem0005" },
+        "instance_id": { "S": "SeedLedger01" },
+        "project_id": { "S": "SeedProj0002" },
+        "date": { "S": "2026-07-31" },
+        "description": { "S": "July bookkeeping" },
+        "quantity_hundredths": { "N": "100" },
+        "unit_price_cents": { "N": "55000" },
+        "created_by_user_id": { "S": "SeedOwnerUsr" },
+        "created_at": { "N": "1785456000" },
+        "updated_at": { "N": "1785456000" }
+      },
+      {
+        "id": { "S": "SeedItem0006" },
+        "instance_id": { "S": "SeedLedger01" },
+        "project_id": { "S": "SeedProj0002" },
+        "date": { "S": "2026-08-31" },
+        "description": { "S": "August bookkeeping\n- BAS preparation" },
+        "quantity_hundredths": { "N": "100" },
+        "unit_price_cents": { "N": "55000" },
+        "created_by_user_id": { "S": "SeedOwnerUsr" },
+        "created_at": { "N": "1788134400" },
+        "updated_at": { "N": "1788134400" }
+      },
+      {
+        "_comment": "Quantity 2.25 hours at 90.00.",
+        "id": { "S": "SeedItem0007" },
+        "instance_id": { "S": "SeedLedger01" },
+        "project_id": { "S": "SeedProj0002" },
+        "date": { "S": "2026-08-31" },
+        "description": { "S": "Payroll setup" },
+        "quantity_hundredths": { "N": "225" },
+        "unit_price_cents": { "N": "9000" },
+        "created_by_user_id": { "S": "SeedOwnerUsr" },
+        "created_at": { "N": "1788138000" },
+        "updated_at": { "N": "1788138000" }
+      }
+    ],
     "counter": [
       {
         "_comment": "Acme's next-ticket-number counter, in step with the 5 tickets seeded above.",

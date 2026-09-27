@@ -7,6 +7,7 @@ pub mod environment;
 pub mod expire;
 pub mod graphql;
 pub mod inbound;
+pub mod invoicing;
 pub mod local_dev;
 pub mod mail;
 pub mod mailloop;

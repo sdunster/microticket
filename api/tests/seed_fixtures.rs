@@ -153,6 +153,36 @@ fn synthetic_references_resolve() {
             id(project)
         );
     }
+
+    // A billable item's `instance_id` is denormalised from its project, so
+    // the two must agree, or the item would show up in one instance's list
+    // while belonging to another instance's project.
+    let project_instances: std::collections::HashMap<String, String> = rows(&doc, "project")
+        .iter()
+        .map(|p| (id(p), s(p, "instance_id").unwrap_or_default()))
+        .collect();
+    for item in rows(&doc, "billable_item") {
+        let project_id = s(item, "project_id").expect("billable_item.project_id");
+        let instance_id = s(item, "instance_id").expect("billable_item.instance_id");
+        assert_eq!(
+            project_instances.get(&project_id),
+            Some(&instance_id),
+            "billable_item {} must point at an existing project in the same instance",
+            id(item)
+        );
+        let created_by = s(item, "created_by_user_id").expect("billable_item.created_by_user_id");
+        assert!(
+            users.contains(&created_by),
+            "billable_item {} points at missing user {created_by}",
+            id(item)
+        );
+        let date = s(item, "date").expect("billable_item.date");
+        assert!(
+            microticket::invoicing::validate_item_date(&date).as_deref() == Ok(date.as_str()),
+            "billable_item {} has a non-canonical date {date:?} — the listing GSIs sort on it",
+            id(item)
+        );
+    }
 }
 
 /// The build plan's PR 1 adds a second, separate function (invoicing) to
