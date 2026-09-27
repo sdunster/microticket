@@ -424,6 +424,42 @@ resource "aws_dynamodb_table" "api_token" {
   }
 }
 
+# ── project ──────────────────────────────────────────────────────────────────
+# A client/job an invoicing instance bills against — see CLAUDE.md's
+# "Invoicing" house rule. Invoicing-only: every write path rejects a support
+# instance.
+
+resource "aws_dynamodb_table" "project" {
+  name                        = "${var.db_prefix}_project"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "id"
+  deletion_protection_enabled = true
+
+  point_in_time_recovery {
+    enabled                 = true
+    recovery_period_in_days = 35
+  }
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+  attribute {
+    name = "instance_id"
+    type = "S"
+  }
+
+  # The projects list page: every project for one instance. ALL — same
+  # reasoning as inbound_address/api_token's instance_id-index: low
+  # cardinality (an instance's clients/jobs, not a user-generated table), and
+  # every field is rendered directly from the list.
+  global_secondary_index {
+    name            = "instance_id-index"
+    hash_key        = "instance_id"
+    projection_type = "ALL"
+  }
+}
+
 # ── webauthn_credential ──────────────────────────────────────────────────────
 
 resource "aws_dynamodb_table" "webauthn_credential" {

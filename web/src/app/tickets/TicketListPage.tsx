@@ -9,6 +9,7 @@ import { useCurrentUser } from "../../auth/useCurrentUser";
 import { useRetryableLazyLoadQuery } from "../../components/useRetryableLazyLoadQuery";
 import RelayErrorBoundary from "../../components/RelayErrorBoundary";
 import LoadingIndicator from "../../components/LoadingIndicator";
+import { ButtonLink } from "../../components/ui/Button";
 import { TicketList } from "./TicketList";
 
 const ticketListPageQuery = graphql`
@@ -91,6 +92,25 @@ export function TicketListPage({
     return (
       <div className="rounded-lg border border-dashed border-line p-10 text-center text-ink-muted">
         Pick an instance to see its tickets.
+      </div>
+    );
+  }
+
+  // A deep link (or a bookmark) to a ticket queue while an invoicing
+  // instance is selected — `tickets` would just come back empty, which
+  // reads like "the queue is clear" rather than "wrong kind of instance".
+  if (instance.kind === "INVOICING") {
+    return (
+      <div className="rounded-lg border border-dashed border-line p-10 text-center text-ink-muted">
+        <p className="font-medium text-ink">
+          {instance.name} is an invoicing instance
+        </p>
+        <p className="mt-1 text-sm">
+          It has no tickets — pick a support instance to see a ticket queue.
+        </p>
+        <ButtonLink to="/app/projects" variant="secondary" className="mt-4">
+          Go to projects
+        </ButtonLink>
       </div>
     );
   }

@@ -25,6 +25,7 @@ locals {
     aws_dynamodb_table.user_token,
     aws_dynamodb_table.api_token,
     aws_dynamodb_table.webauthn_credential,
+    aws_dynamodb_table.project,
   ]
 }
 

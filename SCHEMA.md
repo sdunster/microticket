@@ -50,10 +50,26 @@ instance record, so projecting more into the index would just be wasted storage.
 **Non-obvious attributes (not in the table definition):**
 
 - `name` (S) — display name
+- `kind` (S) — `"invoicing"` only; absent means `"support"`. Set once at creation
+  (`createInstance`/`instance create --kind`), **immutable after creation** — no mutation and no
+  CLI command changes it. See CLAUDE.md's "Invoicing" house rule for the kind-isolation rule this
+  drives (a support-only operation rejects an invoicing instance identically to a missing/deleted
+  one; an invoicing-only operation rejects a support instance with a plain validation error).
 - `from_name` (S) — the `From:` display name used on outbound mail
 - `signature` (S) — appended to outbound replies
 - `public_submission_enabled` (Bool) — opt-in, default off/absent; gates whether the instance
-  appears in the bare `/submit` list
+  appears in the bare `/submit` list. Support instances only in practice — `publicInstances`/
+  `requestSubmitCode` both also require `kind = support`.
+- `business_name`, `business_abn`, `business_address`, `business_phone`, `business_email`,
+  `payment_details` (all S) — invoicing settings: the seller details and payment footer an invoice
+  prints. Invoicing instances only (nothing enforces that at the storage layer; every write path
+  that could set them, `updateInvoicingSettings`, rejects a support instance first). Full-replace
+  write: every call to `updateInvoicingSettings` writes every field, and a blank string `REMOVE`s
+  the attribute rather than storing an empty one.
+- `gst_registered` (Bool) — invoicing setting, only ever written `true`; absent means not
+  registered for GST, same omit convention as `deleted` below.
+- `currency` (S) — invoicing setting; absent means `"AUD"` (`db::Instance::currency_or_default`).
+  A non-blank value must be 3 uppercase ASCII letters (`db::validate_currency_code`).
 - `deleted` (Bool) — soft-delete marker, same omit convention: only ever
   written `true`; absent means active. Set/cleared only via
   `InstanceUpdateShape::SetDeleted` (`setInstanceDeleted`/`bin/cli.rs`'s
@@ -408,6 +424,48 @@ verify a signature, the settings page to render each passkey's metadata.
 - `name` (S) — user-supplied label, shown in the settings page
 - `created_at` (N)
 - `last_used_at` (N) — absent until first use
+
+---
+
+### `{prefix}_project`
+
+A client/job an invoicing instance bills against — the first invoicing-only table. See CLAUDE.md's
+"Invoicing" house rule. Billable items and invoices (later PRs) each reference a project by id.
+
+| Attribute     | Type | Role                  |
+| ------------- | ---- | --------------------- |
+| `id`          | S    | Hash key (PK) — nanoid |
+| `instance_id` | S    | GSI hash key           |
+
+**GSIs:**
+
+| GSI                 | Hash key      | Sort key | Projection | Purpose                              |
+| ------------------- | ------------- | -------- | ---------- | ------------------------------------- |
+| `instance_id-index` | `instance_id` | —        | ALL        | The projects list page's data source  |
+
+`ALL`, unpaginated read (`list_projects_by_instance`) — same reasoning as `inbound_address`/
+`api_token`'s `instance_id-index`: an instance's clients/jobs are low-cardinality, not a
+user-generated table, and every field is rendered directly from the list.
+
+**Non-obvious attributes:**
+
+- `name` (S) — required
+- `client_name` (S) — required
+- `client_abn` (S) — optional
+- `client_address` (S) — optional, multi-line
+- `reference` (S) — optional (e.g. a site address distinct from the client's billing address).
+  **Note for any future direct `UpdateExpression` on this table:** `reference` is a DynamoDB
+  reserved keyword and must be aliased via `ExpressionAttributeNames` (`#ref`) in any update/
+  condition/projection expression — a literal `reference = :v` fails with
+  `ValidationException: ... reserved keyword: reference`. `update_project` already does this;
+  don't regress it.
+- `archived` (Bool) — only ever written `true`; absent means active, same omit convention as
+  `instance.deleted`/`instance.gst_registered`. There is no delete in v1.
+- `created_at`, `updated_at` (N)
+
+Any member (owner or agent) of the invoicing instance can create/update a project — day-to-day
+work, not an owner-only setting, unlike the instance's own invoicing settings above. Superusers get
+no access (they don't pass `Member`) — the same superuser boundary tickets have always had.
 
 ---
 

@@ -46,6 +46,51 @@
         "created_at": {
           "N": "1735689600"
         }
+      },
+      {
+        "_comment": "An invoicing instance (kind: invoicing, written explicitly \u2014 support instances above simply omit the attribute). Fictional business details, never the real sample invoice's. Registered for GST, so the seeded pages exercise the 'Tax Invoice'/GST-row path.",
+        "id": {
+          "S": "SeedLedger01"
+        },
+        "name": {
+          "S": "Ledger & Co Bookkeeping"
+        },
+        "slug": {
+          "S": "ledger"
+        },
+        "kind": {
+          "S": "invoicing"
+        },
+        "from_name": {
+          "S": "Ledger & Co Bookkeeping"
+        },
+        "signature": {
+          "S": ""
+        },
+        "created_at": {
+          "N": "1735689600"
+        },
+        "business_name": {
+          "S": "Ledger & Co Bookkeeping"
+        },
+        "business_abn": {
+          "S": "11 222 333 444"
+        },
+        "business_address": {
+          "S": "1 Fictional Avenue\nExampleville"
+        },
+        "business_phone": {
+          "S": "0400 123 456"
+        },
+        "business_email": {
+          "S": "billing@ledger.microticket.test"
+        },
+        "payment_details": {
+          "S": "Please make all payments to the below account details:\nExample Bank, BSB 000-000, Account 00000000, Ledger & Co Bookkeeping"
+        },
+        "gst_registered": {
+          "BOOL": true
+        }
       }
     ],
     "inbound_address": [
@@ -180,6 +225,21 @@
         },
         "role": {
           "S": "agent"
+        }
+      },
+      {
+        "_comment": "Also owner of the invoicing instance, Ledger & Co — the seeded owner ends up a member of all three instances (two support, one invoicing), which is what exercises the instance switcher's Support/Invoicing optgroups.",
+        "id": {
+          "S": "SeedMembOwn3"
+        },
+        "user_id": {
+          "S": "SeedOwnerUsr"
+        },
+        "instance_id": {
+          "S": "SeedLedger01"
+        },
+        "role": {
+          "S": "owner"
         }
       }
     ],
@@ -455,6 +515,29 @@
         "to_emails": { "SS": ["support@ridgeline.microticket.test"] },
         "body_text": { "S": "Do we need a new permit if our group size changes?" },
         "created_at": { "N": "1735711200" }
+      }
+    ],
+    "project": [
+      {
+        "_comment": "A fictional client/job on the seeded invoicing instance, with every optional field set.",
+        "id": { "S": "SeedProj0001" },
+        "instance_id": { "S": "SeedLedger01" },
+        "name": { "S": "Website Redesign" },
+        "client_name": { "S": "Fictional Retail Pty Ltd" },
+        "client_abn": { "S": "55 666 777 888" },
+        "client_address": { "S": "22 Example Street\nExampleville" },
+        "reference": { "S": "Shopfront site" },
+        "created_at": { "N": "1735689600" },
+        "updated_at": { "N": "1735689600" }
+      },
+      {
+        "_comment": "A second fictional project, with every optional field absent — exercises the null-field rendering path.",
+        "id": { "S": "SeedProj0002" },
+        "instance_id": { "S": "SeedLedger01" },
+        "name": { "S": "Monthly Bookkeeping" },
+        "client_name": { "S": "Fictional Trades Co" },
+        "created_at": { "N": "1735693200" },
+        "updated_at": { "N": "1735693200" }
       }
     ],
     "counter": [

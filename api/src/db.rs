@@ -255,6 +255,36 @@ pub enum WebauthnCredentialUpdate {
     },
 }
 
+/// `instance.kind`: which of microticket's two separate functions an
+/// instance is for. Set at creation (`create_instance`), **immutable after
+/// creation** — `updateInstance`/`InstanceUpdateShape` has no way to change
+/// it, and there is no CLI command that does either. Per the
+/// omit-optional-attributes house rule, `kind` is written to the row only
+/// for `Invoicing`; an absent attribute means `Support`, so every instance
+/// created before invoicing existed needs no migration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstanceKind {
+    Support,
+    Invoicing,
+}
+
+impl InstanceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Support => "support",
+            Self::Invoicing => "invoicing",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "support" => Some(Self::Support),
+            "invoicing" => Some(Self::Invoicing),
+            _ => None,
+        }
+    }
+}
+
 /// An `instance` row — a tenant organisation. Owns zero or more
 /// [`InboundAddress`]es and has zero or more [`Membership`]s.
 #[derive(Clone, Debug, PartialEq)]
@@ -262,10 +292,15 @@ pub struct Instance {
     pub id: String,
     pub name: String,
     pub slug: String,
+    /// Immutable after creation — see [`InstanceKind`]'s doc comment.
+    pub kind: InstanceKind,
     /// Opt-in, default `false`. Gates whether the instance appears in
     /// `publicInstances` and whether `requestSubmitCode` will issue a code for
     /// it. Per the omit-optional-attributes house rule, only ever written as
-    /// `true`; `false` is the absence of the attribute.
+    /// `true`; `false` is the absence of the attribute. Support-only in
+    /// practice (an invoicing instance is rejected by
+    /// [`require_instance_kind`] everywhere this would matter), but the
+    /// attribute itself is not kind-gated at the storage layer.
     pub public_submission_enabled: bool,
     pub from_name: String,
     pub signature: String,
@@ -274,6 +309,34 @@ pub struct Instance {
     /// `public_submission_enabled`: present (and `true`) means deleted, absent
     /// means active.
     pub deleted: bool,
+    // ── Invoicing settings (invoicing instances only; see CLAUDE.md's
+    // "Invoicing" house rule) — every field here is optional and follows the
+    // omit-optional-attributes convention. A support instance never has any
+    // of these set; nothing enforces that at the storage layer, but every
+    // write path that could set them (`updateInvoicingSettings`) rejects a
+    // support instance first via `require_instance_kind`.
+    pub business_name: Option<String>,
+    pub business_abn: Option<String>,
+    pub business_address: Option<String>,
+    pub business_phone: Option<String>,
+    pub business_email: Option<String>,
+    pub payment_details: Option<String>,
+    /// Only ever written `true`; absent (`false`) is the default — an
+    /// instance starts not registered for GST. See CLAUDE.md.
+    pub gst_registered: bool,
+    /// Absent means `"AUD"` — see [`Handler::update_instance`]'s
+    /// `SetInvoicingSettings` doc comment and `validate_currency_code`.
+    pub currency: Option<String>,
+}
+
+impl Instance {
+    /// This instance's currency code, defaulting to `"AUD"` when unset — the
+    /// one place that default is decided, shared by the GraphQL resolver and
+    /// anything else (the invoicing snapshot builder, in a later PR) that
+    /// needs the effective code rather than the raw optional attribute.
+    pub fn currency_or_default(&self) -> &str {
+        self.currency.as_deref().unwrap_or("AUD")
+    }
 }
 
 impl HasID for Instance {
@@ -284,7 +347,8 @@ impl HasID for Instance {
 
 /// Update shapes for `instance`. `Fields` never touches `deleted` (soft-delete
 /// is its own variant, since it's a presence-marker attribute per the house
-/// rule, not a plain field overwrite).
+/// rule, not a plain field overwrite) or `kind` (immutable after creation —
+/// see [`InstanceKind`]'s doc comment).
 #[derive(Clone, Debug, PartialEq)]
 pub enum InstanceUpdateShape<'a> {
     Fields {
@@ -297,6 +361,112 @@ pub enum InstanceUpdateShape<'a> {
     /// `deleted` attribute; `false` removes it — never written as `Bool(false)`,
     /// per the omit-optional-attributes house rule.
     SetDeleted(bool),
+    /// Full-replace of every invoicing-settings attribute —
+    /// `updateInvoicingSettings`'s write path. Each `Option<&str>` field is
+    /// `Some` to `SET` (after the caller has trimmed and length-checked it)
+    /// or `None` to `REMOVE` — the caller (`graphql::mutations::update_invoicing_settings`)
+    /// turns an empty/blank input string into `None` before this is built, so
+    /// this variant itself does no trimming. `gst_registered` is the one
+    /// plain `bool`: `true` `SET`s the attribute, `false` `REMOVE`s it, per
+    /// the omit-optional-attributes house rule (it is only ever written
+    /// `true`). Never touches `kind`, `name`, or any other non-invoicing
+    /// field.
+    SetInvoicingSettings {
+        business_name: Option<&'a str>,
+        business_abn: Option<&'a str>,
+        business_address: Option<&'a str>,
+        business_phone: Option<&'a str>,
+        business_email: Option<&'a str>,
+        payment_details: Option<&'a str>,
+        gst_registered: bool,
+        currency: Option<&'a str>,
+    },
+}
+
+/// Reject an instance whose `kind` isn't the one an operation requires — the
+/// one place both directions of the kind-isolation house rule (CLAUDE.md) are
+/// checked, so a support-only mutation and an invoicing-only one can't
+/// independently drift on the wording or the check itself.
+///
+/// Callers that need "not found" semantics (a support-only operation reached
+/// with an invoicing instance id, treated identically to a missing/deleted
+/// instance — `addInboundAddress`, `createApiToken`, `submitTicket`/
+/// `submitVerifiedTicket`, the requester submit-code flow) fold the kind
+/// check into their own `.filter(...)`/`ok_or_else` chain (comparing
+/// `instance.kind` directly) rather than calling this and mapping its error;
+/// this function is for the other direction — an invoicing-only operation
+/// (projects, `updateInvoicingSettings`) rejecting a support instance with a
+/// plain validation-style error.
+pub fn require_instance_kind(
+    instance: &Instance,
+    expected: InstanceKind,
+) -> std::result::Result<(), String> {
+    if instance.kind != expected {
+        return Err(format!(
+            "instance {} has kind {:?}, expected kind {:?}",
+            instance.id,
+            instance.kind.as_str(),
+            expected.as_str()
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a currency code: exactly 3 uppercase ASCII letters (e.g. `AUD`,
+/// `USD`) — enough to catch a typo without maintaining a real ISO 4217 list,
+/// matching how little validation `db::validate_slug` does for the same
+/// reason.
+pub fn validate_currency_code(code: &str) -> std::result::Result<(), String> {
+    if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err(format!(
+            "{code:?} is not a valid currency code (must be 3 uppercase letters, e.g. AUD)"
+        ));
+    }
+    Ok(())
+}
+
+/// A `project` row — a client/job an invoicing instance bills against.
+/// Invoicing-only: every write path that creates or updates one rejects a
+/// support instance via [`require_instance_kind`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Project {
+    pub id: String,
+    pub instance_id: String,
+    pub name: String,
+    pub client_name: String,
+    pub client_abn: Option<String>,
+    /// Multi-line (e.g. a street address across several lines).
+    pub client_address: Option<String>,
+    pub reference: Option<String>,
+    /// Only ever written `true`; absent (`false`) is the default — same omit
+    /// convention as `Instance::deleted`/`Instance::gst_registered`. Archiving
+    /// hides a project from the default project list without deleting its
+    /// billing history; there is no delete in v1.
+    pub archived: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl HasID for Project {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Update shapes for `project`. `Fields` is a full replace of every editable
+/// attribute (`updateProject`'s write path, including `archived`) — there is
+/// no delete in v1, so unlike `ticket`/`instance` there is no separate
+/// soft-delete variant.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProjectUpdateShape<'a> {
+    Fields {
+        name: &'a str,
+        client_name: &'a str,
+        client_abn: Option<&'a str>,
+        client_address: Option<&'a str>,
+        reference: Option<&'a str>,
+        archived: bool,
+    },
 }
 
 /// `inbound_address.kind`: whether a row matches one exact address or every
@@ -958,6 +1128,7 @@ pub trait Handler: Sync {
         from_name: &str,
         signature: &str,
         public_submission_enabled: bool,
+        kind: InstanceKind,
     ) -> impl Future<Output = Result<Instance>> + Send;
     fn update_instance(
         &self,
@@ -1127,6 +1298,36 @@ pub trait Handler: Sync {
     /// row, so unlike a ticket or an instance there is no soft-delete
     /// marker to set instead.
     fn delete_api_token(&self, id: &str) -> impl Future<Output = Result<()>> + Send;
+
+    // ── project ───────────────────────────────────────────────────────────
+    #[allow(clippy::too_many_arguments)]
+    fn create_project(
+        &self,
+        instance_id: &str,
+        name: &str,
+        client_name: &str,
+        client_abn: Option<&str>,
+        client_address: Option<&str>,
+        reference: Option<&str>,
+    ) -> impl Future<Output = Result<Project>> + Send;
+    fn get_projects<T: AsRef<str> + Sync>(
+        &self,
+        ids: &[T],
+    ) -> impl Future<Output = Result<Vec<Option<Project>>>> + Send;
+    /// Every project for one instance, via `instance_id-index` — the
+    /// projects list's data source. Unpaginated, matching
+    /// `list_inbound_addresses_by_instance`: an invoicing instance's project
+    /// list is small enough (clients/jobs, not a user-generated table) that
+    /// a Relay connection would be overhead with no real page to turn.
+    fn list_projects_by_instance(
+        &self,
+        instance_id: &str,
+    ) -> impl Future<Output = Result<Vec<Project>>> + Send;
+    fn update_project(
+        &self,
+        id: &str,
+        change: ProjectUpdateShape<'_>,
+    ) -> impl Future<Output = Result<()>> + Send;
 
     // ── ticket ────────────────────────────────────────────────────────────
     fn get_tickets<T: AsRef<str> + Sync>(
@@ -1526,6 +1727,91 @@ mod tests {
             current.assigned_to_me_updated
         );
         assert_eq!(merged.unassigned_updated, current.unassigned_updated);
+    }
+
+    #[test]
+    fn instance_kind_as_str_parse_round_trips() {
+        for kind in [InstanceKind::Support, InstanceKind::Invoicing] {
+            assert_eq!(InstanceKind::parse(kind.as_str()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn instance_kind_parse_rejects_garbage() {
+        assert_eq!(InstanceKind::parse("Support"), None);
+        assert_eq!(InstanceKind::parse(""), None);
+        assert_eq!(InstanceKind::parse("bogus"), None);
+    }
+
+    #[test]
+    fn require_instance_kind_accepts_a_matching_kind() {
+        let instance = Instance {
+            id: "inst1".into(),
+            name: "Test".into(),
+            slug: "test".into(),
+            kind: InstanceKind::Invoicing,
+            public_submission_enabled: false,
+            from_name: String::new(),
+            signature: String::new(),
+            created_at: 0,
+            deleted: false,
+            business_name: None,
+            business_abn: None,
+            business_address: None,
+            business_phone: None,
+            business_email: None,
+            payment_details: None,
+            gst_registered: false,
+            currency: None,
+        };
+        assert!(require_instance_kind(&instance, InstanceKind::Invoicing).is_ok());
+        assert!(require_instance_kind(&instance, InstanceKind::Support).is_err());
+    }
+
+    #[test]
+    fn currency_or_default_falls_back_to_aud() {
+        let mut instance = Instance {
+            id: "inst1".into(),
+            name: "Test".into(),
+            slug: "test".into(),
+            kind: InstanceKind::Invoicing,
+            public_submission_enabled: false,
+            from_name: String::new(),
+            signature: String::new(),
+            created_at: 0,
+            deleted: false,
+            business_name: None,
+            business_abn: None,
+            business_address: None,
+            business_phone: None,
+            business_email: None,
+            payment_details: None,
+            gst_registered: false,
+            currency: None,
+        };
+        assert_eq!(instance.currency_or_default(), "AUD");
+        instance.currency = Some("USD".to_string());
+        assert_eq!(instance.currency_or_default(), "USD");
+    }
+
+    #[test]
+    fn validate_currency_code_accepts_three_uppercase_letters() {
+        assert!(validate_currency_code("AUD").is_ok());
+        assert!(validate_currency_code("USD").is_ok());
+    }
+
+    #[test]
+    fn validate_currency_code_rejects_wrong_length() {
+        assert!(validate_currency_code("AU").is_err());
+        assert!(validate_currency_code("AUDD").is_err());
+        assert!(validate_currency_code("").is_err());
+    }
+
+    #[test]
+    fn validate_currency_code_rejects_lowercase_or_non_letters() {
+        assert!(validate_currency_code("aud").is_err());
+        assert!(validate_currency_code("A1D").is_err());
+        assert!(validate_currency_code("A$D").is_err());
     }
 
     /// The case that makes `Deleted` its own branch rather than falling out of

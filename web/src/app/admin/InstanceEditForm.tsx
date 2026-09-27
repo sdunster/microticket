@@ -13,6 +13,7 @@ const instanceEditFormFragment = graphql`
     id
     name
     slug
+    kind
     fromName
     signature
     publicSubmissionEnabled
@@ -26,6 +27,12 @@ const instanceEditFormFragment = graphql`
  * stamped on this instance's past tickets and emailed to requesters) — see
  * `updateInstance`'s doc comment. Shown read-only, with that reason, rather
  * than left off the page entirely.
+ *
+ * The kind is shown read-only too (it's fixed at creation). From name,
+ * signature and public submission are support-only — outbound mail and the
+ * `/submit` form don't exist for an invoicing instance — so they're hidden
+ * for one, and resubmitted unchanged since `updateInstance` still takes
+ * them.
  */
 export function InstanceEditForm({
   instance,
@@ -33,6 +40,7 @@ export function InstanceEditForm({
   instance: InstanceEditForm_instance$key;
 }) {
   const data = useFragment(instanceEditFormFragment, instance);
+  const isSupport = data.kind !== "INVOICING";
   const [name, setName] = useState(data.name);
   const [fromName, setFromName] = useState(data.fromName);
   const [signature, setSignature] = useState(data.signature);
@@ -107,37 +115,55 @@ export function InstanceEditForm({
             className="bg-surface-sunken text-ink-muted"
           />
           <p className="mt-1 text-xs text-ink-muted">
-            Can&apos;t be changed here — renaming it would break the &quot;[#
-            {data.slug}-N]&quot; subject tags already stamped on this
-            instance&apos;s past tickets.
+            {isSupport ? (
+              <>
+                Can&apos;t be changed here — renaming it would break the
+                &quot;[#{data.slug}-N]&quot; subject tags already stamped on
+                this instance&apos;s past tickets.
+              </>
+            ) : (
+              <>Can&apos;t be changed once created.</>
+            )}
           </p>
         </FormField>
-        <FormField label="From name" htmlFor="instance-from-name">
+        <FormField label="Kind" htmlFor="instance-kind">
           <TextInput
-            id="instance-from-name"
-            value={fromName}
-            onChange={(e) => setFromName(e.target.value)}
-            required
+            id="instance-kind"
+            value={isSupport ? "Support" : "Invoicing"}
+            readOnly
+            className="bg-surface-sunken text-ink-muted"
           />
         </FormField>
-        <FormField label="Signature" htmlFor="instance-signature">
-          <textarea
-            id="instance-signature"
-            className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink transition-colors focus:border-accent focus:ring-2 focus:ring-accent/25 focus:outline-none"
-            rows={3}
-            value={signature}
-            onChange={(e) => setSignature(e.target.value)}
-          />
-        </FormField>
-        <label className="flex items-center gap-2 text-sm text-ink">
-          <input
-            type="checkbox"
-            checked={publicSubmissionEnabled}
-            onChange={(e) => setPublicSubmissionEnabled(e.target.checked)}
-            className="size-4 rounded-sm border-line text-accent focus:ring-2 focus:ring-accent/25"
-          />
-          Public submission enabled
-        </label>
+        {isSupport && (
+          <>
+            <FormField label="From name" htmlFor="instance-from-name">
+              <TextInput
+                id="instance-from-name"
+                value={fromName}
+                onChange={(e) => setFromName(e.target.value)}
+                required
+              />
+            </FormField>
+            <FormField label="Signature" htmlFor="instance-signature">
+              <textarea
+                id="instance-signature"
+                className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink transition-colors focus:border-accent focus:ring-2 focus:ring-accent/25 focus:outline-none"
+                rows={3}
+                value={signature}
+                onChange={(e) => setSignature(e.target.value)}
+              />
+            </FormField>
+            <label className="flex items-center gap-2 text-sm text-ink">
+              <input
+                type="checkbox"
+                checked={publicSubmissionEnabled}
+                onChange={(e) => setPublicSubmissionEnabled(e.target.checked)}
+                className="size-4 rounded-sm border-line text-accent focus:ring-2 focus:ring-accent/25"
+              />
+              Public submission enabled
+            </label>
+          </>
+        )}
 
         {error && (
           <p role="alert" className="text-sm text-red-600 dark:text-red-400">

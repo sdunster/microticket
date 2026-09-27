@@ -80,6 +80,7 @@ async fn resolves_an_exact_address() {
             "Exact Co",
             "",
             false,
+            db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -107,6 +108,7 @@ async fn resolves_a_plus_tag_address_by_stripping_the_tag() {
             "Tag Co",
             "",
             false,
+            db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -139,6 +141,7 @@ async fn resolves_via_a_wildcard() {
             "Wildcard Co",
             "",
             false,
+            db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -171,6 +174,7 @@ async fn an_exact_address_wins_over_a_wildcard_on_the_same_domain() {
             "Exact Wins",
             "",
             false,
+            db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -181,6 +185,7 @@ async fn an_exact_address_wins_over_a_wildcard_on_the_same_domain() {
             "Wildcard Loses",
             "",
             false,
+            db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -235,6 +240,7 @@ async fn only_one_of_several_recipients_being_ours_still_resolves() {
             "Multi Recipient Co",
             "",
             false,
+            db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -267,7 +273,14 @@ async fn resolve_instance_id_maps_a_slug_to_the_id_rows_must_store() {
 
     let slug = format!("resolve-{}", nanoid::nanoid!(8)).to_lowercase();
     let instance = db
-        .create_instance("Resolve Test", &slug, "Resolve Test", "", false)
+        .create_instance(
+            "Resolve Test",
+            &slug,
+            "Resolve Test",
+            "",
+            false,
+            db::InstanceKind::Support,
+        )
         .await
         .expect("create instance");
 

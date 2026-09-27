@@ -32,6 +32,7 @@ const USER_TOKENS: &[(&str, &str)] = &[
 const DOCUMENTED_IDS: &[&str] = &[
     "acme",
     "ridgeline",
+    "ledger",
     "owner@microticket.test",
     "agent@microticket.test",
 ];
@@ -143,6 +144,49 @@ fn synthetic_references_resolve() {
             id(counter)
         );
     }
+
+    for project in rows(&doc, "project") {
+        let instance_id = s(project, "instance_id").expect("project.instance_id");
+        assert!(
+            instances.contains(&instance_id),
+            "project {} points at missing instance {instance_id}",
+            id(project)
+        );
+    }
+}
+
+/// The build plan's PR 1 adds a second, separate function (invoicing) to
+/// support: the fixture needs at least one instance of each `kind`, and an
+/// invoicing instance's project(s), so a fresh local stack has something to
+/// look at on the invoicing pages without a manual `instance create --kind
+/// invoicing` first.
+#[test]
+fn there_is_an_invoicing_instance_with_at_least_one_project() {
+    let doc = synthetic();
+    let invoicing_instances: HashSet<String> = rows(&doc, "instance")
+        .iter()
+        .filter(|i| s(i, "kind").as_deref() == Some("invoicing"))
+        .map(id)
+        .collect();
+    assert_eq!(
+        invoicing_instances.len(),
+        1,
+        "expected exactly one seeded instance with kind: invoicing"
+    );
+
+    let support_instances = rows(&doc, "instance").len() - invoicing_instances.len();
+    assert!(
+        support_instances >= 1,
+        "expected at least one seeded instance with kind absent (support)"
+    );
+
+    let has_project_on_invoicing_instance = rows(&doc, "project")
+        .iter()
+        .any(|p| s(p, "instance_id").is_some_and(|iid| invoicing_instances.contains(&iid)));
+    assert!(
+        has_project_on_invoicing_instance,
+        "expected at least one seeded project on the invoicing instance"
+    );
 }
 
 /// The specific ticket states the build plan asks the fixture to cover:
