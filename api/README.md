@@ -40,7 +40,22 @@ OAuth `mtoa_` access tokens above, and every tool runs a fixed GraphQL document 
 it has exactly their permissions and no more. `GET`/`DELETE /mcp` answer `405`;
 `/.well-known/oauth-protected-resource[/mcp]` (RFC 9728) points clients at the authorization server.
 
-Tools: `whoami` — the caller's identity and every instance they belong to, with role and kind.
+Tools:
+
+| Tool | What | Customer email? |
+|---|---|---|
+| `whoami` | The caller's identity and every instance they belong to, with role and kind | — |
+| `list_tickets` | Tickets in a support instance (status, `assignedToMe`/`assignedTo`, cursor paging) | — |
+| `get_ticket` | One ticket with its whole conversation (customer mail, replies, internal notes) | — |
+| `reply_to_ticket` | Reply to the requesters and CCs | **yes** |
+| `add_internal_note` | Note visible to members only | no |
+| `set_ticket_status` | Close / reopen / delete | **on close and reopen** |
+| `assign_ticket` | Assign to a member, or unassign | no |
+| `update_ticket_recipients` | Add/remove one requester or CC | no |
+| `list_instance_members` | Members of an instance the caller owns (to find an id to assign to) | — |
+
+Not exposed: attachments (an MCP client can't upload, and download URLs are presigned links) and
+the raw HTML body.
 
 Connecting a client (e.g. Claude Code): `claude mcp add --transport http toolbox https://<web_domain>/mcp`,
 then approve the request on the consent page. Locally, run `make dev-local` and use

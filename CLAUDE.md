@@ -324,6 +324,9 @@ local setup, and `SCHEMA.md` for the data model.
   superuser without a membership sees no instance, ticket or invoice through MCP either. A tool can
   narrow what its caller could do over GraphQL, never widen it. A family of tools is one module
   exposing `catalogue()` and `dispatch()`; register it in `mcp::tool_catalogue`/`dispatch_tool`.
+  The ticket tools (`mcp/tickets.rs`) send customer mail exactly as the same GraphQL mutation does —
+  see the "Outbound mail" rule above — and say so in their descriptions (`reply_to_ticket` always,
+  `set_ticket_status` on a close or reopen). Attachments are deliberately not exposed.
   Every tool's description must say plainly if it sends customer email. `whoami` (memberships with
   role and instance kind) is the first tool; call it first to learn which instances apply.
 
