@@ -131,6 +131,7 @@ fn owner_auth(user_id: &str, instance_id: &str) -> AuthInfo {
         }],
         is_superuser: false,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -143,6 +144,7 @@ fn agent_auth(user_id: &str, instance_id: &str) -> AuthInfo {
         }],
         is_superuser: false,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -152,6 +154,7 @@ fn superuser_auth(user_id: &str) -> AuthInfo {
         memberships: vec![],
         is_superuser: true,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -468,6 +471,7 @@ async fn a_non_member_cannot_reach_projects() {
             memberships: vec![],
             is_superuser: false,
             token_id: None,
+            grant_id: None,
         },
     )
     .await;
@@ -493,6 +497,7 @@ async fn a_non_member_cannot_reach_projects() {
                     memberships: vec![],
                     is_superuser: false,
                     token_id: None,
+                    grant_id: None,
                 }),
         )
         .await;
@@ -508,6 +513,7 @@ async fn a_non_member_cannot_reach_projects() {
                     memberships: vec![],
                     is_superuser: false,
                     token_id: None,
+                    grant_id: None,
                 }),
         )
         .await;

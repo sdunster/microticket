@@ -128,6 +128,7 @@ fn superuser_auth(user_id: &str) -> AuthInfo {
         memberships: vec![],
         is_superuser: true,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -142,6 +143,7 @@ fn member_auth(user_id: &str, instance_id: &str, is_owner: bool) -> AuthInfo {
         }],
         is_superuser: false,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -812,6 +814,7 @@ async fn passkeys_are_forbidden_for_anyone_but_the_user_themselves() {
             memberships: vec![],
             is_superuser: false,
             token_id: None,
+            grant_id: None,
         }))
         .await;
     assert!(as_self.errors.is_empty(), "{:?}", as_self.errors);

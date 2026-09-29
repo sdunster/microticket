@@ -252,6 +252,7 @@ mod tests {
             }],
             is_superuser: false,
             token_id: None,
+            grant_id: None,
         }
     }
 
@@ -264,6 +265,7 @@ mod tests {
             }],
             is_superuser: false,
             token_id: None,
+            grant_id: None,
         }
     }
 
@@ -273,6 +275,7 @@ mod tests {
             memberships: vec![],
             is_superuser: true,
             token_id: None,
+            grant_id: None,
         }
     }
 

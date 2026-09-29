@@ -131,6 +131,7 @@ fn owner_auth(user_id: &str, instance_id: &str) -> AuthInfo {
         }],
         is_superuser: false,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -143,6 +144,7 @@ fn agent_auth(user_id: &str, instance_id: &str) -> AuthInfo {
         }],
         is_superuser: false,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -786,11 +788,13 @@ fn clone_auth(auth: &AuthInfo) -> AuthInfo {
             memberships,
             is_superuser,
             token_id,
+            grant_id,
         } => AuthInfo::User {
             id: id.clone(),
             memberships: memberships.clone(),
             is_superuser: *is_superuser,
             token_id: token_id.clone(),
+            grant_id: grant_id.clone(),
         },
         AuthInfo::Requester { email, instance_id } => AuthInfo::Requester {
             email: email.clone(),

@@ -134,6 +134,7 @@ fn user_auth(user_id: &str, memberships: &[(&str, bool)]) -> AuthInfo {
             .collect(),
         is_superuser: false,
         token_id: None,
+        grant_id: None,
     }
 }
 

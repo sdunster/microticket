@@ -387,6 +387,48 @@ resource "aws_dynamodb_table" "user_token" {
   }
 }
 
+# ── oauth_grant ───────────────────────────────────────────────────────────────
+# One row per OAuth client a user has authorized (the MCP interface): the
+# current access + refresh token hashes and the grant's audience. Durable table
+# (deletion protection + PITR) whose rows also carry a native TTL on
+# expires_at — the grant's absolute 90-day cap — so a grant that outlives it
+# is reaped without a sweeper. Expiry is *also* checked in the application,
+# since TTL deletion can lag by up to 48h. See SCHEMA.md.
+
+resource "aws_dynamodb_table" "oauth_grant" {
+  name                        = "${var.db_prefix}_oauth_grant"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "id"
+  deletion_protection_enabled = true
+
+  point_in_time_recovery {
+    enabled                 = true
+    recovery_period_in_days = 35
+  }
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+
+  # Backs the "connected apps" list (a user's own grants). ALL: low-cardinality
+  # and every field is rendered directly from the list.
+  global_secondary_index {
+    name            = "user_id-index"
+    hash_key        = "user_id"
+    projection_type = "ALL"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+
 # ── api_token ─────────────────────────────────────────────────────────────────
 # Instance-scoped integration credentials (mta_{id}.{secret}) authorising
 # submitVerifiedTicket. Deliberately no token_hash GSI, unlike user_token

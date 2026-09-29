@@ -31,7 +31,7 @@ pub enum AuthError {
 /// Classify a `db::Error` encountered while verifying a token: a definitive
 /// "doesn't exist" is a bad credential (401); anything else might succeed on
 /// retry (503), so it must not be treated the same as an invalid token.
-fn classify_db_err(msg: &str, e: db::Error) -> AuthError {
+pub(crate) fn classify_db_err(msg: &str, e: db::Error) -> AuthError {
     match e {
         db::Error::NotFound(_) => AuthError::Permanent(format!("{msg}: {e:#}")),
         _ => AuthError::Transient(format!("{msg}: {e:#}")),
@@ -74,6 +74,10 @@ pub enum AuthInfo {
         /// today — there is no other way to authenticate as a `User` yet), so
         /// `logout` can revoke exactly the token that was presented.
         token_id: Option<String>,
+        /// Set only when authenticated via an OAuth access token (`mtoa_`);
+        /// identifies which grant so resolvers/telemetry can tell OAuth callers
+        /// apart. `None` everywhere else.
+        grant_id: Option<String>,
     },
     /// The public submit form's short-lived capability token: authorises exactly
     /// `submitTicket` for one `(email, instance_id)` pair, and nothing else.
@@ -299,7 +303,7 @@ pub fn caller_info(auth: Option<&AuthInfo>) -> (CallerType, String) {
 /// token — see the house rule against storing secrets in `CLAUDE.md`'s spirit
 /// (not written down there specifically, but the same principle: a DB/PITR leak
 /// must not expose a usable credential).
-fn hash_token(secret: &str) -> String {
+pub(crate) fn hash_token(secret: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(secret.as_bytes());
@@ -367,7 +371,7 @@ pub async fn issue_api_token<A: App + HasDb>(
 /// a user id to become a valid principal" is defined in exactly one place.
 /// Always returns `token_id: None`; callers that authenticated via a token fill
 /// it in themselves afterward.
-async fn fetch_update_user_auth_info<A: App + HasDb>(
+pub(crate) async fn fetch_update_user_auth_info<A: App + HasDb>(
     app: &A,
     user_id: String,
 ) -> Result<AuthInfo, AuthError> {
@@ -423,6 +427,7 @@ async fn fetch_update_user_auth_info<A: App + HasDb>(
         memberships,
         is_superuser: user.superuser,
         token_id: None,
+        grant_id: None,
     })
 }
 
@@ -471,6 +476,7 @@ async fn verify_token_with_user_token<A: App + HasDb>(
             memberships,
             is_superuser,
             token_id: Some(token_id),
+            grant_id: None,
         }),
         other => Ok(other),
     }
@@ -627,6 +633,7 @@ mod tests {
             memberships: vec![],
             is_superuser: false,
             token_id: Some("tok1".into()),
+            grant_id: None,
         };
         let (kind, id) = caller_info(Some(&auth));
         assert_eq!(kind, CallerType::User);
@@ -738,6 +745,29 @@ mod tests {
             db::Error::MutationDisabled,
         ] {
             assert!(matches!(classify_db_err("x", e), AuthError::Transient(_)));
+        }
+    }
+
+    /// `verify_token` must keep rejecting `mtoa_`/`mtor_` OAuth tokens: they match
+    /// no prefix it recognizes, so they fail as unrecognized without ever reaching
+    /// the DB (mockdb fails every call, so reaching it would surface as
+    /// `Transient`). `oauth::verify_access_token` is the only accepted entry point.
+    #[tokio::test]
+    async fn verify_token_rejects_oauth_tokens() {
+        use crate::app;
+        use crate::mockdb;
+        use crate::mockmail;
+        use crate::mockstorage;
+
+        let my_app = app::new(
+            mockdb::Handler::new(),
+            mockmail::Handler::new(),
+            mockstorage::Storage::new(),
+            0,
+        );
+        for token in ["mtoa_abc123.somesecret", "mtor_abc123.somesecret"] {
+            let result = verify_token(&my_app, token).await;
+            assert!(matches!(result, Err(AuthError::Permanent(_))), "{token}");
         }
     }
 

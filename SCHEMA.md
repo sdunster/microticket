@@ -365,6 +365,41 @@ the index small matters more here than on most tables.
 
 ---
 
+### `{prefix}_oauth_grant`
+
+One row per OAuth client a user has authorized for the MCP interface (`oauth.rs`). A grant is the
+unit of revocation: rotating the access or refresh token rewrites the same row.
+
+| Attribute | Type | Role                    |
+| --------- | ---- | ----------------------- |
+| `id`      | S    | Hash key (PK) — nanoid  |
+| `user_id` | S    | GSI hash key            |
+
+**GSIs:**
+
+| GSI             | Hash key  | Sort key | Projection | Purpose                          |
+| --------------- | --------- | -------- | ---------- | -------------------------------- |
+| `user_id-index` | `user_id` | —        | ALL        | A user's "connected apps" list   |
+
+**Non-obvious attributes:**
+
+- Tokens are `mtoa_{id}.{secret}` (access) and `mtor_{id}.{secret}` (refresh): the grant id is
+  embedded, so verification is a strongly consistent `GetItem` by `id` — never a hash GSI — for the
+  same reason as `api_token`. Only the sha256 of each full token is stored
+  (`access_token_hash`, `refresh_token_hash`).
+- `resource` (S) — the audience the tokens are bound to (`<api base>/mcp`), checked on every use
+- `client_id`, `client_name`, `redirect_uri`, `scope` (S) — what the user approved
+- `access_expires_at` (N) — 1 hour; `refresh_expires_at` (N) — 30 days, sliding on every refresh
+  but never past `expires_at`
+- `expires_at` (N) — absolute 90-day cap **and** the table's TTL attribute; also checked in
+  application code, since TTL deletion can lag
+- `last_used_at` (N) — absent until first use; throttled touch
+
+Refresh rotation is a compare-and-swap on `refresh_token_hash`, so two concurrent refreshes with
+the same token cannot both win.
+
+---
+
 ### `{prefix}_api_token`
 
 Instance-scoped integration credentials, format `mta_{id}.{secret}`, authorising exactly

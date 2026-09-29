@@ -103,6 +103,7 @@ fn user_auth(user_id: &str, instance_id: &str, is_owner: bool) -> AuthInfo {
         }],
         is_superuser: false,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -717,6 +718,7 @@ fn superuser_auth(user_id: &str) -> AuthInfo {
         memberships: vec![],
         is_superuser: true,
         token_id: None,
+        grant_id: None,
     }
 }
 
