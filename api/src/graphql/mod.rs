@@ -30,7 +30,7 @@ pub mod pagination;
 pub mod query;
 
 pub use mutations::MutationRoot;
-pub use query::{PasskeyInfo, QueryRoot, User};
+pub use query::{OAuthAuthorizationRequest, PasskeyInfo, QueryRoot, User};
 
 use self::dataloader::DatabaseLoader;
 

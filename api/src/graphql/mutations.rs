@@ -759,6 +759,94 @@ struct SubmittedTicket {
 
 #[Object]
 impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot<A> {
+    /// Approve an OAuth authorization request: the user has seen the consent
+    /// screen (`oauthAuthorizationRequest`) and clicked "Approve". Mints a
+    /// single-use authorization code and returns the client's `redirect_uri`
+    /// with `code` (and `state`, if given) appended — the caller just navigates
+    /// there.
+    ///
+    /// `User` only (a web session, `mtu_`): an `mtoa_` OAuth token never reaches
+    /// GraphQL at all, so an MCP client can't approve further grants for itself.
+    /// Re-validates the client id and redirect URI itself rather than trusting
+    /// whatever the consent page last read: nothing stops a client from calling
+    /// this directly, so every check the query made is repeated here.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    #[allow(clippy::too_many_arguments)]
+    async fn approve_oauth_authorization(
+        &self,
+        ctx: &Context<'_>,
+        client_id: String,
+        redirect_uri: String,
+        code_challenge: String,
+        code_challenge_method: String,
+        scope: Option<String>,
+        resource: Option<String>,
+        state: Option<String>,
+    ) -> Result<String> {
+        let user_id = require_user_id(ctx)?;
+
+        let registration = crate::oauth::client_id_key_from_env()
+            .and_then(|key| crate::oauth::decode_client_id(&key, &client_id))
+            .ok_or_else(|| anyhow!("Unknown or invalid client"))?;
+        if !registration
+            .redirect_uris
+            .iter()
+            .any(|u| u == &redirect_uri)
+        {
+            return Err(anyhow!("redirect_uri is not registered for this client"));
+        }
+        if code_challenge_method != "S256" {
+            return Err(anyhow!("code_challenge_method must be S256"));
+        }
+        // RFC 7636 S256 challenges are exactly the base64url (no padding)
+        // encoding of a 32-byte SHA-256 digest: always 43 characters.
+        if code_challenge.len() != 43
+            || !code_challenge
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return Err(anyhow!(
+                "code_challenge does not look like a valid S256 challenge"
+            ));
+        }
+        if let Some(scope) = &scope
+            && scope != crate::oauth::DEFAULT_SCOPE
+        {
+            return Err(anyhow!("Unsupported scope: {scope:?}"));
+        }
+
+        let now = crate::clock::now_sec();
+        let code = crate::nonce::generate_nonce(32);
+        let payload = crate::oauth_http::AuthCodePayload {
+            user_id,
+            client_id: client_id.clone(),
+            client_name: registration.client_name,
+            redirect_uri: redirect_uri.clone(),
+            code_challenge,
+            scope,
+            resource,
+        };
+        let payload_json =
+            serde_json::to_string(&payload).context("serializing authorization code payload")?;
+        self.app
+            .db()
+            .put_ephemeral_state(
+                &crate::oauth_http::oauth_code_state_id(&auth::hash_token(&code)),
+                crate::oauth_http::OAUTH_CODE_STATE_KIND,
+                &payload_json,
+                now + crate::oauth_http::OAUTH_CODE_TTL_S,
+            )
+            .await?;
+
+        let mut url = url::Url::parse(&redirect_uri)
+            .map_err(|_| anyhow!("redirect_uri is not a valid URL"))?;
+        url.query_pairs_mut().append_pair("code", &code);
+        if let Some(state) = &state {
+            url.query_pairs_mut().append_pair("state", state);
+        }
+        Ok(url.to_string())
+    }
+
     /// Request an email login code. **Always returns `true`**, whether or not the
     /// address belongs to a real, enabled user — telling the caller otherwise
     /// would let anyone enumerate registered emails one guess at a time. Every

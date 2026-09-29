@@ -1759,6 +1759,16 @@ fn decode_ticket_cursor(cursor: &str) -> Result<db::TicketCursor> {
     })
 }
 
+/// What the OAuth consent screen needs to show before a user approves or denies
+/// an authorization request: the client's self-claimed name, and — the one
+/// value that actually matters, since dynamic client registration is
+/// unauthenticated — the host it will redirect back to.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct OAuthAuthorizationRequest {
+    pub client_name: String,
+    pub redirect_host: String,
+}
+
 pub struct QueryRoot<A: App + HasDb + Send + Sync> {
     _marker: PhantomData<A>,
 }
@@ -1779,6 +1789,42 @@ impl<A: App + HasDb + Send + Sync> Default for QueryRoot<A> {
 
 #[Object]
 impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
+    /// Look up an OAuth client + redirect URI before showing the consent
+    /// screen. Deliberately returns nothing about the client beyond its
+    /// (self-claimed, since registration is unauthenticated) name and the
+    /// redirect host — the consent page shows the host prominently precisely
+    /// because the name alone can't be trusted. A signed-in `User` only: a
+    /// `Requester` capability token is not someone who can grant access.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn oauth_authorization_request(
+        &self,
+        ctx: &Context<'_>,
+        client_id: String,
+        redirect_uri: String,
+    ) -> Result<OAuthAuthorizationRequest> {
+        if !matches!(ctx.data_opt::<AuthInfo>(), Some(AuthInfo::User { .. })) {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        }
+        let registration = crate::oauth::client_id_key_from_env()
+            .and_then(|key| crate::oauth::decode_client_id(&key, &client_id))
+            .ok_or_else(|| anyhow!("Unknown or invalid client"))?;
+        if !registration
+            .redirect_uris
+            .iter()
+            .any(|u| u == &redirect_uri)
+        {
+            return Err(anyhow!("redirect_uri is not registered for this client"));
+        }
+        let redirect_host = url::Url::parse(&redirect_uri)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .ok_or_else(|| anyhow!("redirect_uri has no host"))?;
+        Ok(OAuthAuthorizationRequest {
+            client_name: registration.client_name,
+            redirect_host,
+        })
+    }
+
     /// API build version — the git commit this server was built from.
     async fn version(&self) -> String {
         crate::environment::GIT_REV.to_string()

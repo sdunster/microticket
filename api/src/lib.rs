@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod base_url;
 pub mod clock;
 pub mod db;
 pub mod dynamodb;
@@ -16,6 +17,7 @@ pub mod mockmail;
 pub mod mockstorage;
 pub mod nonce;
 pub mod oauth;
+pub mod oauth_http;
 pub mod outbound;
 pub mod request_metrics;
 pub mod s3storage;

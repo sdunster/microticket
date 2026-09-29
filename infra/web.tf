@@ -71,6 +71,37 @@ resource "aws_cloudfront_origin_request_policy" "api" {
   }
 }
 
+# CORS for the OAuth/MCP endpoints, which browser-based MCP clients call from
+# their own origin (the web app and consent page are same-origin and need none).
+# Any origin is allowed: these endpoints are bearer-token/PKCE only and never
+# read cookies, so there's no ambient credential for a foreign page to ride on.
+# The headers come from here rather than the Function URL's CORS config because
+# the viewer's Origin isn't forwarded, so that config never fires through
+# CloudFront; origin_override makes this the one source either way. A policy
+# only adds headers, so the handler itself answers OPTIONS with 204
+# (oauth_http::is_cors_preflight_path).
+resource "aws_cloudfront_response_headers_policy" "oauth_mcp_cors" {
+  name = "toolbox-oauth-mcp-cors"
+
+  cors_config {
+    access_control_allow_credentials = false
+    access_control_allow_origins {
+      items = ["*"]
+    }
+    access_control_allow_methods {
+      items = ["GET", "POST", "DELETE", "OPTIONS"]
+    }
+    access_control_allow_headers {
+      items = ["Authorization", "Content-Type", "Mcp-Protocol-Version", "Mcp-Session-Id", "Last-Event-Id"]
+    }
+    access_control_expose_headers {
+      items = ["WWW-Authenticate", "Mcp-Session-Id", "Mcp-Protocol-Version"]
+    }
+    access_control_max_age_sec = 600
+    origin_override            = true
+  }
+}
+
 resource "aws_cloudfront_distribution" "web" {
   aliases             = [var.web_domain]
   enabled             = true
@@ -148,6 +179,28 @@ resource "aws_cloudfront_distribution" "web" {
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # managed: CachingDisabled
     origin_request_policy_id = aws_cloudfront_origin_request_policy.api.id
+  }
+
+  # The OAuth authorization server (RFC 8414 metadata, dynamic client
+  # registration, token endpoint), on the same Lambda and with the same settings
+  # as /graphql plus cross-origin CORS (see oauth_mcp_cors). Deliberately *not*
+  # /oauth/authorize: the consent page is a web-app route (/app/oauth/authorize)
+  # served from S3. The 403/404 rewrite below is safe here too: these handlers
+  # return only 200/201/204/400/401/500/503. API_BASE_URL on the Lambda must name
+  # this host, since CloudFront doesn't forward Host.
+  dynamic "ordered_cache_behavior" {
+    for_each = ["/oauth/*", "/.well-known/oauth-authorization-server"]
+    content {
+      path_pattern               = ordered_cache_behavior.value
+      target_origin_id           = "api-lambda"
+      viewer_protocol_policy     = "https-only"
+      allowed_methods            = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+      cached_methods             = ["GET", "HEAD"]
+      compress                   = true
+      cache_policy_id            = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # managed: CachingDisabled
+      origin_request_policy_id   = aws_cloudfront_origin_request_policy.api.id
+      response_headers_policy_id = aws_cloudfront_response_headers_policy.oauth_mcp_cors.id
+    }
   }
 
   # The OAC origin returns 403 (not 404) for a missing S3 key, so both codes

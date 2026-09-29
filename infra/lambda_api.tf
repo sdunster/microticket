@@ -28,7 +28,17 @@ resource "aws_lambda_function" "api" {
         # email carries. Defaults to localhost, meant only for `make dev`,
         # so this must be set explicitly here too.
         APP_BASE_URL = "https://${var.web_domain}"
+        # api/src/base_url.rs: the API's public origin, used as the OAuth issuer
+        # and to build the token/registration endpoint URLs. Required behind
+        # CloudFront, which doesn't forward Host: without it the fallback would
+        # name the Function URL's host, and OAuth clients would reject the mismatch.
+        API_BASE_URL = "https://${var.web_domain}"
       },
+      # api/src/oauth.rs: secret the stateless OAuth client ids are signed with.
+      # Unset (empty), dynamic client registration answers 503 and no client can
+      # complete the flow — same optional-key shape as Turnstile below. Omit the
+      # key entirely rather than setting it empty.
+      var.oauth_client_id_secret == "" ? {} : { OAUTH_CLIENT_ID_SECRET = var.oauth_client_id_secret },
       # api/src/turnstile.rs: verification is skipped whenever this is
       # unset, so omit the key entirely rather than setting it to an empty
       # string — an empty env var and a missing one are not the same thing

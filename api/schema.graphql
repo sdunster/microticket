@@ -461,6 +461,20 @@ enum MembershipRoleType {
 
 type MutationRoot {
 	"""
+	Approve an OAuth authorization request: the user has seen the consent
+	screen (`oauthAuthorizationRequest`) and clicked "Approve". Mints a
+	single-use authorization code and returns the client's `redirect_uri`
+	with `code` (and `state`, if given) appended — the caller just navigates
+	there.
+	
+	`User` only (a web session, `mtu_`): an `mtoa_` OAuth token never reaches
+	GraphQL at all, so an MCP client can't approve further grants for itself.
+	Re-validates the client id and redirect URI itself rather than trusting
+	whatever the consent page last read: nothing stops a client from calling
+	this directly, so every check the query made is repeated here.
+	"""
+	approveOauthAuthorization(clientId: String!, redirectUri: String!, codeChallenge: String!, codeChallengeMethod: String!, scope: String, resource: String, state: String): String!
+	"""
 	Request an email login code. **Always returns `true`**, whether or not the
 	address belongs to a real, enabled user — telling the caller otherwise
 	would let anyone enumerate registered emails one guess at a time. Every
@@ -1079,6 +1093,17 @@ input NotificationSettingsInput {
 }
 
 """
+What the OAuth consent screen needs to show before a user approves or denies
+an authorization request: the client's self-claimed name, and — the one
+value that actually matters, since dynamic client registration is
+unauthenticated — the host it will redirect back to.
+"""
+type OauthAuthorizationRequest {
+	clientName: String!
+	redirectHost: String!
+}
+
+"""
 Information about pagination in a connection
 """
 type PageInfo {
@@ -1144,6 +1169,15 @@ type PublicInstance {
 }
 
 type QueryRoot {
+	"""
+	Look up an OAuth client + redirect URI before showing the consent
+	screen. Deliberately returns nothing about the client beyond its
+	(self-claimed, since registration is unauthenticated) name and the
+	redirect host — the consent page shows the host prominently precisely
+	because the name alone can't be trusted. A signed-in `User` only: a
+	`Requester` capability token is not someone who can grant access.
+	"""
+	oauthAuthorizationRequest(clientId: String!, redirectUri: String!): OauthAuthorizationRequest!
 	"""
 	API build version — the git commit this server was built from.
 	"""
