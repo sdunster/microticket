@@ -27,19 +27,19 @@
 use std::sync::Arc;
 
 use async_graphql::{Request, Variables};
-use microticket::app;
-use microticket::db::Handler as _;
-use microticket::dynamodb;
-use microticket::graphql;
-use microticket::mockmail;
-use microticket::mockstorage;
 use serde_json::json;
+use toolbox::app;
+use toolbox::db::Handler as _;
+use toolbox::dynamodb;
+use toolbox::graphql;
+use toolbox::mockmail;
+use toolbox::mockstorage;
 
 async fn local_db_prefix() -> Option<String> {
-    let endpoint = microticket::local_dev::require_local_dynamodb_endpoint().ok()?;
+    let endpoint = toolbox::local_dev::require_local_dynamodb_endpoint().ok()?;
     let prefix = std::env::var("DB_PREFIX").ok()?;
 
-    let client = microticket::local_dev::dynamodb_client().await;
+    let client = toolbox::local_dev::dynamodb_client().await;
     if client.list_tables().send().await.is_err() {
         eprintln!(
             "submit_code_dynamodb_local: {endpoint} is configured but not reachable — skipping. \
@@ -73,7 +73,7 @@ macro_rules! require_local_db {
 /// argument (`db::normalize_user_email`) — a mixed-case nanoid here would
 /// only be asserting against that normalization.
 fn unique_email(label: &str) -> String {
-    format!("{label}-{}@microticket.test", nanoid::nanoid!(10)).to_lowercase()
+    format!("{label}-{}@toolbox.test", nanoid::nanoid!(10)).to_lowercase()
 }
 
 /// Pull a 6-digit code out of the mock mailer's most recent message to `to`
@@ -142,7 +142,7 @@ async fn verify_auth_code_rejects_a_code_minted_by_request_submit_code() {
             "Cross Co",
             "",
             true,
-            microticket::db::InstanceKind::Support,
+            toolbox::db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -195,7 +195,7 @@ async fn verify_auth_code_rejects_a_code_minted_by_request_submit_code() {
     let token = expect_data(&response, "verifySubmitCode");
     let token = token.as_str().expect("verifySubmitCode returns a token");
     assert!(
-        token.starts_with(microticket::auth::REQUESTER_TOKEN_PREFIX),
+        token.starts_with(toolbox::auth::REQUESTER_TOKEN_PREFIX),
         "expected an mts_ submit token, got {token}"
     );
 }
@@ -217,7 +217,7 @@ async fn verify_submit_code_rejects_a_code_minted_by_request_auth_code() {
             "Cross Co 2",
             "",
             true,
-            microticket::db::InstanceKind::Support,
+            toolbox::db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");
@@ -267,7 +267,7 @@ async fn verify_submit_code_rejects_a_code_minted_by_request_auth_code() {
     let token = expect_data(&response, "verifyAuthCode");
     let token = token.as_str().expect("verifyAuthCode returns a token");
     assert!(
-        token.starts_with(microticket::auth::USER_TOKEN_PREFIX),
+        token.starts_with(toolbox::auth::USER_TOKEN_PREFIX),
         "expected an mtu_ user token, got {token}"
     );
 }
@@ -286,7 +286,7 @@ async fn request_submit_code_is_a_noop_for_an_instance_without_public_submission
             "Private Co",
             "",
             /* public_submission_enabled */ false,
-            microticket::db::InstanceKind::Support,
+            toolbox::db::InstanceKind::Support,
         )
         .await
         .expect("create_instance");

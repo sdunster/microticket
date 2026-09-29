@@ -38,28 +38,28 @@
 use std::sync::Arc;
 
 use async_graphql::{Request, Variables};
-use microticket::app;
-use microticket::app::HasDb as _;
-use microticket::auth;
-use microticket::db::Handler as _;
-use microticket::dynamodb;
-use microticket::graphql;
-use microticket::mockmail;
-use microticket::mockstorage;
 use serde_json::json;
+use toolbox::app;
+use toolbox::app::HasDb as _;
+use toolbox::auth;
+use toolbox::db::Handler as _;
+use toolbox::dynamodb;
+use toolbox::graphql;
+use toolbox::mockmail;
+use toolbox::mockstorage;
 
 /// `Some(prefix)` when a local DynamoDB is configured *and* actually
 /// reachable; `None` means every test below should skip itself. Checked fresh
 /// per test (rather than once, cached) since there's no shared test harness
 /// setup hook here — `#[tokio::test]` functions are independent.
 async fn local_db_prefix() -> Option<String> {
-    let endpoint = microticket::local_dev::require_local_dynamodb_endpoint().ok()?;
+    let endpoint = toolbox::local_dev::require_local_dynamodb_endpoint().ok()?;
     let prefix = std::env::var("DB_PREFIX").ok()?;
 
     // A configured-but-unreachable endpoint (DynamoDB Local not actually
     // running) must skip too, not fail with a connection error — probe with a
     // cheap, harmless call.
-    let client = microticket::local_dev::dynamodb_client().await;
+    let client = toolbox::local_dev::dynamodb_client().await;
     if client.list_tables().send().await.is_err() {
         eprintln!(
             "auth_dynamodb_local: {endpoint} is configured but not reachable — skipping. \
@@ -113,7 +113,7 @@ fn extract_login_code(mail: &mockmail::Handler, to: &str) -> String {
 /// below is created directly via `db.create_user` (which stores exactly
 /// what it's given) and then looked up through the normalized GraphQL path.
 fn unique_email() -> String {
-    format!("integration-{}@microticket.test", nanoid::nanoid!(10)).to_lowercase()
+    format!("integration-{}@toolbox.test", nanoid::nanoid!(10)).to_lowercase()
 }
 
 /// Read `data.<path>` out of a GraphQL response as JSON, panicking with the
@@ -258,7 +258,7 @@ async fn disabled_user_cannot_log_in() {
         .expect("create_user against DynamoDB Local");
     db.update_user(
         &user.id,
-        microticket::db::UserUpdateShape::Fields {
+        toolbox::db::UserUpdateShape::Fields {
             name: "Disabled Integration User",
             enabled: false,
         },

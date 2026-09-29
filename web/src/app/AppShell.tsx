@@ -83,7 +83,7 @@ export default function AppShell() {
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-6">
           <div className="flex items-center gap-4">
             <span className="text-lg font-semibold text-ink-strong">
-              microticket
+              Toolbox
             </span>
             <InstanceSwitcher
               user={user}

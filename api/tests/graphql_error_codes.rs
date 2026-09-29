@@ -17,13 +17,13 @@
 use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Object, Schema, Value};
-use microticket::app;
-use microticket::db;
-use microticket::graphql::RequestMetricsExt;
-use microticket::graphql::auth::{AuthGuard, AuthRequirement};
-use microticket::mockdb;
-use microticket::mockmail;
-use microticket::mockstorage;
+use toolbox::app;
+use toolbox::db;
+use toolbox::graphql::RequestMetricsExt;
+use toolbox::graphql::auth::{AuthGuard, AuthRequirement};
+use toolbox::mockdb;
+use toolbox::mockmail;
+use toolbox::mockstorage;
 
 struct TestQuery;
 
@@ -89,7 +89,7 @@ async fn real_schema_guarded_field_with_no_credentials_is_unauthenticated() {
         0,
     ));
     let webauthn = Arc::new(app::build_webauthn().expect("WebAuthn build failed"));
-    let schema = microticket::graphql::build_schema(my_app, webauthn);
+    let schema = toolbox::graphql::build_schema(my_app, webauthn);
 
     let response = schema.execute("{ me { id } }").await;
     assert!(!response.errors.is_empty(), "expected an error");

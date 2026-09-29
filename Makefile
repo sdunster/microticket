@@ -172,8 +172,8 @@ check:
 	@echo "Running API checks..."
 	@$(MAKE) check-toolchain
 	@cd api && cargo fmt --check
-	@cd api && cargo run --locked --bin export-schema > /tmp/microticket-schema.generated.graphql
-	@cd api && diff -u schema.graphql /tmp/microticket-schema.generated.graphql
+	@cd api && cargo run --locked --bin export-schema > /tmp/toolbox-schema.generated.graphql
+	@cd api && diff -u schema.graphql /tmp/toolbox-schema.generated.graphql
 	@cd api && RUSTFLAGS='-Dwarnings' cargo clippy --locked --all-targets --all-features
 
 check-toolchain:

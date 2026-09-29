@@ -1,5 +1,5 @@
 resource "aws_s3_bucket" "web" {
-  bucket = "microticket-web-${var.aws_account_id}"
+  bucket = "toolbox-web-${var.aws_account_id}"
 }
 
 resource "aws_s3_bucket_public_access_block" "web" {
@@ -12,7 +12,7 @@ resource "aws_s3_bucket_public_access_block" "web" {
 }
 
 resource "aws_cloudfront_origin_access_control" "web" {
-  name                              = "microticket-web"
+  name                              = "toolbox-web"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
@@ -42,7 +42,7 @@ resource "aws_s3_bucket_policy" "web" {
 }
 
 resource "aws_cloudfront_distribution" "web" {
-  aliases             = [var.support_domain]
+  aliases             = [var.web_domain]
   enabled             = true
   http_version        = "http2"
   is_ipv6_enabled     = true

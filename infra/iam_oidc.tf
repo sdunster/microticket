@@ -20,7 +20,7 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 resource "aws_iam_role" "github_deploy" {
-  name = "microticket-github-deploy"
+  name = "toolbox-github-deploy"
 
   # Tighter than the seslogin pattern this was copied from: the sub
   # condition pins to a push landing ON the prod branch specifically

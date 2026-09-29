@@ -200,14 +200,14 @@ mod tests {
         let _guard = crate::mail::OVERRIDE_TO_ENV_LOCK.lock().await;
 
         let m = Handler::new();
-        m.send_plain_text("a@example.com", "Your microticket login code", "123456")
+        m.send_plain_text("a@example.com", "Your Toolbox login code", "123456")
             .await
             .unwrap();
         assert_eq!(
             m.sent(),
             vec![Email {
                 to: "a@example.com".into(),
-                subject: "Your microticket login code".into(),
+                subject: "Your Toolbox login code".into(),
                 body: "123456".into(),
                 html: false,
             }]
@@ -278,7 +278,7 @@ mod tests {
             std::env::remove_var(crate::mail::OVERRIDE_TO_VAR);
         }
 
-        let dir = std::env::temp_dir().join(format!("microticket-mockmail-{}", nanoid::nanoid!(8)));
+        let dir = std::env::temp_dir().join(format!("toolbox-mockmail-{}", nanoid::nanoid!(8)));
         let m = Handler {
             sent: Mutex::new(Vec::new()),
             sent_raw: Mutex::new(Vec::new()),

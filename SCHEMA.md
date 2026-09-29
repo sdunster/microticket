@@ -1,6 +1,6 @@
 # Database Schema Reference
 
-microticket uses DynamoDB as its database backend. All tables are defined in `infra/dynamodb.tf` —
+Toolbox uses DynamoDB as its database backend. All tables are defined in `infra/dynamodb.tf` —
 that file, not this one, is the source of truth for the deployed tables; `api/src/bin/local-tables.rs`
 is transcribed from it by hand for local development and must be kept in sync (`make
 local-tables-check` in CI is the tripwire). This project is prod-only, so unlike some sibling

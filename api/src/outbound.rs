@@ -286,7 +286,7 @@ fn render_text(body: &str, signature: &str) -> String {
 /// from both (see [`is_own_address`]); `From` the instance's primary
 /// inbound address under its `from_name`; `Reply-To` carrying the `+t{token}`
 /// threading address; `Subject` tagged `[#{slug}-{number}]`;
-/// `X-Microticket-Loop: 1`; `In-Reply-To`/`References` from `threading`; and
+/// `X-Toolbox-Loop: 1`; `In-Reply-To`/`References` from `threading`; and
 /// a `multipart/alternative` plain-text + HTML body with the instance's
 /// signature appended.
 #[allow(clippy::too_many_arguments)]
@@ -337,7 +337,7 @@ pub fn build_outbound(
     let from_domain = from_address
         .rsplit_once('@')
         .map(|(_, d)| d)
-        .unwrap_or("microticket.invalid");
+        .unwrap_or("toolbox.invalid");
     let message_id = format!("{}@{}", crate::nonce::generate_nonce(16), from_domain);
 
     let mut builder = MessageBuilder::new()
@@ -345,7 +345,7 @@ pub fn build_outbound(
         .reply_to(reply_to.as_str())
         .subject(subject)
         .message_id(message_id)
-        .header("X-Microticket-Loop", Raw::new("1"))
+        .header("X-Toolbox-Loop", Raw::new("1"))
         .text_body(text)
         .html_body(html);
     if !to.is_empty() {
@@ -459,11 +459,11 @@ mod tests {
     fn reply_to_address_round_trips_through_inbound_routing() {
         use crate::inbound::resolution;
 
-        let from = "support@acme.microticket.test";
+        let from = "support@acme.toolbox.test";
         let reply_to = reply_to_address(from, "TickET12345A", "abc123TOKEN").unwrap();
         assert_eq!(
             reply_to,
-            "support+tTickET12345A.abc123TOKEN@acme.microticket.test"
+            "support+tTickET12345A.abc123TOKEN@acme.toolbox.test"
         );
 
         let n = routing::normalize_recipient(&reply_to);
@@ -494,18 +494,18 @@ mod tests {
     #[test]
     fn reply_to_address_round_trips_for_a_wildcard_only_instance() {
         let addresses = [addr(
-            "*@ridgeline.microticket.test",
+            "*@ridgeline.toolbox.test",
             db::AddressKind::Wildcard,
             1,
         )];
         let from = primary_inbound_address(&addresses).unwrap();
-        assert_eq!(from, "support@ridgeline.microticket.test");
+        assert_eq!(from, "support@ridgeline.toolbox.test");
 
         let reply_to = reply_to_address(&from, "tick1", "tok").unwrap();
         let known: std::collections::HashSet<&str> =
-            ["*@ridgeline.microticket.test"].into_iter().collect();
+            ["*@ridgeline.toolbox.test"].into_iter().collect();
         let hit = routing::resolve(&[reply_to.as_str()], |k| known.contains(k));
-        assert_eq!(hit.as_deref(), Some("*@ridgeline.microticket.test"));
+        assert_eq!(hit.as_deref(), Some("*@ridgeline.toolbox.test"));
     }
 
     // ── primary_inbound_address ──────────────────────────────────────────
@@ -513,39 +513,39 @@ mod tests {
     #[test]
     fn primary_prefers_exact_over_wildcard() {
         let addresses = [
-            addr("*@acme.microticket.test", db::AddressKind::Wildcard, 1),
-            addr("support@acme.microticket.test", db::AddressKind::Exact, 2),
+            addr("*@acme.toolbox.test", db::AddressKind::Wildcard, 1),
+            addr("support@acme.toolbox.test", db::AddressKind::Exact, 2),
         ];
         assert_eq!(
             primary_inbound_address(&addresses).as_deref(),
-            Some("support@acme.microticket.test")
+            Some("support@acme.toolbox.test")
         );
     }
 
     #[test]
     fn primary_is_deterministic_among_several_exact_addresses() {
         let addresses = [
-            addr("billing@acme.microticket.test", db::AddressKind::Exact, 5),
-            addr("support@acme.microticket.test", db::AddressKind::Exact, 5),
+            addr("billing@acme.toolbox.test", db::AddressKind::Exact, 5),
+            addr("support@acme.toolbox.test", db::AddressKind::Exact, 5),
         ];
         // Same `created_at`: tie-broken alphabetically, and stable
         // regardless of input order.
         let a = primary_inbound_address(&addresses);
         let b = primary_inbound_address(&[addresses[1].clone(), addresses[0].clone()]);
         assert_eq!(a, b);
-        assert_eq!(a.as_deref(), Some("billing@acme.microticket.test"));
+        assert_eq!(a.as_deref(), Some("billing@acme.toolbox.test"));
     }
 
     #[test]
     fn primary_synthesizes_support_at_domain_for_a_wildcard_only_instance() {
         let addresses = [addr(
-            "*@ridgeline.microticket.test",
+            "*@ridgeline.toolbox.test",
             db::AddressKind::Wildcard,
             1,
         )];
         assert_eq!(
             primary_inbound_address(&addresses).as_deref(),
-            Some("support@ridgeline.microticket.test")
+            Some("support@ridgeline.toolbox.test")
         );
     }
 
@@ -765,11 +765,7 @@ mod tests {
     #[test]
     fn build_outbound_sets_every_required_header() {
         let instance = instance();
-        let addresses = [addr(
-            "support@acme.microticket.test",
-            db::AddressKind::Exact,
-            1,
-        )];
+        let addresses = [addr("support@acme.toolbox.test", db::AddressKind::Exact, 1)];
         let ticket = ticket();
         let threading = Threading {
             in_reply_to: Some("<prev@ap-southeast-2.amazonses.com>".to_string()),
@@ -793,12 +789,12 @@ mod tests {
 
         let from = msg.from().unwrap().first().unwrap();
         assert_eq!(from.name(), Some("Acme Support"));
-        assert_eq!(from.address(), Some("support@acme.microticket.test"));
+        assert_eq!(from.address(), Some("support@acme.toolbox.test"));
 
         let reply_to = msg.reply_to().unwrap().first().unwrap();
         assert_eq!(
             reply_to.address(),
-            Some("support+ttick1.abc123token@acme.microticket.test")
+            Some("support+ttick1.abc123token@acme.toolbox.test")
         );
 
         let to = msg.to().unwrap().first().unwrap();
@@ -814,15 +810,12 @@ mod tests {
         // that the explicit id is still being set.
         let message_id = msg.message_id().expect("Message-ID header");
         assert!(
-            message_id.ends_with("@acme.microticket.test"),
+            message_id.ends_with("@acme.toolbox.test"),
             "Message-ID {message_id:?} should be on the instance mail domain, \
              not a hostname-derived default"
         );
 
-        assert_eq!(
-            msg.header_raw("X-Microticket-Loop").map(str::trim),
-            Some("1")
-        );
+        assert_eq!(msg.header_raw("X-Toolbox-Loop").map(str::trim), Some("1"));
 
         let in_reply_to = msg.header_raw("In-Reply-To").expect("In-Reply-To present");
         assert!(
@@ -848,17 +841,13 @@ mod tests {
     #[test]
     fn build_outbound_excludes_our_own_addresses_from_to_and_cc() {
         let instance = instance();
-        let addresses = [addr(
-            "support@acme.microticket.test",
-            db::AddressKind::Exact,
-            1,
-        )];
+        let addresses = [addr("support@acme.toolbox.test", db::AddressKind::Exact, 1)];
         let mut t = ticket();
         // Our own address snuck onto the CC list somehow (e.g. a requester
         // added it by hand) — it must never come back out on the wire.
         t.cc_emails = vec![
             "cc@example.com".to_string(),
-            "support@acme.microticket.test".to_string(),
+            "support@acme.toolbox.test".to_string(),
         ];
 
         let built = build_outbound(
@@ -873,22 +862,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(built.cc, vec!["cc@example.com".to_string()]);
-        assert!(
-            !built
-                .to
-                .contains(&"support@acme.microticket.test".to_string())
-        );
-        assert!(
-            !built
-                .cc
-                .contains(&"support@acme.microticket.test".to_string())
-        );
+        assert!(!built.to.contains(&"support@acme.toolbox.test".to_string()));
+        assert!(!built.cc.contains(&"support@acme.toolbox.test".to_string()));
 
         let raw_str = String::from_utf8_lossy(&built.raw);
         assert!(
-            !raw_str.contains("support@acme.microticket.test\n")
-                && !raw_str.contains("<support@acme.microticket.test>,")
-                || raw_str.matches("support@acme.microticket.test").count() == 1,
+            !raw_str.contains("support@acme.toolbox.test\n")
+                && !raw_str.contains("<support@acme.toolbox.test>,")
+                || raw_str.matches("support@acme.toolbox.test").count() == 1,
             "our own address must appear at most once (the From header), never in To/Cc: {raw_str}"
         );
     }
@@ -898,13 +879,13 @@ mod tests {
         let mut instance = instance();
         instance.slug = "ridgeline".to_string();
         let addresses = [addr(
-            "*@ridgeline.microticket.test",
+            "*@ridgeline.toolbox.test",
             db::AddressKind::Wildcard,
             1,
         )];
         let mut t = ticket();
         t.requester_emails = vec!["customer@example.com".to_string()];
-        t.cc_emails = vec!["anything@ridgeline.microticket.test".to_string()];
+        t.cc_emails = vec!["anything@ridgeline.toolbox.test".to_string()];
 
         let built = build_outbound(
             &instance,
@@ -941,13 +922,9 @@ mod tests {
     #[test]
     fn build_outbound_errors_when_no_recipients_remain() {
         let instance = instance();
-        let addresses = [addr(
-            "support@acme.microticket.test",
-            db::AddressKind::Exact,
-            1,
-        )];
+        let addresses = [addr("support@acme.toolbox.test", db::AddressKind::Exact, 1)];
         let mut t = ticket();
-        t.requester_emails = vec!["support@acme.microticket.test".to_string()];
+        t.requester_emails = vec!["support@acme.toolbox.test".to_string()];
         t.cc_emails = vec![];
         let err = build_outbound(
             &instance,

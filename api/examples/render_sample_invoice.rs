@@ -15,9 +15,9 @@
 //!   its documented maximum — for visually confirming the wrapping/
 //!   pagination fix.
 
-use microticket::invoicing::money;
-use microticket::invoicing::pdf::render_invoice_pdf;
-use microticket::invoicing::snapshot::{
+use toolbox::invoicing::money;
+use toolbox::invoicing::pdf::render_invoice_pdf;
+use toolbox::invoicing::snapshot::{
     InvoiceSnapshot, InvoiceSnapshotBillTo, InvoiceSnapshotLine, InvoiceSnapshotSeller,
 };
 

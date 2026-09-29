@@ -263,7 +263,7 @@ const TABLES: &[Table] = &[
 ];
 
 #[derive(Parser)]
-#[command(about = "Create the microticket tables in a local DynamoDB")]
+#[command(about = "Create the Toolbox tables in a local DynamoDB")]
 struct Cli {
     /// Delete and recreate every table, discarding all local data.
     #[arg(long)]
@@ -343,14 +343,14 @@ async fn create(client: &Client, prefix: &str, table: &Table) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    microticket::load_cli_env();
+    toolbox::load_cli_env();
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
-    let endpoint = microticket::local_dev::require_local_dynamodb_endpoint()?;
+    let endpoint = toolbox::local_dev::require_local_dynamodb_endpoint()?;
     let prefix = std::env::var("DB_PREFIX").map_err(|_| anyhow!("DB_PREFIX must be set"))?;
 
-    let client = microticket::local_dev::dynamodb_client().await;
+    let client = toolbox::local_dev::dynamodb_client().await;
 
     let existing: Vec<String> = client
         .list_tables()

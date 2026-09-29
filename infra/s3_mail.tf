@@ -21,7 +21,7 @@
 #                                                   transient mail.
 
 resource "aws_s3_bucket" "mail" {
-  bucket = "microticket-mail-${var.aws_account_id}"
+  bucket = "toolbox-mail-${var.aws_account_id}"
 }
 
 resource "aws_s3_bucket_public_access_block" "mail" {

@@ -15,7 +15,12 @@ variable "aws_profile" {
 }
 
 variable "support_domain" {
-  description = "Domain that serves both the web app and inbound mail (e.g. support.example.com); A/AAAA aliases, the MX record, and the web distribution all live on this one name"
+  description = "Mail domain: inbound receiving and outbound sending for the primary instance (e.g. support.example.com) — the MX/SPF/DMARC/DKIM/MAIL FROM records live on this name. Does not need to match web_domain."
+  type        = string
+}
+
+variable "web_domain" {
+  description = "Domain the web app and CloudFront distribution are served from (e.g. app.example.com) — the ACM certificate and the A/AAAA alias live on this name. Independent of support_domain; a request through the web app to the API still works from any origin listed in allowed_origins."
   type        = string
 }
 
@@ -57,7 +62,7 @@ variable "inbound_retention_days" {
   default     = 30
 }
 
-# microticket has no application secret at all: sessions are opaque `mtu_`
+# Toolbox has no application secret at all: sessions are opaque `mtu_`
 # tokens stored only as a sha256 in DynamoDB (see api/src/auth.rs), so there
 # is no signing key to provision. Turnstile is the one optional exception —
 # verification is skipped whenever this is unset (api/src/turnstile.rs), so a

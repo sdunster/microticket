@@ -4,7 +4,7 @@
 
 resource "aws_acm_certificate" "web" {
   provider          = aws.us_east_1
-  domain_name       = var.support_domain
+  domain_name       = var.web_domain
   validation_method = "DNS"
 
   lifecycle {

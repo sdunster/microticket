@@ -35,26 +35,26 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_graphql::{Request, Response, Variables};
-use microticket::app;
-use microticket::auth::{AuthInfo, Membership};
-use microticket::db;
-use microticket::db::Handler as _;
-use microticket::dynamodb;
-use microticket::graphql;
-use microticket::mockmail;
-use microticket::mockstorage;
 use serde_json::{Value, json};
+use toolbox::app;
+use toolbox::auth::{AuthInfo, Membership};
+use toolbox::db;
+use toolbox::db::Handler as _;
+use toolbox::dynamodb;
+use toolbox::graphql;
+use toolbox::mockmail;
+use toolbox::mockstorage;
 
 type TestApp = app::MyApp<dynamodb::Handler, mockmail::Handler, mockstorage::Storage>;
-type TestSchema = graphql::MicroticketSchema<TestApp>;
+type TestSchema = graphql::ToolboxSchema<TestApp>;
 
 /// See `tests/auth_dynamodb_local.rs`'s identically-named helper for the full
 /// rationale.
 async fn local_db_prefix() -> Option<String> {
-    let endpoint = microticket::local_dev::require_local_dynamodb_endpoint().ok()?;
+    let endpoint = toolbox::local_dev::require_local_dynamodb_endpoint().ok()?;
     let prefix = std::env::var("DB_PREFIX").ok()?;
 
-    let client = microticket::local_dev::dynamodb_client().await;
+    let client = toolbox::local_dev::dynamodb_client().await;
     if client.list_tables().send().await.is_err() {
         eprintln!(
             "tickets_dynamodb_local: {endpoint} is configured but not reachable — skipping. \
@@ -315,7 +315,7 @@ async fn the_four_listings_return_exactly_the_right_ticket_set() {
     let open1 = make_ticket(&db, &instance_id, "open one").await;
     let open2 = make_ticket(&db, &instance_id, "open two").await;
     let to_close = make_ticket(&db, &instance_id, "will be closed").await;
-    let now = microticket::clock::now_sec();
+    let now = toolbox::clock::now_sec();
     db.update_ticket(
         &to_close.id,
         db::TicketUpdateShape::SetStatusAndAssignee {

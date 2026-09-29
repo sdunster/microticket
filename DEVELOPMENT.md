@@ -30,7 +30,7 @@ cd web && npm i
 Copy `web/.env.local.example` to `web/.env.local`. The repo-root `.env` (committed, non-secret)
 sets sane local defaults (`DB_PREFIX`, WebAuthn RP id/origin, `TURNSTILE_DISABLED=1`).
 
-microticket has no application secret to speak of — sessions are opaque `mtu_` tokens whose sha256
+Toolbox has no application secret to speak of — sessions are opaque `mtu_` tokens whose sha256
 is stored in DynamoDB, so there's no signing key anywhere. The one optional value, Cloudflare
 Turnstile's `TURNSTILE_SECRET_KEY`, goes in `.env.secret` (copied from `.env.secret.example`, never
 committed) and is only needed if you want to exercise the CAPTCHA path locally instead of relying
@@ -83,14 +83,14 @@ one invoicing), an owner and an agent, a handful of inbound addresses (including
 fictional invoicing projects with a few unbilled billable items, and a ready-made session token for each user — all as raw DynamoDB
 items from `local/seed/synthetic.json`, so their ids are exactly as committed. Nothing in the
 fixture is real: `api/tests/seed_fixtures.rs` pins that every address is
-`@example.com`/`@microticket.test` and refuses anything else.
+`@example.com`/`@toolbox.test` and refuses anything else.
 
 Seeded accounts (only ever valid against a `local`-prefixed database — never real):
 
 | Role  | Email                     | Instance(s)                     | Ready-made token                        |
 | ----- | ------------------------- | -------------------------------- | ---------------------------------------- |
-| owner | `owner@microticket.test`  | `acme`, `ridgeline`, `ledger`    | `mtu_localdev0000000000000000000owner`  |
-| agent | `agent@microticket.test`  | `acme`                           | `mtu_localdev0000000000000000000agent`  |
+| owner | `owner@toolbox.test`  | `acme`, `ridgeline`, `ledger`    | `mtu_localdev0000000000000000000owner`  |
+| agent | `agent@toolbox.test`  | `acme`                           | `mtu_localdev0000000000000000000agent`  |
 
 `ledger` is the seeded **invoicing** instance (`kind: invoicing`) — fictional business/GST/payment
 details and two fictional projects with some billable items, so the invoicing pages have something to look at without a
@@ -174,7 +174,7 @@ local-seed`, which does the local-stack equivalent of this whole sequence for yo
 
 `--dev-auth-user <id-or-email>` on `poem`/`poem-local` bypasses token verification entirely and
 treats every request as that user, with their *real* permissions (memberships included) — never a
-synthetic elevated principal. Only a `User` principal can be impersonated (microticket has no
+synthetic elevated principal. Only a `User` principal can be impersonated (Toolbox has no
 kiosk/session-equivalent). Never enable this in a deployed environment; the Lambda binary has no
 CLI to read the flag from in the first place, so it is unreachable there by construction.
 
@@ -200,7 +200,7 @@ the web bucket, and CloudFront invalidation only).
   `infra/*.tf` (IAM roles/policies, Lambda, DynamoDB, S3, CloudFront, ACM, Route53, SES, SQS, SNS,
   AWS Backup).
 - Terraform >= 1.9.
-- A GitHub repository to push `prod` to (`your-org/microticket` — becomes `var.github_repo`, which
+- A GitHub repository to push `prod` to (`your-org/toolbox` — becomes `var.github_repo`, which
   scopes the OIDC deploy role's trust policy to `repo:<github_repo>:ref:refs/heads/prod`).
 
 ### 9.2 Create the state backend
@@ -212,7 +212,7 @@ committed. Create (or reuse) an S3 bucket for Terraform state by hand, then:
 cd infra
 terraform init \
   -backend-config="bucket=<your state bucket>" \
-  -backend-config="key=microticket/terraform.tfstate" \
+  -backend-config="key=toolbox/terraform.tfstate" \
   -backend-config="region=<your region>" \
   -backend-config="profile=<your profile>"
 ```
@@ -286,7 +286,7 @@ To see the records without waiting: `terraform apply -target=aws_acm_certificate
 **Before applying against an account that might already receive mail elsewhere**, check
 `aws ses describe-active-receipt-rule-set --profile <profile>` — an account has exactly one active
 receipt rule set per region, and `aws_ses_active_receipt_rule_set` in `infra/ses.tf` will make
-microticket's the one that's active.
+Toolbox's the one that's active.
 
 ### 9.6 Wire up GitHub
 
@@ -330,12 +330,12 @@ aws sesv2 get-account --profile <profile>   # ProductionAccessEnabled: true
 
 ```bash
 dig MX support.<your domain>                                      # 10 inbound-smtp.ap-southeast-2.amazonaws.com
-aws ses describe-active-receipt-rule-set --profile <profile>      # microticket's rule set is active
+aws ses describe-active-receipt-rule-set --profile <profile>      # Toolbox's rule set is active
 aws sesv2 get-account --profile <profile>                         # ProductionAccessEnabled: true
 ```
 
 Send a real email to one of an instance's inbound addresses — the ticket should appear in the
-queue within seconds (`aws logs tail /aws/lambda/microticket-inbound-mail --follow --profile
+queue within seconds (`aws logs tail /aws/lambda/toolbox-inbound-mail --follow --profile
 <profile>` if it doesn't). Reply from the web UI and confirm the reply arrives threaded in the
 original mail client, and that replying to *that* lands back on the same ticket. Check the DLQ
 alarm (`monitoring.tf`) is `OK`, and that a deliberately malformed message lands in the DLQ rather

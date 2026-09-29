@@ -77,8 +77,8 @@ impl ClientIp {
 
 /// The schema type for a given `App` implementation. Every binary that builds a
 /// schema (`bin/poem`, `bin/poem-local`, `bin/lambda`, `bin/export-schema`) picks
-/// a concrete `A = MyApp<H, M>` and gets a concrete `MicroticketSchema<MyApp<H, M>>`.
-pub type MicroticketSchema<A> = Schema<QueryRoot<A>, MutationRoot<A>, EmptySubscription>;
+/// a concrete `A = MyApp<H, M>` and gets a concrete `ToolboxSchema<MyApp<H, M>>`.
+pub type ToolboxSchema<A> = Schema<QueryRoot<A>, MutationRoot<A>, EmptySubscription>;
 
 /// Always-on extension that records top-level query/mutation field failures. On
 /// each error it bumps the per-request failure counter (consumed by the slim EMF
@@ -166,7 +166,7 @@ impl Extension for RequestMetricsExtImpl {
 pub fn build_schema<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static>(
     app: Arc<A>,
     webauthn: Arc<webauthn_rs::prelude::Webauthn>,
-) -> MicroticketSchema<A> {
+) -> ToolboxSchema<A> {
     Schema::build(
         QueryRoot::new(),
         MutationRoot { app: app.clone() },

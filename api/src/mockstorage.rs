@@ -127,8 +127,7 @@ mod tests {
     use storage::Handler as _;
 
     fn temp_storage() -> (Storage, PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("microticket-mockstorage-{}", nanoid::nanoid!(8)));
+        let dir = std::env::temp_dir().join(format!("toolbox-mockstorage-{}", nanoid::nanoid!(8)));
         (Storage { dir: dir.clone() }, dir)
     }
 

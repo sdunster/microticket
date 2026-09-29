@@ -2662,48 +2662,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "microticket"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-graphql",
- "async-graphql-poem",
- "aws-config",
- "aws-sdk-dynamodb",
- "aws-sdk-s3",
- "aws-sdk-sesv2",
- "aws-sdk-sqs",
- "aws_lambda_events",
- "base64 0.22.1",
- "chrono",
- "clap",
- "dotenvy",
- "hex",
- "http 1.5.0",
- "lambda_http",
- "lambda_runtime",
- "mail-builder",
- "mail-parser",
- "nanoid",
- "openssl",
- "owned_ttf_parser",
- "poem",
- "printpdf",
- "rand 0.10.2",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "webauthn-rs",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4354,6 +4312,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
+]
+
+[[package]]
+name = "toolbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-graphql",
+ "async-graphql-poem",
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "aws-sdk-s3",
+ "aws-sdk-sesv2",
+ "aws-sdk-sqs",
+ "aws_lambda_events",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "dotenvy",
+ "hex",
+ "http 1.5.0",
+ "lambda_http",
+ "lambda_runtime",
+ "mail-builder",
+ "mail-parser",
+ "nanoid",
+ "openssl",
+ "owned_ttf_parser",
+ "poem",
+ "printpdf",
+ "rand 0.10.2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "webauthn-rs",
 ]
 
 [[package]]

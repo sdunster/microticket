@@ -1,4 +1,4 @@
-//! Bakes the git revision into the binary as `MICROTICKET_GIT_REV`.
+//! Bakes the git revision into the binary as `TOOLBOX_GIT_REV`.
 //!
 //! The deploy workflow runs `cargo lambda deploy` with no `--env-var`, so the
 //! Lambda's environment map is owned entirely by Terraform. Passing a SHA that
@@ -23,7 +23,7 @@ fn main() {
         // have to compile, so fall back rather than failing the build.
         .unwrap_or_else(|| "dev".to_string());
 
-    println!("cargo:rustc-env=MICROTICKET_GIT_REV={}", rev.trim());
+    println!("cargo:rustc-env=TOOLBOX_GIT_REV={}", rev.trim());
 }
 
 fn git_rev_parse_head() -> Option<String> {

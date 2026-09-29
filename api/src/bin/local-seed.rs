@@ -6,7 +6,7 @@
 //!
 //! Unlike seslogin's `local-seed`, there is no `extract` step: seslogin pulls
 //! *reference* data (categories, NITC groups) out of a real database because
-//! that data isn't something a fixture should invent. microticket has no such
+//! that data isn't something a fixture should invent. Toolbox has no such
 //! table — everything `synthetic.json` describes (instances, addresses,
 //! users, memberships, tokens) is invented outright, so there is nothing to
 //! extract and nothing that ever needs real AWS credentials here.
@@ -174,9 +174,9 @@ const TRANSIENT_TABLES: &[&str] = &[
 ];
 
 async fn clear() -> Result<()> {
-    let endpoint = microticket::local_dev::require_local_dynamodb_endpoint()?;
+    let endpoint = toolbox::local_dev::require_local_dynamodb_endpoint()?;
     let prefix = std::env::var("DB_PREFIX").map_err(|_| anyhow!("DB_PREFIX must be set"))?;
-    let client = microticket::local_dev::dynamodb_client().await;
+    let client = toolbox::local_dev::dynamodb_client().await;
     println!("clearing {prefix}_* at {endpoint}");
 
     let mut total = 0usize;
@@ -230,9 +230,9 @@ fn hash_key_for(table: &str) -> &'static str {
 }
 
 async fn apply() -> Result<()> {
-    let endpoint = microticket::local_dev::require_local_dynamodb_endpoint()?;
+    let endpoint = toolbox::local_dev::require_local_dynamodb_endpoint()?;
     let prefix = std::env::var("DB_PREFIX").map_err(|_| anyhow!("DB_PREFIX must be set"))?;
-    let client = microticket::local_dev::dynamodb_client().await;
+    let client = toolbox::local_dev::dynamodb_client().await;
     println!("seeding {prefix}_* at {endpoint}");
 
     let path = seed_dir().join("synthetic.json");
@@ -264,7 +264,7 @@ async fn apply() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    microticket::load_cli_env();
+    toolbox::load_cli_env();
     tracing_subscriber::fmt::init();
     match Cli::parse().command {
         Command::Apply => apply().await,

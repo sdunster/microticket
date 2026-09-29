@@ -1,5 +1,5 @@
 resource "aws_sns_topic" "alerts" {
-  name = "microticket-alerts"
+  name = "toolbox-alerts"
 }
 
 # Optional, so the stack can be stood up before anyone has decided where alerts
@@ -17,7 +17,7 @@ resource "aws_sns_topic_subscription" "alerts_email" {
 # ── Inbound-mail pipeline ────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_metric_alarm" "inbound_dlq_not_empty" {
-  alarm_name          = "microticket-inbound-dlq-not-empty"
+  alarm_name          = "toolbox-inbound-dlq-not-empty"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "ApproximateNumberOfMessagesVisible"
@@ -39,7 +39,7 @@ resource "aws_cloudwatch_metric_alarm" "inbound_dlq_not_empty" {
 # ── Lambda errors ────────────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_metric_alarm" "api_errors" {
-  alarm_name          = "microticket-api-errors"
+  alarm_name          = "toolbox-api-errors"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "Errors"
@@ -47,7 +47,7 @@ resource "aws_cloudwatch_metric_alarm" "api_errors" {
   period              = 300
   statistic           = "Sum"
   threshold           = 0
-  alarm_description   = "microticket-api raised an unhandled error."
+  alarm_description   = "toolbox-api raised an unhandled error."
   treat_missing_data  = "notBreaching"
 
   dimensions = {
@@ -59,7 +59,7 @@ resource "aws_cloudwatch_metric_alarm" "api_errors" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "inbound_mail_errors" {
-  alarm_name          = "microticket-inbound-mail-errors"
+  alarm_name          = "toolbox-inbound-mail-errors"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "Errors"
@@ -67,7 +67,7 @@ resource "aws_cloudwatch_metric_alarm" "inbound_mail_errors" {
   period              = 300
   statistic           = "Sum"
   threshold           = 0
-  alarm_description   = "microticket-inbound-mail raised an unhandled error (distinct from a DLQ landing — this fires on the first failed attempt, the DLQ alarm fires after all 3 retries are exhausted)."
+  alarm_description   = "toolbox-inbound-mail raised an unhandled error (distinct from a DLQ landing — this fires on the first failed attempt, the DLQ alarm fires after all 3 retries are exhausted)."
   treat_missing_data  = "notBreaching"
 
   dimensions = {
@@ -84,10 +84,10 @@ resource "aws_cloudwatch_metric_alarm" "inbound_mail_errors" {
 # into these two account-standard metrics
 # (https://docs.aws.amazon.com/ses/latest/dg/monitor-sending-activity-using-cloudwatch.html),
 # dimensioned by the configuration set name. Thresholds are AWS's own
-# published "at risk" reputation guidance, not something microticket-specific.
+# published "at risk" reputation guidance, not something Toolbox-specific.
 
 resource "aws_cloudwatch_metric_alarm" "ses_bounce_rate" {
-  alarm_name          = "microticket-ses-bounce-rate"
+  alarm_name          = "toolbox-ses-bounce-rate"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "Reputation.BounceRate"
@@ -107,7 +107,7 @@ resource "aws_cloudwatch_metric_alarm" "ses_bounce_rate" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "ses_complaint_rate" {
-  alarm_name          = "microticket-ses-complaint-rate"
+  alarm_name          = "toolbox-ses-complaint-rate"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "Reputation.ComplaintRate"

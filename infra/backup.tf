@@ -43,7 +43,7 @@ data "aws_iam_policy_document" "backup_assume_role" {
 }
 
 resource "aws_iam_role" "backup" {
-  name               = "microticket-backup-role"
+  name               = "toolbox-backup-role"
   assume_role_policy = data.aws_iam_policy_document.backup_assume_role.json
 }
 
@@ -58,11 +58,17 @@ resource "aws_iam_role_policy_attachment" "backup_restore" {
 }
 
 resource "aws_backup_vault" "main" {
+  # Deliberately NOT renamed with the rest of the toolbox rename: an AWS
+  # Backup vault can't be deleted while it holds recovery points, and this
+  # one already has 35 days of history. The name is pure internal plumbing —
+  # nothing user-facing ever sees it — so there's no reason to force a
+  # destroy/recreate (and the resulting gap in daily-snapshot coverage) just
+  # for cosmetic consistency.
   name = "microticket"
 }
 
 resource "aws_backup_plan" "main" {
-  name = "microticket-daily"
+  name = "toolbox-daily"
 
   rule {
     rule_name         = "daily"
@@ -77,7 +83,7 @@ resource "aws_backup_plan" "main" {
 }
 
 resource "aws_backup_selection" "main" {
-  name         = "microticket-dynamodb"
+  name         = "toolbox-dynamodb"
   iam_role_arn = aws_iam_role.backup.arn
   plan_id      = aws_backup_plan.main.id
   resources    = local.backup_tables[*].arn

@@ -201,7 +201,7 @@ impl RequestTelemetry<'_> {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        // EMF metric line: four dimensionless Count metrics, namespace Microticket/API.
+        // EMF metric line: four dimensionless Count metrics, namespace Toolbox/API.
         println!(
             "{}",
             serde_json::to_string(&self.emf_line(ts))
@@ -250,7 +250,7 @@ impl RequestTelemetry<'_> {
     }
 }
 
-const METRIC_NAMESPACE: &str = "Microticket/API";
+const METRIC_NAMESPACE: &str = "Toolbox/API";
 
 /// Metric names declared in the EMF directive. These must stay identical to the
 /// corresponding value keys on [`EmfLine`] — CloudWatch drops any declared metric
@@ -579,7 +579,7 @@ mod tests {
     fn emf_line_matches_expected_wire_format() {
         assert_eq!(
             emf_json(200, 0, 0),
-            r#"{"_aws":{"Timestamp":1700000000000,"CloudWatchMetrics":[{"Namespace":"Microticket/API","Dimensions":[[]],"Metrics":[{"Name":"RequestSuccess","Unit":"Count"},{"Name":"RequestFailure","Unit":"Count"},{"Name":"QueryFailure","Unit":"Count"},{"Name":"MutationFailure","Unit":"Count"}]}]},"RequestSuccess":1,"RequestFailure":0,"QueryFailure":0,"MutationFailure":0}"#
+            r#"{"_aws":{"Timestamp":1700000000000,"CloudWatchMetrics":[{"Namespace":"Toolbox/API","Dimensions":[[]],"Metrics":[{"Name":"RequestSuccess","Unit":"Count"},{"Name":"RequestFailure","Unit":"Count"},{"Name":"QueryFailure","Unit":"Count"},{"Name":"MutationFailure","Unit":"Count"}]}]},"RequestSuccess":1,"RequestFailure":0,"QueryFailure":0,"MutationFailure":0}"#
         );
     }
 

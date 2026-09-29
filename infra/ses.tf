@@ -7,7 +7,7 @@
 # same underlying account identity, so mixing them is safe.
 
 resource "aws_sesv2_configuration_set" "main" {
-  configuration_set_name = "microticket"
+  configuration_set_name = "toolbox"
 
   reputation_options {
     reputation_metrics_enabled = true
@@ -64,7 +64,7 @@ resource "aws_sesv2_email_identity_mail_from_attributes" "additional" {
 # might already have one.
 
 resource "aws_ses_receipt_rule_set" "main" {
-  rule_set_name = "microticket"
+  rule_set_name = "toolbox"
 }
 
 resource "aws_ses_active_receipt_rule_set" "main" {

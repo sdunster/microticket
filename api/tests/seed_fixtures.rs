@@ -7,7 +7,7 @@
 //! `DEVELOPMENT.md`) must match its stored hash, every id a row references
 //! must resolve to a row that exists, and — the hard constraint — every
 //! email-shaped string anywhere in the fixture must be `@example.com` or
-//! `@microticket.test` (a subdomain of either is fine; a `*@domain` wildcard
+//! `@toolbox.test` (a subdomain of either is fine; a `*@domain` wildcard
 //! counts as its domain).
 
 use std::collections::HashSet;
@@ -33,13 +33,13 @@ const DOCUMENTED_IDS: &[&str] = &[
     "acme",
     "ridgeline",
     "ledger",
-    "owner@microticket.test",
-    "agent@microticket.test",
+    "owner@toolbox.test",
+    "agent@toolbox.test",
 ];
 
 /// Domain roots every fixture email/address must be under (exactly, or as a
 /// subdomain of). This repo is public — see the module doc.
-const ALLOWED_DOMAIN_ROOTS: &[&str] = &["example.com", "microticket.test"];
+const ALLOWED_DOMAIN_ROOTS: &[&str] = &["example.com", "toolbox.test"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
@@ -178,7 +178,7 @@ fn synthetic_references_resolve() {
         );
         let date = s(item, "date").expect("billable_item.date");
         assert!(
-            microticket::invoicing::validate_item_date(&date).as_deref() == Ok(date.as_str()),
+            toolbox::invoicing::validate_item_date(&date).as_deref() == Ok(date.as_str()),
             "billable_item {} has a non-canonical date {date:?} — the listing GSIs sort on it",
             id(item)
         );
@@ -464,7 +464,7 @@ fn user_token_hashes_match_their_documented_plaintexts() {
             "user_token for {user_id} does not hash the plaintext DEVELOPMENT.md documents"
         );
         assert!(
-            plaintext.starts_with(microticket::auth::USER_TOKEN_PREFIX),
+            plaintext.starts_with(toolbox::auth::USER_TOKEN_PREFIX),
             "documented plaintext for {user_id} does not carry the mtu_ prefix"
         );
     }
@@ -538,7 +538,7 @@ fn walk_strings(value: &Value, f: &mut impl FnMut(&str)) {
 }
 
 #[test]
-fn every_address_is_example_com_or_microticket_test() {
+fn every_address_is_example_com_or_toolbox_test() {
     let doc = synthetic();
     let mut checked = 0usize;
     let mut violations = Vec::new();
@@ -563,6 +563,6 @@ fn every_address_is_example_com_or_microticket_test() {
     );
     assert!(
         violations.is_empty(),
-        "found address(es) outside @example.com/@microticket.test: {violations:?}"
+        "found address(es) outside @example.com/@toolbox.test: {violations:?}"
     );
 }

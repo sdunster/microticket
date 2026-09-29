@@ -8,22 +8,22 @@ mod errors;
 mod handler;
 
 use lambda_http::{Error, run, service_fn, tracing};
-use microticket::app;
-use microticket::dynamodb;
-use microticket::graphql;
-use microticket::s3storage;
-use microticket::sesmail;
 use std::env;
 use std::sync::Arc;
+use toolbox::app;
+use toolbox::dynamodb;
+use toolbox::graphql;
+use toolbox::s3storage;
+use toolbox::sesmail;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing::init_default_subscriber();
 
-    // microticket has no JWTs — every credential is an opaque secret whose
+    // Toolbox has no JWTs — every credential is an opaque secret whose
     // sha256 hash is looked up in DynamoDB, so there is no signing secret to
     // read from SSM at cold start the way seslogin reads a JWT secret.
-    microticket::turnstile::log_startup_state();
+    toolbox::turnstile::log_startup_state();
 
     let mailer = sesmail::Mailer::new().await;
     let storage = s3storage::Storage::new()

@@ -1,5 +1,5 @@
 {
-  "_comment": "Local-dev fixture for `make local-seed` (api/src/bin/local-seed.rs). Applied as raw DynamoDB items \u2014 not through db::Handler's create_* calls \u2014 so record ids are preserved exactly as written here. Everything in this file is invented: no real person, organisation, or domain. api/tests/seed_fixtures.rs pins the invariants that make this safe to keep committed (token hashes match their documented plaintexts, referenced ids resolve, and every address is @example.com or @microticket.test).",
+  "_comment": "Local-dev fixture for `make local-seed` (api/src/bin/local-seed.rs). Applied as raw DynamoDB items \u2014 not through db::Handler's create_* calls \u2014 so record ids are preserved exactly as written here. Everything in this file is invented: no real person, organisation, or domain. api/tests/seed_fixtures.rs pins the invariants that make this safe to keep committed (token hashes match their documented plaintexts, referenced ids resolve, and every address is @example.com or @toolbox.test).",
   "tables": {
     "instance": [
       {
@@ -83,7 +83,7 @@
           "S": "0400 123 456"
         },
         "business_email": {
-          "S": "billing@ledger.microticket.test"
+          "S": "billing@ledger.toolbox.test"
         },
         "payment_details": {
           "S": "Please make all payments to the below account details:\nExample Bank, BSB 000-000, Account 00000000, Ledger & Co Bookkeeping"
@@ -97,7 +97,7 @@
       {
         "_comment": "Exact address for Acme.",
         "address": {
-          "S": "support@acme.microticket.test"
+          "S": "support@acme.toolbox.test"
         },
         "instance_id": {
           "S": "SeedAcme0001"
@@ -112,7 +112,7 @@
       {
         "_comment": "A second exact address for Acme, proving 'many addresses per instance'.",
         "address": {
-          "S": "billing@acme.microticket.test"
+          "S": "billing@acme.toolbox.test"
         },
         "instance_id": {
           "S": "SeedAcme0001"
@@ -127,7 +127,7 @@
       {
         "_comment": "Wildcard address for Ridgeline: any local part at this subdomain routes here.",
         "address": {
-          "S": "*@ridgeline.microticket.test"
+          "S": "*@ridgeline.toolbox.test"
         },
         "instance_id": {
           "S": "SeedRidge001"
@@ -147,7 +147,7 @@
           "S": "SeedOwnerUsr"
         },
         "email": {
-          "S": "owner@microticket.test"
+          "S": "owner@toolbox.test"
         },
         "name": {
           "S": "Olive Owner"
@@ -168,7 +168,7 @@
           "S": "SeedAgentUsr"
         },
         "email": {
-          "S": "agent@microticket.test"
+          "S": "agent@toolbox.test"
         },
         "name": {
           "S": "Adrian Agent"
@@ -410,7 +410,7 @@
         "ticket_id": { "S": "SeedTick0001" },
         "kind": { "S": "inbound" },
         "from_email": { "S": "requester1@example.com" },
-        "to_emails": { "SS": ["support@acme.microticket.test"] },
+        "to_emails": { "SS": ["support@acme.toolbox.test"] },
         "body_text": { "S": "Hi, the login button does nothing when I click it on Safari. Can you help?" },
         "created_at": { "N": "1735689600" }
       },
@@ -420,7 +420,7 @@
         "ticket_id": { "S": "SeedTick0002" },
         "kind": { "S": "inbound" },
         "from_email": { "S": "requester2@example.com" },
-        "to_emails": { "SS": ["billing@acme.microticket.test"] },
+        "to_emails": { "SS": ["billing@acme.toolbox.test"] },
         "cc_emails": { "SS": ["manager2@example.com"] },
         "body_text": { "S": "Invoice #221 shows an extra $50 charge we don't recognize." },
         "created_at": { "N": "1735693200" }
@@ -442,7 +442,7 @@
         "ticket_id": { "S": "SeedTick0003" },
         "kind": { "S": "inbound" },
         "from_email": { "S": "requester3@example.com" },
-        "to_emails": { "SS": ["support@acme.microticket.test"] },
+        "to_emails": { "SS": ["support@acme.toolbox.test"] },
         "body_text": { "S": "Any chance of a dark mode for the admin panel?" },
         "created_at": { "N": "1735696800" }
       },
@@ -462,7 +462,7 @@
         "ticket_id": { "S": "SeedTick0004" },
         "kind": { "S": "inbound" },
         "from_email": { "S": "requester4@example.com" },
-        "to_emails": { "SS": ["support@acme.microticket.test"] },
+        "to_emails": { "SS": ["support@acme.toolbox.test"] },
         "body_text": { "S": "asdf" },
         "created_at": { "N": "1735700400" }
       },
@@ -472,7 +472,7 @@
         "ticket_id": { "S": "SeedTick0005" },
         "kind": { "S": "inbound" },
         "from_email": { "S": "requester5@example.com" },
-        "to_emails": { "SS": ["support@acme.microticket.test"] },
+        "to_emails": { "SS": ["support@acme.toolbox.test"] },
         "body_text": { "S": "I never received the password reset email, can you check?" },
         "rfc_message_id": { "S": "<seed-msg-acme-5@ap-southeast-2.amazonses.com>" },
         "created_at": { "N": "1735704000" }
@@ -492,7 +492,7 @@
         "ticket_id": { "S": "SeedTick0006" },
         "kind": { "S": "inbound" },
         "from_email": { "S": "hiker1@example.com" },
-        "to_emails": { "SS": ["support@ridgeline.microticket.test"] },
+        "to_emails": { "SS": ["support@ridgeline.toolbox.test"] },
         "body_text": { "S": "The trail map for the summit route is missing a couple of waypoints." },
         "created_at": { "N": "1735707600" }
       },
@@ -512,7 +512,7 @@
         "ticket_id": { "S": "SeedTick0007" },
         "kind": { "S": "inbound" },
         "from_email": { "S": "hiker2@example.com" },
-        "to_emails": { "SS": ["support@ridgeline.microticket.test"] },
+        "to_emails": { "SS": ["support@ridgeline.toolbox.test"] },
         "body_text": { "S": "Do we need a new permit if our group size changes?" },
         "created_at": { "N": "1735711200" }
       }

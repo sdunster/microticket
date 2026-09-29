@@ -28,8 +28,8 @@ use std::future::Future;
 /// registered or verified with a mail provider, which is deliberate: it makes a
 /// deployment that forgot to configure [`MAIL_FROM_VAR`] fail loudly at the
 /// provider instead of quietly sending from a domain someone else owns.
-pub const FROM_FALLBACK: &str = "no-reply@microticket.test";
-pub const REPLY_TO_FALLBACK: &str = "support@microticket.test";
+pub const FROM_FALLBACK: &str = "no-reply@toolbox.test";
+pub const REPLY_TO_FALLBACK: &str = "support@toolbox.test";
 
 /// Env var naming the address system mail is sent from. Set it to an address on
 /// a domain verified with the mail provider — in a deployed environment that is

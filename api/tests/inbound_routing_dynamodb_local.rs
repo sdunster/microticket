@@ -19,19 +19,19 @@
 //! so `cargo test` and CI (which never brings up DynamoDB Local for the
 //! `api-check` job) stay green with no local stack running.
 
-use microticket::db::{self, Handler as _};
-use microticket::dynamodb;
-use microticket::inbound::routing;
+use toolbox::db::{self, Handler as _};
+use toolbox::dynamodb;
+use toolbox::inbound::routing;
 
 /// `Some(prefix)` when a local DynamoDB is configured *and* reachable; `None`
 /// means every test below should skip itself. See
 /// `tests/auth_dynamodb_local.rs`'s identically-named helper for the full
 /// rationale.
 async fn local_db_prefix() -> Option<String> {
-    let endpoint = microticket::local_dev::require_local_dynamodb_endpoint().ok()?;
+    let endpoint = toolbox::local_dev::require_local_dynamodb_endpoint().ok()?;
     let prefix = std::env::var("DB_PREFIX").ok()?;
 
-    let client = microticket::local_dev::dynamodb_client().await;
+    let client = toolbox::local_dev::dynamodb_client().await;
     if client.list_tables().send().await.is_err() {
         eprintln!(
             "inbound_routing_dynamodb_local: {endpoint} is configured but not reachable — \
@@ -65,7 +65,7 @@ macro_rules! require_local_db {
 /// so this must lowercase explicitly rather than assume the generated id
 /// already is.
 fn unique_domain(label: &str) -> String {
-    format!("{label}-{}.microticket.test", nanoid::nanoid!(10)).to_lowercase()
+    format!("{label}-{}.toolbox.test", nanoid::nanoid!(10)).to_lowercase()
 }
 
 #[tokio::test]
@@ -86,7 +86,7 @@ async fn resolves_an_exact_address() {
         .expect("create_instance");
     let domain = unique_domain("exact");
     let address = format!("support@{domain}");
-    db.create_inbound_address(&address, &instance.id, microticket::db::AddressKind::Exact)
+    db.create_inbound_address(&address, &instance.id, toolbox::db::AddressKind::Exact)
         .await
         .expect("create_inbound_address");
 
@@ -114,13 +114,9 @@ async fn resolves_a_plus_tag_address_by_stripping_the_tag() {
         .expect("create_instance");
     let domain = unique_domain("tag");
     let base_address = format!("support@{domain}");
-    db.create_inbound_address(
-        &base_address,
-        &instance.id,
-        microticket::db::AddressKind::Exact,
-    )
-    .await
-    .expect("create_inbound_address");
+    db.create_inbound_address(&base_address, &instance.id, toolbox::db::AddressKind::Exact)
+        .await
+        .expect("create_inbound_address");
 
     let tagged = format!("support+t1a2b3c@{domain}");
     let resolved = routing::resolve_instance_id(&db, &[tagged])
@@ -147,13 +143,9 @@ async fn resolves_via_a_wildcard() {
         .expect("create_instance");
     let domain = unique_domain("wild");
     let wildcard = format!("*@{domain}");
-    db.create_inbound_address(
-        &wildcard,
-        &instance.id,
-        microticket::db::AddressKind::Wildcard,
-    )
-    .await
-    .expect("create_inbound_address");
+    db.create_inbound_address(&wildcard, &instance.id, toolbox::db::AddressKind::Wildcard)
+        .await
+        .expect("create_inbound_address");
 
     let recipient = format!("anything-at-all@{domain}");
     let resolved = routing::resolve_instance_id(&db, &[recipient])
@@ -195,14 +187,14 @@ async fn an_exact_address_wins_over_a_wildcard_on_the_same_domain() {
     db.create_inbound_address(
         &exact_address,
         &exact_instance.id,
-        microticket::db::AddressKind::Exact,
+        toolbox::db::AddressKind::Exact,
     )
     .await
     .expect("create exact");
     db.create_inbound_address(
         &format!("*@{domain}"),
         &wildcard_instance.id,
-        microticket::db::AddressKind::Wildcard,
+        toolbox::db::AddressKind::Wildcard,
     )
     .await
     .expect("create wildcard");
@@ -246,7 +238,7 @@ async fn only_one_of_several_recipients_being_ours_still_resolves() {
         .expect("create_instance");
     let domain = unique_domain("multi");
     let ours = format!("support@{domain}");
-    db.create_inbound_address(&ours, &instance.id, microticket::db::AddressKind::Exact)
+    db.create_inbound_address(&ours, &instance.id, toolbox::db::AddressKind::Exact)
         .await
         .expect("create_inbound_address");
 

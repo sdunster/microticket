@@ -3,7 +3,7 @@
 //!
 //! Covers three of the four checks the build plan lists for step 7:
 //! `Auto-Submitted` (anything but `no`), `Precedence: bulk|list|junk`, and
-//! our own `X-Microticket-Loop` header. The fourth — "`From` is one of our
+//! our own `X-Toolbox-Loop` header. The fourth — "`From` is one of our
 //! own inbound addresses" — needs a database lookup (it's a check against
 //! the `inbound_address` table, potentially across every instance, not a
 //! fact available from the headers alone) and so is **not** implemented
@@ -20,7 +20,7 @@ pub enum DropReason {
     AutoSubmitted(String),
     /// `Precedence: bulk|list|junk` (case-insensitively).
     Precedence(String),
-    /// Our own `X-Microticket-Loop` header is present — this message
+    /// Our own `X-Toolbox-Loop` header is present — this message
     /// originated from this system's own outbound mail.
     OwnLoopHeader,
     /// `From` matches one of our own configured inbound addresses (checked
@@ -33,7 +33,7 @@ impl std::fmt::Display for DropReason {
         match self {
             Self::AutoSubmitted(v) => write!(f, "Auto-Submitted: {v}"),
             Self::Precedence(v) => write!(f, "Precedence: {v}"),
-            Self::OwnLoopHeader => write!(f, "X-Microticket-Loop header present"),
+            Self::OwnLoopHeader => write!(f, "X-Toolbox-Loop header present"),
             Self::FromOwnAddress(addr) => write!(f, "From ({addr}) is one of our own addresses"),
         }
     }
@@ -160,11 +160,11 @@ mod tests {
         );
         assert_eq!(
             DropReason::OwnLoopHeader.to_string(),
-            "X-Microticket-Loop header present"
+            "X-Toolbox-Loop header present"
         );
         assert_eq!(
-            DropReason::FromOwnAddress("support@acme.microticket.test".into()).to_string(),
-            "From (support@acme.microticket.test) is one of our own addresses"
+            DropReason::FromOwnAddress("support@acme.toolbox.test".into()).to_string(),
+            "From (support@acme.toolbox.test) is one of our own addresses"
         );
     }
 }

@@ -24,7 +24,7 @@ locals {
   dns_records_required = concat(
     [
       {
-        name    = var.support_domain
+        name    = var.web_domain
         type    = "A / AAAA (alias) or CNAME"
         value   = aws_cloudfront_distribution.web.domain_name
         purpose = "Serves the web app. An alias record in Route53 (zone ${local.cloudfront_alias_zone_id}), or a plain CNAME in any other DNS provider."

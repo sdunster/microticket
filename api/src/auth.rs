@@ -1,7 +1,7 @@
 //! Authentication principals and the `Authorization` header dispatcher.
 //!
 //! Ported from seslogin's `auth.rs`, minus the kiosk/session principal
-//! microticket has no equivalent of. There are three principals: an
+//! Toolbox has no equivalent of. There are three principals: an
 //! authenticated [`AuthInfo::User`] (a member, possibly of several instances),
 //! an anonymous [`AuthInfo::Requester`] holding a short-lived, single-purpose
 //! capability token scoped to one instance (the public submit form's flow — the
@@ -594,7 +594,7 @@ pub async fn verify_token<A: App + HasDb>(app: &A, token: &str) -> Result<AuthIn
 }
 
 /// Dispatch an `Authorization` header value: `Bearer <token>` is the only scheme
-/// microticket has (no cookies, no signed-kiosk-key scheme like seslogin's `SLKey`).
+/// Toolbox has (no cookies, no signed-kiosk-key scheme like seslogin's `SLKey`).
 /// Returns `None` when there is no recognized header, so the request proceeds
 /// unauthenticated and the GraphQL guards (`AuthRequirement`) reject anything that
 /// requires a principal. A `Bearer` header that *is* present but doesn't verify

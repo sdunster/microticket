@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for working on microticket. See `README.md` for the product pitch, `DEVELOPMENT.md` for
+Guidance for working on Toolbox. See `README.md` for the product pitch, `DEVELOPMENT.md` for
 local setup, and `SCHEMA.md` for the data model.
 
 ## House rules (apply from the first commit)
@@ -28,7 +28,7 @@ local setup, and `SCHEMA.md` for the data model.
   deliberate guard against accidentally mutating whatever `DB_PREFIX` you're pointed at.
 - **No queue abstraction in `api/src/app.rs`.** seslogin has `HasQueues`/`queue.rs`/`sqs.rs`/
   `mockqueue.rs` because its API *produces* to SQS (member sync, NITC export, healthchecks).
-  microticket's API never produces to SQS — the only queue in this system carries inbound mail,
+  Toolbox's API never produces to SQS — the only queue in this system carries inbound mail,
   and that queue is *consumed* by the inbound-mail Lambda (step 7), a separate binary with no
   GraphQL surface. Don't add a queue trait to `app.rs`/`MyApp` unless the API itself starts
   producing to a queue.

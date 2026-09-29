@@ -13,7 +13,7 @@
 //!
 //! **Deliberate simplification vs seslogin: there is no queue abstraction.**
 //! seslogin has `HasQueues`/`queue.rs`/`sqs.rs`/`mockqueue.rs` because its API
-//! *produces* to SQS (member sync, NITC export, healthcheck pings). microticket's
+//! *produces* to SQS (member sync, NITC export, healthcheck pings). Toolbox's
 //! API never produces to SQS — the only queue in this system carries inbound mail,
 //! and that queue is *consumed* by the inbound-mail Lambda (step 7), which is a
 //! separate binary with no GraphQL surface. So there is nothing here to abstract;
@@ -53,7 +53,7 @@ pub fn build_webauthn() -> anyhow::Result<Webauthn> {
         ));
     }
     let primary = origins.remove(0);
-    let mut builder = WebauthnBuilder::new(&rp_id, &primary)?.rp_name("microticket");
+    let mut builder = WebauthnBuilder::new(&rp_id, &primary)?.rp_name("Toolbox");
     for extra in &origins {
         builder = builder.append_allowed_origin(extra);
     }

@@ -78,7 +78,7 @@ pub struct ScanPage<T> {
     pub next: Option<ScanCursor>,
 }
 
-/// A `user` row — the only durable identity microticket has. Membership (which
+/// A `user` row — the only durable identity Toolbox has. Membership (which
 /// instances they belong to, in what role) is step 4's table; nothing here names
 /// an instance.
 #[derive(Clone, Debug, PartialEq)]
@@ -255,7 +255,7 @@ pub enum WebauthnCredentialUpdate {
     },
 }
 
-/// `instance.kind`: which of microticket's two separate functions an
+/// `instance.kind`: which of Toolbox's two separate functions an
 /// instance is for. Set at creation (`create_instance`), **immutable after
 /// creation** — `updateInstance`/`InstanceUpdateShape` has no way to change
 /// it, and there is no CLI command that does either. Per the

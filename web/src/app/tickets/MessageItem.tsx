@@ -36,7 +36,7 @@ function senderLabel(data: {
 }): string {
   if (data.author) return `${data.author.name} <${data.author.email}>`;
   if (data.fromEmail) return data.fromEmail;
-  return data.kind === "SYSTEM" ? "microticket" : "Unknown sender";
+  return data.kind === "SYSTEM" ? "Toolbox" : "Unknown sender";
 }
 
 /**

@@ -1,4 +1,4 @@
-# microticket web UI
+# Toolbox web UI
 
 > **First-time setup is in [../DEVELOPMENT.md](../DEVELOPMENT.md)** — running the full stack with
 > `make dev` / `make dev-local`. This file covers web-specific commands.

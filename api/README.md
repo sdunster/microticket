@@ -1,4 +1,4 @@
-# GraphQL API server for microticket
+# GraphQL API server for Toolbox
 
 > **First-time setup is in [../DEVELOPMENT.md](../DEVELOPMENT.md)** — toolchain, environment,
 > and running the full stack with `make dev` / `make dev-local`. This file will grow

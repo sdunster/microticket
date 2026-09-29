@@ -6,10 +6,10 @@
 
 use std::error::Error;
 
-use microticket::dynamodb;
-use microticket::s3storage;
-use microticket::server;
-use microticket::sesmail;
+use toolbox::dynamodb;
+use toolbox::s3storage;
+use toolbox::server;
+use toolbox::sesmail;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

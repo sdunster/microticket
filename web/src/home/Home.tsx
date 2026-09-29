@@ -11,7 +11,7 @@ export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-10 bg-surface px-4 py-16">
       <div className="text-center">
-        <h1 className="text-4xl font-semibold text-ink-strong">microticket</h1>
+        <h1 className="text-4xl font-semibold text-ink-strong">Toolbox</h1>
         <p className="mt-3 max-w-md text-ink-muted">
           A small shared inbox for support requests — email in, a queue your
           team can work from the web.

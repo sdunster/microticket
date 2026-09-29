@@ -1,6 +1,6 @@
-# microticket
+# Toolbox
 
-microticket is a small multi-tenant helpdesk / shared-inbox app. An organisation ("instance")
+Toolbox is a small multi-tenant helpdesk / shared-inbox app. An organisation ("instance")
 gets one or more inbound email addresses; mail to those addresses opens or updates a ticket.
 Requesters and CCs stay in the loop by email while agents work the queue from a web admin UI.
 Anyone can also raise a ticket from the public web form after verifying their email with a code.
@@ -57,7 +57,7 @@ only — AWS credentials.
 ## Project structure
 
 ```
-api/     Rust crate `microticket` — GraphQL API lambda, inbound-mail lambda, dev server, CLI
+api/     Rust crate `toolbox` — GraphQL API lambda, inbound-mail lambda, dev server, CLI
 web/     React 19 + Relay + Vite + Tailwind v4
 infra/   Terraform (prod only) — nothing hardcoded, so a fork can `terraform apply`
 local/   DynamoDB Local + seed + local mail fixtures

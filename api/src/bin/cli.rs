@@ -1,4 +1,4 @@
-//! microticket `cli` — a thin, ergonomic wrapper over the DB API, following
+//! Toolbox `cli` — a thin, ergonomic wrapper over the DB API, following
 //! seslogin's `bin/cli.rs` conventions (one subcommand tree per object type,
 //! writes happen immediately, `--dry-run` reports what *would* change
 //! instead). This is how an operator bootstraps the first organisation and
@@ -11,16 +11,16 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use microticket::db::{
+use std::path::PathBuf;
+use toolbox::db::{
     self, Handler, Instance, InstanceKind, InstanceUpdateShape, MembershipRole, User,
     UserUpdateShape,
 };
-use microticket::dynamodb;
-use microticket::inbound::routing;
-use std::path::PathBuf;
+use toolbox::dynamodb;
+use toolbox::inbound::routing;
 
 #[derive(Parser, Debug)]
-#[command(about = "Admin/inspection CLI for the microticket DB API")]
+#[command(about = "Admin/inspection CLI for the Toolbox DB API")]
 struct Cli {
     /// DynamoDB table prefix (e.g. "prod", "local"). Falls back to the
     /// DB_PREFIX env var.
@@ -88,7 +88,7 @@ enum InstanceCmd {
         /// instances only — see `--kind`.
         #[arg(long)]
         public_submission_enabled: bool,
-        /// Which of microticket's two functions this instance is for.
+        /// Which of Toolbox's two functions this instance is for.
         /// Immutable after creation — see `db::InstanceKind`'s doc comment.
         #[arg(long, default_value = "support")]
         kind: KindArg,
@@ -641,10 +641,10 @@ async fn run_mail(db: dynamodb::Handler, cmd: MailCmd, dry_run: bool) -> Result<
                 format!("local-{}", sha256_hex(&raw))
             };
 
-            let app = microticket::app::new(
+            let app = toolbox::app::new(
                 db,
-                microticket::mockmail::Handler::from_env(),
-                microticket::mockstorage::Storage::from_env(),
+                toolbox::mockmail::Handler::from_env(),
+                toolbox::mockstorage::Storage::from_env(),
                 0,
             );
 
@@ -653,14 +653,14 @@ async fn run_mail(db: dynamodb::Handler, cmd: MailCmd, dry_run: bool) -> Result<
             // Lambda does.
             let raw_key = format!("inbound/{ses_message_id}");
             {
-                use microticket::storage::Handler as _;
+                use toolbox::storage::Handler as _;
                 app.storage
                     .put_bytes(&raw_key, &raw, "message/rfc822")
                     .await
                     .context("writing raw MIME to local mock storage")?;
             }
 
-            let outcome = microticket::inbound::pipeline::process_raw_message(
+            let outcome = toolbox::inbound::pipeline::process_raw_message(
                 &app,
                 &ses_message_id,
                 &raw,
@@ -704,7 +704,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    microticket::load_cli_env();
+    toolbox::load_cli_env();
 
     let cli = Cli::parse();
 

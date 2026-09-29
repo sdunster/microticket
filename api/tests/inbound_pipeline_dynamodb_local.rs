@@ -1,5 +1,5 @@
 //! Integration tests for the inbound-mail pipeline
-//! (`microticket::inbound::pipeline::process_raw_message`) against
+//! (`toolbox::inbound::pipeline::process_raw_message`) against
 //! **DynamoDB Local** and the mock mail/storage handlers — proving the
 //! whole parse → route → resolve → store → notify path end to end, the way
 //! the unit tests in `src/inbound/*.rs` (pure functions only) and
@@ -24,21 +24,21 @@
 //! repeated runs never collide with each other or with `make
 //! local-seed`'s fixture rows — this file never reads `local/seed/synthetic.json`.
 
-use microticket::app;
-use microticket::db;
-use microticket::db::Handler as _;
-use microticket::dynamodb;
-use microticket::inbound::pipeline;
-use microticket::mockmail;
-use microticket::mockstorage;
+use toolbox::app;
+use toolbox::db;
+use toolbox::db::Handler as _;
+use toolbox::dynamodb;
+use toolbox::inbound::pipeline;
+use toolbox::mockmail;
+use toolbox::mockstorage;
 
 type TestApp = app::MyApp<dynamodb::Handler, mockmail::Handler, mockstorage::Storage>;
 
 async fn local_db_prefix() -> Option<String> {
-    let endpoint = microticket::local_dev::require_local_dynamodb_endpoint().ok()?;
+    let endpoint = toolbox::local_dev::require_local_dynamodb_endpoint().ok()?;
     let prefix = std::env::var("DB_PREFIX").ok()?;
 
-    let client = microticket::local_dev::dynamodb_client().await;
+    let client = toolbox::local_dev::dynamodb_client().await;
     if client.list_tables().send().await.is_err() {
         eprintln!(
             "inbound_pipeline_dynamodb_local: {endpoint} is configured but not reachable — \
@@ -99,7 +99,7 @@ fn unique_email(label: &str) -> String {
 
 fn test_app(db: dynamodb::Handler, storage_dir_label: &str) -> TestApp {
     let dir = std::env::temp_dir().join(format!(
-        "microticket-inbound-pipeline-test-{storage_dir_label}-{}",
+        "toolbox-inbound-pipeline-test-{storage_dir_label}-{}",
         nanoid::nanoid!(8)
     ));
     app::new(
@@ -125,7 +125,7 @@ async fn setup_instance(db: &dynamodb::Handler, label: &str) -> (db::Instance, S
         )
         .await
         .expect("create_instance");
-    let domain = format!("{}.microticket.test", unique_id(label));
+    let domain = format!("{}.toolbox.test", unique_id(label));
     let address = format!("support@{domain}");
     db.create_inbound_address(&address, &instance.id, db::AddressKind::Exact)
         .await
@@ -405,7 +405,7 @@ async fn closed_ticket_reopens_on_a_new_reply() {
             instance_id: &instance.id,
             status: db::TicketStatus::Closed,
             assignee_user_id: None,
-            now: microticket::clock::now_sec(),
+            now: toolbox::clock::now_sec(),
         },
     )
     .await
@@ -678,7 +678,7 @@ async fn wildcard_address_routes_correctly() {
         )
         .await
         .unwrap();
-    let domain = format!("{}.microticket.test", unique_id("wildcard"));
+    let domain = format!("{}.toolbox.test", unique_id("wildcard"));
     db.create_inbound_address(
         &format!("*@{domain}"),
         &instance.id,

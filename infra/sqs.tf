@@ -4,12 +4,12 @@
 #        lambda_inbound.tf)
 
 resource "aws_sqs_queue" "inbound_mail_dlq" {
-  name                      = "microticket-inbound-dlq"
+  name                      = "toolbox-inbound-dlq"
   message_retention_seconds = 1209600 # 14 days
 }
 
 resource "aws_sqs_queue" "inbound_mail" {
-  name = "microticket-inbound"
+  name = "toolbox-inbound"
 
   # Must be >= the inbound-mail lambda's timeout (60s, lambda_inbound.tf).
   # If it were shorter, SQS could make a message visible to a second
@@ -52,7 +52,7 @@ resource "aws_sqs_queue_policy" "inbound_mail" {
 }
 
 resource "aws_sns_topic" "inbound_mail" {
-  name = "microticket-inbound"
+  name = "toolbox-inbound"
 }
 
 data "aws_iam_policy_document" "inbound_mail_topic" {

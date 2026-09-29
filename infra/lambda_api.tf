@@ -1,5 +1,5 @@
 resource "aws_lambda_function" "api" {
-  function_name = "microticket-api"
+  function_name = "toolbox-api"
   role          = aws_iam_role.api_lambda.arn
   runtime       = "provided.al2023"
   handler       = "bootstrap"
@@ -20,13 +20,13 @@ resource "aws_lambda_function" "api" {
         # api/src/app.rs: WebAuthn relying-party id/origin. Both default to
         # localhost values meant only for `make dev`, so both must be set
         # explicitly here.
-        WEBAUTHN_RP_ID     = var.support_domain
-        WEBAUTHN_RP_ORIGIN = "https://${var.support_domain}"
+        WEBAUTHN_RP_ID     = var.web_domain
+        WEBAUTHN_RP_ORIGIN = "https://${var.web_domain}"
         # api/src/staff_notify.rs: web app origin for the "View ticket"/
         # "Change your notification settings" links a staff notification
         # email carries. Defaults to localhost, meant only for `make dev`,
         # so this must be set explicitly here too.
-        APP_BASE_URL = "https://${var.support_domain}"
+        APP_BASE_URL = "https://${var.web_domain}"
       },
       # api/src/turnstile.rs: verification is skipped whenever this is
       # unset, so omit the key entirely rather than setting it to an empty

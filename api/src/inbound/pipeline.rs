@@ -129,7 +129,7 @@ where
     let loop_headers = mailloop::LoopCheckHeaders {
         auto_submitted: msg.header_raw("Auto-Submitted").map(str::trim),
         precedence: msg.header_raw("Precedence").map(str::trim),
-        loop_header_present: msg.header("X-Microticket-Loop").is_some(),
+        loop_header_present: msg.header("X-Toolbox-Loop").is_some(),
     };
     if let Some(reason) = mailloop::check_structural(&loop_headers) {
         tracing::info!(ses_message_id, %reason, "dropping (loop guard)");

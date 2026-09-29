@@ -1,4 +1,4 @@
-# DynamoDB tables for microticket.
+# DynamoDB tables for Toolbox.
 #
 # This file is the source of truth for the schema — `api/src/bin/local-tables.rs`
 # is transcribed from it by hand (DynamoDB Local has no Terraform provider) and

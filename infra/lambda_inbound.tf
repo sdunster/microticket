@@ -1,5 +1,5 @@
 resource "aws_lambda_function" "inbound_mail" {
-  function_name = "microticket-inbound-mail"
+  function_name = "toolbox-inbound-mail"
   role          = aws_iam_role.inbound_mail_lambda.arn
   runtime       = "provided.al2023"
   handler       = "bootstrap"
@@ -22,7 +22,7 @@ resource "aws_lambda_function" "inbound_mail" {
       # api/src/staff_notify.rs: web app origin for the "View ticket"/
       # "Change your notification settings" links a staff notification
       # email carries. See lambda_api.tf's identical variable.
-      APP_BASE_URL = "https://${var.support_domain}"
+      APP_BASE_URL = "https://${var.web_domain}"
     }
   }
 

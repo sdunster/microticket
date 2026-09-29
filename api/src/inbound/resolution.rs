@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn extracts_a_tag_from_a_recipient_list() {
         let recipients =
-            vec!["support+tAbC123XyZ987.tok12345678901234@acme.microticket.test".to_string()];
+            vec!["support+tAbC123XyZ987.tok12345678901234@acme.toolbox.test".to_string()];
         let tags = extract_reply_tags(&recipients);
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].ticket_id, "AbC123XyZ987");
@@ -214,15 +214,15 @@ mod tests {
     #[test]
     fn ignores_recipients_with_no_tag_or_an_unparseable_one() {
         let recipients = vec![
-            "support@acme.microticket.test".to_string(),
-            "support+other-tag@acme.microticket.test".to_string(),
+            "support@acme.toolbox.test".to_string(),
+            "support+other-tag@acme.toolbox.test".to_string(),
         ];
         assert!(extract_reply_tags(&recipients).is_empty());
     }
 
     #[test]
     fn dedupes_the_same_tag_seen_twice() {
-        let addr = "support+tAbC123XyZ987.tok12345678901234@acme.microticket.test".to_string();
+        let addr = "support+tAbC123XyZ987.tok12345678901234@acme.toolbox.test".to_string();
         let recipients = vec![addr.clone(), addr];
         assert_eq!(extract_reply_tags(&recipients).len(), 1);
     }
@@ -230,8 +230,8 @@ mod tests {
     #[test]
     fn preserves_recipient_order() {
         let recipients = vec![
-            "support+tTICKETB0001.tokenB123456789012@acme.microticket.test".to_string(),
-            "support+tTICKETA0001.tokenA123456789012@acme.microticket.test".to_string(),
+            "support+tTICKETB0001.tokenB123456789012@acme.toolbox.test".to_string(),
+            "support+tTICKETA0001.tokenA123456789012@acme.toolbox.test".to_string(),
         ];
         let tags = extract_reply_tags(&recipients);
         assert_eq!(tags[0].ticket_id, "TICKETB0001");
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn plan_combines_every_signal() {
         let recipients =
-            vec!["support+tAbC123XyZ987.tok12345678901234@acme.microticket.test".to_string()];
+            vec!["support+tAbC123XyZ987.tok12345678901234@acme.toolbox.test".to_string()];
         let plan = build_resolution_plan(
             &recipients,
             Some("<parent@x>"),

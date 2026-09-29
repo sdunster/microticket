@@ -395,7 +395,7 @@ fn build_staff_mime(
     let from_domain = from
         .rsplit_once('@')
         .map(|(_, d)| d)
-        .unwrap_or("microticket.invalid");
+        .unwrap_or("toolbox.invalid");
 
     // `[{instance.name} #{number}] {subject}` — deliberately not
     // `[#{slug}-{number}]`: that shape is exactly what
@@ -439,7 +439,7 @@ fn build_staff_mime(
         .subject(subject)
         .message_id(message_id)
         .header("Auto-Submitted", Raw::new("auto-generated"))
-        .header("X-Microticket-Loop", Raw::new("1"))
+        .header("X-Toolbox-Loop", Raw::new("1"))
         .header("References", Raw::new(references))
         .text_body(body)
         .html_body(html)
@@ -1248,10 +1248,7 @@ mod tests {
         )
         .unwrap();
         let msg = parse(&built.raw);
-        assert_eq!(
-            msg.header_raw("X-Microticket-Loop").map(str::trim),
-            Some("1")
-        );
+        assert_eq!(msg.header_raw("X-Toolbox-Loop").map(str::trim), Some("1"));
         assert_eq!(
             msg.header_raw("Auto-Submitted").map(str::trim),
             Some("auto-generated")
@@ -1266,15 +1263,15 @@ mod tests {
             &recipient(),
             "Someone replied",
             Some("the excerpt text"),
-            "https://acme.microticket.test",
+            "https://acme.toolbox.test",
         )
         .unwrap();
         let msg = parse(&built.raw);
         let text = msg.body_text(0).unwrap().into_owned();
         assert!(text.contains("Someone replied"));
         assert!(text.contains("the excerpt text"));
-        assert!(text.contains("https://acme.microticket.test/app/tickets/tick1"));
-        assert!(text.contains("https://acme.microticket.test/app/settings"));
+        assert!(text.contains("https://acme.toolbox.test/app/tickets/tick1"));
+        assert!(text.contains("https://acme.toolbox.test/app/settings"));
         assert!(text.contains(recipient().reason.footer_text()));
         assert!(text.contains("not delivered to the customer"));
     }

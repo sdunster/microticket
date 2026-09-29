@@ -10,18 +10,18 @@ use lambda_http::request::RequestContext;
 use lambda_http::{Body, Error, Request, RequestExt, Response};
 use sha2::{Digest, Sha256};
 
-use microticket::app;
-use microticket::auth::{self, AuthInfo};
-use microticket::db;
-use microticket::graphql;
-use microticket::mail;
-use microticket::request_metrics::{self, RequestMetrics};
-use microticket::storage;
-use microticket::telemetry::{self, RequestTelemetry};
+use toolbox::app;
+use toolbox::auth::{self, AuthInfo};
+use toolbox::db;
+use toolbox::graphql;
+use toolbox::mail;
+use toolbox::request_metrics::{self, RequestMetrics};
+use toolbox::storage;
+use toolbox::telemetry::{self, RequestTelemetry};
 
 use crate::errors::{ClientError, ServerError};
 
-type GraphQlSchema<H, M, S> = graphql::MicroticketSchema<app::MyApp<H, M, S>>;
+type GraphQlSchema<H, M, S> = graphql::ToolboxSchema<app::MyApp<H, M, S>>;
 
 pub struct Handler<
     H: db::Handler + Send + Sync,
@@ -136,7 +136,7 @@ impl<
 
     /// Parse a POST body into a GraphQL request. Also computes the request body's
     /// hex SHA-256 for the debug log — there is no signed-header scheme in
-    /// microticket to bind it into (unlike seslogin's kiosk `SLKey` auth), but
+    /// Toolbox to bind it into (unlike seslogin's kiosk `SLKey` auth), but
     /// logging it costs nothing and gives an audit trail for "was this exact body
     /// received".
     fn graphql_request_from_post(&self, request: Request) -> Result<GraphQlRequest, ClientError> {

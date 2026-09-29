@@ -41,7 +41,7 @@ jobs:
 
       # JSON-only invariants of local/seed/synthetic.json (token hashes match
       # their documented plaintexts, referenced ids resolve, every address is
-      # @example.com/@microticket.test) — no DB, so this runs before the local
+      # @example.com/@toolbox.test) — no DB, so this runs before the local
       # stack comes up.
       - name: Seed fixture invariants
         run: cd api && cargo test --locked --test seed_fixtures

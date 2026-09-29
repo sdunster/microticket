@@ -28,7 +28,7 @@ locals {
 # ── API lambda role ─────────────────────────────────────────────────────────
 
 resource "aws_iam_role" "api_lambda" {
-  name               = "microticket-api-lambda-role"
+  name               = "toolbox-api-lambda-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
 }
 
@@ -100,7 +100,7 @@ resource "aws_iam_role_policy" "api_lambda_s3_mail" {
 # ── Inbound-mail lambda role ────────────────────────────────────────────────
 
 resource "aws_iam_role" "inbound_mail_lambda" {
-  name               = "microticket-inbound-mail-lambda-role"
+  name               = "toolbox-inbound-mail-lambda-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
 }
 

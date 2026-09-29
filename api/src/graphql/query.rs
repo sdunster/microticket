@@ -1785,7 +1785,7 @@ impl<A: App + HasDb + HasStorage + Send + Sync + 'static> QueryRoot<A> {
     }
 
     /// The authenticated caller's own user record. Guarded on `Authenticated`
-    /// (the only requirement microticket's guard enum offers that fits a "must
+    /// (the only requirement Toolbox's guard enum offers that fits a "must
     /// have *some* credential" query), but only a `User` principal actually has
     /// a record to return — a `Requester` capability token hits the explicit
     /// error below rather than some confusing "not found".

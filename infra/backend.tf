@@ -3,7 +3,7 @@
 #
 #   terraform init \
 #     -backend-config="bucket=<state bucket>" \
-#     -backend-config="key=microticket/terraform.tfstate" \
+#     -backend-config="key=toolbox/terraform.tfstate" \
 #     -backend-config="region=<region>" \
 #     -backend-config="profile=<profile>"
 #

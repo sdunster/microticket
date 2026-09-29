@@ -6,11 +6,11 @@
 
 use std::sync::Arc;
 
-use microticket::app;
-use microticket::graphql;
-use microticket::mockdb;
-use microticket::mockmail;
-use microticket::mockstorage;
+use toolbox::app;
+use toolbox::graphql;
+use toolbox::mockdb;
+use toolbox::mockmail;
+use toolbox::mockstorage;
 
 fn main() {
     let app = Arc::new(app::new(

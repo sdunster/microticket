@@ -7,7 +7,7 @@
 
 /// Git commit this binary was built from, or `"dev"` when the build had no git
 /// context.
-pub const GIT_REV: &str = env!("MICROTICKET_GIT_REV");
+pub const GIT_REV: &str = env!("TOOLBOX_GIT_REV");
 
 #[cfg(test)]
 mod tests {

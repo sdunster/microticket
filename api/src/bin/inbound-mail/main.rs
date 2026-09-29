@@ -18,7 +18,7 @@
 //! branching, since routing happens after parsing, not before).
 //!
 //! All the actual work — idempotency, parsing, loop guards, resolution,
-//! storage, notification — lives in `microticket::inbound::pipeline`,
+//! storage, notification — lives in `toolbox::inbound::pipeline`,
 //! shared with `bin/cli.rs`'s `mail process` (`make local-mail`).
 
 use anyhow::{Context, Result, anyhow};
@@ -28,12 +28,12 @@ use lambda_runtime::{Error, LambdaEvent, run, service_fn, tracing};
 use serde::Deserialize;
 use std::sync::Arc;
 
-use microticket::app;
-use microticket::app::HasStorage as _;
-use microticket::dynamodb;
-use microticket::inbound::pipeline;
-use microticket::s3storage;
-use microticket::sesmail;
+use toolbox::app;
+use toolbox::app::HasStorage as _;
+use toolbox::dynamodb;
+use toolbox::inbound::pipeline;
+use toolbox::s3storage;
+use toolbox::sesmail;
 
 /// The outer envelope every SQS message body carries: an SNS notification.
 /// Only `Message` (the inner, JSON-encoded SES event) is needed here.
@@ -63,7 +63,7 @@ async fn handle_record(app: &App, body: &str) -> Result<()> {
 
     let raw_key = format!("{RAW_MAIL_PREFIX}/{message_id}");
     let raw = {
-        use microticket::storage::Handler as _;
+        use toolbox::storage::Handler as _;
         app.storage()
             .get_bytes(&raw_key)
             .await

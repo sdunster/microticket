@@ -32,7 +32,7 @@ use crate::request_metrics::{self, RequestMetrics};
 use crate::storage;
 use crate::telemetry;
 
-type Schema<H, M, S> = graphql::MicroticketSchema<MyApp<H, M, S>>;
+type Schema<H, M, S> = graphql::ToolboxSchema<MyApp<H, M, S>>;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -69,7 +69,7 @@ pub fn init() -> Result<Startup, Box<dyn Error>> {
 
     let cli = Cli::parse();
 
-    // microticket has no JWTs — every credential is an opaque secret whose
+    // Toolbox has no JWTs — every credential is an opaque secret whose
     // sha256 hash is looked up in DynamoDB (`auth::verify_authorization_header`),
     // so there is no signing secret to check for here.
     crate::turnstile::log_startup_state();

@@ -1,7 +1,7 @@
 //! `MutationRoot`: email-code login, opaque token issuance/revocation,
 //! passkeys, and instance-scoped API token management. Ported from
 //! seslogin's `graphql/mutations.rs` (the auth block around its lines
-//! 360-570, and the passkey block around 2146-2560), trimmed to microticket's
+//! 360-570, and the passkey block around 2146-2560), trimmed to Toolbox's
 //! principals — no kiosk sessions. `createApiToken`/`updateApiToken`/
 //! `deleteApiToken` below are a later addition (see `auth::AuthInfo::ApiToken`'s
 //! doc comment) with no seslogin equivalent to port from.
@@ -854,7 +854,7 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
             return true;
         }
 
-        let subject = "Your microticket login code";
+        let subject = "Your Toolbox login code";
         let body = format!(
             "Your login code is: {code}\n\n\
              This code expires in 10 minutes. Do not share it.\n\n\
