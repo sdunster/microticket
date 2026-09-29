@@ -12,6 +12,7 @@ pub mod invoicing;
 pub mod local_dev;
 pub mod mail;
 pub mod mailloop;
+pub mod mcp;
 pub mod mockdb;
 pub mod mockmail;
 pub mod mockstorage;

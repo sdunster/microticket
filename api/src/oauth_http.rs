@@ -63,7 +63,12 @@ impl HttpReply {
 pub fn is_cors_preflight_path(path: &str) -> bool {
     matches!(
         path,
-        "/.well-known/oauth-authorization-server" | "/oauth/register" | "/oauth/token"
+        "/.well-known/oauth-authorization-server"
+            | "/.well-known/oauth-protected-resource"
+            | "/.well-known/oauth-protected-resource/mcp"
+            | "/oauth/register"
+            | "/oauth/token"
+            | "/mcp"
     )
 }
 
@@ -127,6 +132,34 @@ pub fn metadata(host: Option<&str>) -> HttpReply {
             code_challenge_methods_supported: vec!["S256"],
             token_endpoint_auth_methods_supported: vec!["none"],
             scopes_supported: vec![DEFAULT_SCOPE],
+        },
+    )
+}
+
+// ── RFC 9728: protected resource metadata ───────────────────────────────────
+
+#[derive(Serialize)]
+struct ProtectedResourceMetadata {
+    resource: String,
+    authorization_servers: Vec<String>,
+    scopes_supported: Vec<&'static str>,
+    bearer_methods_supported: Vec<&'static str>,
+}
+
+/// `GET /.well-known/oauth-protected-resource/mcp` (and, for clients that
+/// don't append the protected path, the bare `/.well-known/oauth-protected-resource`
+/// — both describe the same, only, protected resource this server has).
+/// Points at `<api base>/mcp` as the resource and `<api base>` as the sole
+/// authorization server, matching [`metadata`]'s `issuer`.
+pub fn protected_resource_metadata(host: Option<&str>) -> HttpReply {
+    let api_base = api_base_url(host);
+    HttpReply::json(
+        200,
+        &ProtectedResourceMetadata {
+            resource: format!("{api_base}/mcp"),
+            authorization_servers: vec![api_base],
+            scopes_supported: vec![DEFAULT_SCOPE],
+            bearer_methods_supported: vec!["header"],
         },
     )
 }
@@ -539,8 +572,11 @@ mod tests {
     fn cors_preflight_covers_every_cross_origin_endpoint() {
         for path in [
             "/.well-known/oauth-authorization-server",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
             "/oauth/register",
             "/oauth/token",
+            "/mcp",
         ] {
             assert!(is_cors_preflight_path(path), "{path}");
         }
@@ -552,9 +588,27 @@ mod tests {
     #[test]
     fn cors_preflight_leaves_graphql_alone() {
         // The site API is same-origin behind CloudFront and keeps its own handling.
-        for path in ["/", "/graphql", "/oauth", "/oauth/authorize"] {
+        for path in ["/", "/graphql", "/oauth", "/mcp/", "/oauth/authorize"] {
             assert!(!is_cors_preflight_path(path), "{path}");
         }
+    }
+
+    // ── protected resource metadata ──────────────────────────────────────────
+
+    #[test]
+    fn protected_resource_metadata_points_at_mcp_and_this_issuer() {
+        let reply = protected_resource_metadata(Some("toolbox.example"));
+        assert_eq!(reply.status, 200);
+        let body = body_of(&reply);
+        assert_eq!(body["resource"], "https://toolbox.example/mcp");
+        assert_eq!(
+            body["authorization_servers"],
+            serde_json::json!(["https://toolbox.example"])
+        );
+        assert_eq!(
+            body["bearer_methods_supported"],
+            serde_json::json!(["header"])
+        );
     }
 
     // ── metadata ─────────────────────────────────────────────────────────────

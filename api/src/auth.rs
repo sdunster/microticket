@@ -49,6 +49,7 @@ pub struct Membership {
     pub is_owner: bool,
 }
 
+#[derive(Clone)]
 pub enum AuthInfo {
     /// An authenticated member, holding every instance they belong to (so a guard
     /// can check `Member(instance)`/`InstanceOwner(instance)` without a DB round

@@ -181,15 +181,21 @@ resource "aws_cloudfront_distribution" "web" {
     origin_request_policy_id = aws_cloudfront_origin_request_policy.api.id
   }
 
-  # The OAuth authorization server (RFC 8414 metadata, dynamic client
-  # registration, token endpoint), on the same Lambda and with the same settings
-  # as /graphql plus cross-origin CORS (see oauth_mcp_cors). Deliberately *not*
-  # /oauth/authorize: the consent page is a web-app route (/app/oauth/authorize)
-  # served from S3. The 403/404 rewrite below is safe here too: these handlers
-  # return only 200/201/204/400/401/500/503. API_BASE_URL on the Lambda must name
+  # The MCP endpoint and its OAuth authorization server (RFC 8414 metadata,
+  # RFC 9728 protected-resource metadata, dynamic client registration, token
+  # endpoint), on the same Lambda and with the same settings as /graphql plus
+  # cross-origin CORS (see oauth_mcp_cors). Deliberately *not* /oauth/authorize:
+  # the consent page is a web-app route (/app/oauth/authorize) served from S3.
+  # The 403/404 rewrite below is safe here too: these handlers return only
+  # 200/201/202/204/400/401/405/500/503. API_BASE_URL on the Lambda must name
   # this host, since CloudFront doesn't forward Host.
   dynamic "ordered_cache_behavior" {
-    for_each = ["/oauth/*", "/.well-known/oauth-authorization-server"]
+    for_each = [
+      "/mcp",
+      "/oauth/*",
+      "/.well-known/oauth-authorization-server",
+      "/.well-known/oauth-protected-resource*",
+    ]
     content {
       path_pattern               = ordered_cache_behavior.value
       target_origin_id           = "api-lambda"

@@ -106,6 +106,29 @@ impl<
                 .emit();
                 return oauth_reply_response(reply);
             }
+            (Method::GET, "/.well-known/oauth-protected-resource/mcp")
+            | (Method::GET, "/.well-known/oauth-protected-resource") => {
+                return oauth_reply_response(toolbox::oauth_http::protected_resource_metadata(
+                    host,
+                ));
+            }
+            (Method::GET, "/mcp") | (Method::DELETE, "/mcp") => {
+                return oauth_reply_response(toolbox::mcp::method_not_allowed());
+            }
+            (Method::POST, "/mcp") => {
+                let authorization = headers.get("Authorization").and_then(|v| v.to_str().ok());
+                let body = body_bytes(request);
+                let reply = toolbox::mcp::handle_post(
+                    &self.app,
+                    &self.schema,
+                    host,
+                    authorization,
+                    client_ip,
+                    &body,
+                )
+                .await;
+                return oauth_reply_response(reply);
+            }
             _ => {}
         }
 
