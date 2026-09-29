@@ -38,6 +38,26 @@ resource "aws_sesv2_email_identity_mail_from_attributes" "main" {
   behavior_on_mx_failure = "USE_DEFAULT_VALUE"
 }
 
+# The web app's own domain, as a SENDING-ONLY identity for system mail (login
+# codes — see api/src/mail.rs's MAIL_FROM_VAR) — never added to the inbound
+# receipt rule below, so it never opens tickets. Skipped entirely when
+# web_domain and support_domain are the same value, since that would collide
+# with aws_sesv2_email_identity.main above.
+resource "aws_sesv2_email_identity" "system" {
+  count          = var.web_domain == var.support_domain ? 0 : 1
+  email_identity = var.web_domain
+
+  configuration_set_name = aws_sesv2_configuration_set.main.configuration_set_name
+}
+
+resource "aws_sesv2_email_identity_mail_from_attributes" "system" {
+  count            = var.web_domain == var.support_domain ? 0 : 1
+  email_identity   = aws_sesv2_email_identity.system[0].email_identity
+  mail_from_domain = "mail.${var.web_domain}"
+
+  behavior_on_mx_failure = "USE_DEFAULT_VALUE"
+}
+
 # Additional mail domains: same shape as the primary identity above, one per
 # entry in var.additional_mail_domains.
 resource "aws_sesv2_email_identity" "additional" {

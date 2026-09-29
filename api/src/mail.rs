@@ -32,8 +32,9 @@ pub const FROM_FALLBACK: &str = "no-reply@toolbox.test";
 pub const REPLY_TO_FALLBACK: &str = "support@toolbox.test";
 
 /// Env var naming the address system mail is sent from. Set it to an address on
-/// a domain verified with the mail provider — in a deployed environment that is
-/// the same domain inbound mail arrives on.
+/// a domain verified with the mail provider — not necessarily the same domain
+/// inbound mail arrives on (deployments can split the web app's own domain,
+/// which system mail sends from, from a tenant's inbound mail domain).
 ///
 /// Instance-scoped mail (ticket replies, notifications) does NOT use this: it
 /// sends from the instance's own inbound address so replies thread back to the

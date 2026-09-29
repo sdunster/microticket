@@ -60,6 +60,46 @@ locals {
         purpose = "SPF for the custom MAIL FROM subdomain."
       },
     ],
+    # The web domain's system-mail sending identity (login codes) — SPF/DMARC/
+    # DKIM/MAIL FROM only, no inbound MX: this domain never receives ticket
+    # mail. Empty when web_domain == support_domain (no separate identity
+    # exists in that case — see ses.tf).
+    length(aws_sesv2_email_identity.system) == 0 ? [] : concat(
+      [
+        {
+          name    = var.web_domain
+          type    = "TXT"
+          value   = "v=spf1 include:amazonses.com ~all"
+          purpose = "SPF: authorises SES to send system mail (login codes) as this domain."
+        },
+        {
+          name    = "_dmarc.${var.web_domain}"
+          type    = "TXT"
+          value   = var.alert_email == "" ? "v=DMARC1; p=none" : "v=DMARC1; p=none; rua=mailto:${var.alert_email}"
+          purpose = "DMARC for the web domain's system mail."
+        },
+        {
+          name    = aws_sesv2_email_identity_mail_from_attributes.system[0].mail_from_domain
+          type    = "MX"
+          value   = "10 feedback-smtp.${var.aws_region}.amazonses.com"
+          purpose = "Custom MAIL FROM: bounce and complaint feedback for system mail."
+        },
+        {
+          name    = aws_sesv2_email_identity_mail_from_attributes.system[0].mail_from_domain
+          type    = "TXT"
+          value   = "v=spf1 include:amazonses.com ~all"
+          purpose = "SPF for the custom MAIL FROM subdomain."
+        },
+      ],
+      [
+        for token in aws_sesv2_email_identity.system[0].dkim_signing_attributes[0].tokens : {
+          name    = "${token}._domainkey.${var.web_domain}"
+          type    = "CNAME"
+          value   = "${token}.dkim.amazonses.com"
+          purpose = "DKIM signing for system mail. All three must exist before SES will sign it."
+        }
+      ]
+    ),
     # Additional mail domains: the same MX/SPF/DMARC/MAIL FROM/DKIM set as the
     # primary domain. If the domain already has an MX or SPF record, creating
     # these REPLACES it -- check before creating.

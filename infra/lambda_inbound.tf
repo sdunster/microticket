@@ -18,7 +18,7 @@ resource "aws_lambda_function" "inbound_mail" {
       # the system sender, not an instance's inbound address. Without this,
       # a staff notification sent from this Lambda would fall back to
       # mail::FROM_FALLBACK's reserved `.test` domain and be refused by SES.
-      MAIL_FROM = "no-reply@${var.support_domain}"
+      MAIL_FROM = "no-reply@${var.web_domain}"
       # api/src/staff_notify.rs: web app origin for the "View ticket"/
       # "Change your notification settings" links a staff notification
       # email carries. See lambda_api.tf's identical variable.

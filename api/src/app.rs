@@ -53,7 +53,11 @@ pub fn build_webauthn() -> anyhow::Result<Webauthn> {
         ));
     }
     let primary = origins.remove(0);
-    let mut builder = WebauthnBuilder::new(&rp_id, &primary)?.rp_name("Toolbox");
+    // rp_name is the "human-palatable" label a browser/OS shows in its passkey
+    // save/use UI. Using the rp_id (the actual domain) here rather than a fixed
+    // brand string means what's displayed always matches the domain the passkey
+    // is actually scoped to.
+    let mut builder = WebauthnBuilder::new(&rp_id, &primary)?.rp_name(&rp_id);
     for extra in &origins {
         builder = builder.append_allowed_origin(extra);
     }
