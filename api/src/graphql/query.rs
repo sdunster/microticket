@@ -739,6 +739,34 @@ impl<A: App + HasDb + Send + Sync + 'static> User<A> {
         Ok(creds.into_iter().map(PasskeyInfo::from).collect())
     }
 
+    /// The caller's own "connected AI apps" (OAuth grants), newest first.
+    /// **Self only**, exactly like [`Self::passkeys`] and for the same reason:
+    /// `adminUser` lets a superuser look up any user's record, and which AI
+    /// clients someone has authorized is theirs to see — `FORBIDDEN`, not an
+    /// empty list, for anyone but the user themselves (superusers included).
+    /// Filters out anything already past its TTL, since DynamoDB's deletion
+    /// lags real expiry.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn oauth_grants(&self, ctx: &Context<'_>) -> Result<Vec<OAuthGrant>> {
+        let Some(AuthInfo::User { id, .. }) = ctx.data_opt::<AuthInfo>() else {
+            return Err(ApiError::forbidden("Must be authenticated as a user").into());
+        };
+        if id != &self.rec.id {
+            return Err(ApiError::forbidden("Cannot view another user's connected apps").into());
+        }
+        let app = ctx.data_unchecked::<Arc<A>>();
+        let now = crate::clock::now_sec();
+        let mut grants = app
+            .db()
+            .list_oauth_grants_by_user(&self.rec.id)
+            .await?
+            .into_iter()
+            .filter(|g| g.expires_at > now && g.refresh_expires_at > now)
+            .collect::<Vec<_>>();
+        grants.sort_by_key(|g| std::cmp::Reverse(g.created_at));
+        Ok(grants.into_iter().map(OAuthGrant::new).collect())
+    }
+
     /// Every (non-deleted) instance this user belongs to, and their role in
     /// each — the instance switcher's data source, and also what the admin
     /// user page uses to show a looked-up user's memberships (see this
@@ -1757,6 +1785,55 @@ fn decode_ticket_cursor(cursor: &str) -> Result<db::TicketCursor> {
         last_activity_at,
         id: id.to_string(),
     })
+}
+
+/// A user's "connected AI app" — an authorized OAuth client. Never exposes the
+/// token hashes or the (self-claimed, DCR-issued) `client_id`; the redirect
+/// host is what actually identifies the client to a viewer, same reasoning as
+/// `OAuthAuthorizationRequest` on the consent screen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OAuthGrant {
+    rec: db::OAuthGrant,
+}
+
+impl OAuthGrant {
+    pub(crate) fn new(rec: db::OAuthGrant) -> Self {
+        Self { rec }
+    }
+}
+
+#[Object]
+impl OAuthGrant {
+    async fn id(&self) -> ID {
+        ID(self.rec.id.clone())
+    }
+    async fn client_name(&self) -> &str {
+        &self.rec.client_name
+    }
+    /// Host the client's tokens redirect back to. Shown alongside the
+    /// (unauthenticated, self-claimed) client name, same as on the consent
+    /// screen.
+    async fn redirect_host(&self) -> String {
+        url::Url::parse(&self.rec.redirect_uri)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| self.rec.redirect_uri.clone())
+    }
+    async fn scope(&self) -> &str {
+        &self.rec.scope
+    }
+    async fn created_at(&self) -> i64 {
+        self.rec.created_at as i64
+    }
+    async fn last_used_at(&self) -> Option<i64> {
+        self.rec.last_used_at.map(|t| t as i64)
+    }
+    /// When this grant's refresh token stops working if it's never used
+    /// again. Sliding: it moves out on every refresh, up to the grant's
+    /// absolute cap (not exposed — a grant in active use never approaches it).
+    async fn refresh_expires_at(&self) -> i64 {
+        self.rec.refresh_expires_at as i64
+    }
 }
 
 /// What the OAuth consent screen needs to show before a user approves or denies

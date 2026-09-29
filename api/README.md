@@ -31,3 +31,18 @@ session). Tokens are `mtoa_…`/`mtor_…` and are **not** accepted by `/graphql
 Configuration: `OAUTH_CLIENT_ID_SECRET` (signs client ids; registration answers `503` without it),
 `API_BASE_URL` (the OAuth issuer — **required behind CloudFront**, which doesn't forward `Host`)
 and `APP_BASE_URL` (where the consent page lives). `local/local.env` sets all three for local dev.
+
+### Connected AI apps (list + revoke)
+
+Once a member has approved a client, `me { oauthGrants }` lists their authorized grants: client
+name, redirect host, scope, created/last-used timestamps, and `refreshExpiresAt` (when the grant
+goes dead if never used again). Token hashes and the client id are never exposed. Expired grants
+are filtered out at read time, since DynamoDB's TTL deletion lags real expiry.
+
+`revokeOauthGrant(id)` deletes a grant outright, so its access token stops verifying immediately.
+Both are **self-only, superusers included** (the same posture as `User.passkeys`): anything else
+fails the same way a missing grant would, so a caller can't probe for other users' grant ids. There
+is no "revoke on disable": disabling a user already blocks every credential kind via
+`fetch_update_user_auth_info`, and re-enabling restores access the way it does for other tokens.
+
+The web page is the "Connected AI apps" section of `/app/settings`.

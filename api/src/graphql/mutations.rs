@@ -3131,6 +3131,31 @@ impl<A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static> MutationRoot
         Ok(true)
     }
 
+    /// Revoke one of the caller's own "connected AI apps". Same ownership-hiding
+    /// "not found" as [`Self::delete_passkey`]: a grant that doesn't exist and
+    /// one that belongs to someone else fail identically, so a caller can't
+    /// probe for other users' grant ids. Deliberately **not** superuser-
+    /// overridable — a superuser can't list another user's grants either (see
+    /// `User.oauthGrants`), and disabling a user already stops every credential
+    /// of theirs, this one included, via `fetch_update_user_auth_info`.
+    #[graphql(guard = "AuthGuard::new(AuthRequirement::Authenticated)")]
+    async fn revoke_oauth_grant(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let user_id = require_user_id(ctx)?;
+
+        let grant = self
+            .app
+            .db()
+            .get_oauth_grant(&id)
+            .await?
+            .ok_or_else(|| anyhow!("OAuth grant not found"))?;
+        if grant.user_id != user_id {
+            return Err(anyhow!("OAuth grant not found"));
+        }
+
+        self.app.db().delete_oauth_grant(&id).await?;
+        Ok(true)
+    }
+
     // ── Invoicing settings ────────────────────────────────────────────────────
 
     /// Full-replace an invoicing instance's seller settings/payment footer —

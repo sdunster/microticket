@@ -305,6 +305,14 @@ local setup, and `SCHEMA.md` for the data model.
     CloudFront doesn't forward `Host`, so the `Host`-derived fallback would advertise the Function
     URL's origin as the issuer and clients would reject it. `APP_BASE_URL` is where the consent
     page lives.
+  - **"Connected AI apps" is self-only, like passkeys.** `User.oauthGrants` and `revokeOauthGrant`
+    (Settings page → "Connected AI apps") are `FORBIDDEN`/not-found for anyone but the grant's own
+    user — **superusers included**, unlike seslogin. Which AI clients a member has authorized is
+    theirs to see, and a superuser who can't list another user's grants has no use for a blind
+    revoke either; disabling a user already stops every credential of theirs (verification runs
+    `fetch_update_user_auth_info`), and re-enabling restores access. Revoking someone else's grant
+    fails with the *same* "not found" as a nonexistent id, so ids can't be probed. Token hashes and
+    the client id are never exposed — the redirect host is what identifies a client to a viewer.
 
 - **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
   every `.await`.** The process environment is global and tests run in parallel, so a test that
