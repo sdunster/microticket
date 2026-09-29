@@ -327,6 +327,10 @@ local setup, and `SCHEMA.md` for the data model.
   The ticket tools (`mcp/tickets.rs`) send customer mail exactly as the same GraphQL mutation does —
   see the "Outbound mail" rule above — and say so in their descriptions (`reply_to_ticket` always,
   `set_ticket_status` on a close or reopen). Attachments are deliberately not exposed.
+  The invoicing tools (`mcp/invoicing.rs`) send no email and are refused for a support instance by
+  the resolvers' own kind check. `finalize_invoice` is strictly irreversible, so its description
+  says so, it is annotated destructive, and it requires an explicit `issueDate` (no default); the
+  owner-level `updateInvoicingSettings`/`setNextInvoiceNumber` are deliberately not tools.
   Every tool's description must say plainly if it sends customer email. `whoami` (memberships with
   role and instance kind) is the first tool; call it first to learn which instances apply.
 

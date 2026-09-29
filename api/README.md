@@ -54,8 +54,19 @@ Tools:
 | `update_ticket_recipients` | Add/remove one requester or CC | no |
 | `list_instance_members` | Members of an instance the caller owns (to find an id to assign to) | — |
 
-Not exposed: attachments (an MCP client can't upload, and download URLs are presigned links) and
-the raw HTML body.
+Invoicing tools (INVOICING instances only; none send email):
+
+| Tool | What |
+|---|---|
+| `list_projects` / `create_project` / `update_project` | Client/job billing identity; `update_project` merges (empty string clears a field) and can archive |
+| `list_billable_items` / `create_billable_item` / `update_billable_item` / `delete_billable_item` | Work to be invoiced. Quantity is a decimal string (≤ 2 dp), price is GST-exclusive integer cents; the amount is computed server-side |
+| `list_invoices` / `get_invoice` | Summaries, and the full invoice (lines, seller, bill-to, items) |
+| `create_invoice` / `add_invoice_items` / `remove_invoice_items` / `delete_invoice` | Draft invoices |
+| `finalize_invoice` | **Irreversible**: numbers and freezes the invoice; requires an explicit `issueDate` |
+| `set_invoice_paid` / `get_invoice_pdf_url` | Paid date (omit to clear); presigned PDF link for a finalized invoice |
+
+Not exposed: attachments (an MCP client can't upload, and download URLs are presigned links), the
+raw HTML body, and the owner-level invoicing settings and next-invoice-number (use the web app).
 
 Connecting a client (e.g. Claude Code): `claude mcp add --transport http toolbox https://<web_domain>/mcp`,
 then approve the request on the consent page. Locally, run `make dev-local` and use
