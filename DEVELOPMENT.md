@@ -298,7 +298,7 @@ Secrets — none of these are sensitive on their own):
 | Repo variable | From output |
 | --- | --- |
 | `AWS_DEPLOY_ROLE_ARN` | `github_deploy_role_arn` |
-| `VITE_API_URL` | `api_function_url` |
+| `VITE_API_URL` | `api_url` (`https://<web_domain>/graphql`, served same-origin by CloudFront; `api_function_url` also still works) |
 | `WEB_BUCKET_NAME` | `web_bucket_name` |
 | `CLOUDFRONT_DISTRIBUTION_ID` | `cloudfront_distribution_id` |
 

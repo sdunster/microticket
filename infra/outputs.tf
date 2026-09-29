@@ -1,5 +1,10 @@
+output "api_url" {
+  description = "Paste into the VITE_API_URL GitHub repo variable (deploy-prod.yml's web build step). The API served same-origin through the web CloudFront distribution — no CORS preflight."
+  value       = "https://${var.web_domain}/graphql"
+}
+
 output "api_function_url" {
-  description = "Paste into the VITE_API_URL GitHub repo variable (deploy-prod.yml's web build step)."
+  description = "The raw Lambda Function URL. Still public (builds cached before VITE_API_URL moved to api_url keep calling it), but no longer what VITE_API_URL should point at."
   value       = aws_lambda_function_url.api.function_url
 }
 
