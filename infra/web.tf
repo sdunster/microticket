@@ -41,6 +41,36 @@ resource "aws_s3_bucket_policy" "web" {
   })
 }
 
+# Forwards exactly the headers the API reads. Host must NOT be forwarded: a
+# Function URL rejects any request whose Host isn't its own domain.
+# CloudFront-Viewer-Address carries the real client IP (the Function URL's own
+# source IP is a CloudFront edge server); User-Agent would otherwise arrive as
+# "Amazon CloudFront". Authorization can't be listed in an origin request
+# policy, and needn't be: CloudFront passes it through unmodified on POST, and
+# every API call is a POST (GET only serves GraphiQL, which is unauthenticated).
+resource "aws_cloudfront_origin_request_policy" "api" {
+  name = "toolbox-api"
+
+  headers_config {
+    header_behavior = "whitelist"
+    headers {
+      items = [
+        "Content-Type",
+        "User-Agent",
+        "X-Client-Version",
+        "X-Client-Info",
+        "CloudFront-Viewer-Address",
+      ]
+    }
+  }
+  cookies_config {
+    cookie_behavior = "none"
+  }
+  query_strings_config {
+    query_string_behavior = "none"
+  }
+}
+
 resource "aws_cloudfront_distribution" "web" {
   aliases             = [var.web_domain]
   enabled             = true
@@ -59,6 +89,20 @@ resource "aws_cloudfront_distribution" "web" {
   # itself is versioned by VITE_CLIENT_VERSION for the mismatch banner, not
   # by cache-busting index.html's URL, so this TTL is the main thing
   # standing between a deploy and users seeing it.
+  # The API, served same-origin at /graphql so the browser needs no CORS
+  # preflight. The Function URL is still public (AuthType=NONE) and keeps its
+  # own CORS config, so builds still calling it directly keep working.
+  origin {
+    origin_id   = "api-lambda"
+    domain_name = trimsuffix(trimprefix(aws_lambda_function_url.api.function_url, "https://"), "/")
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
   default_cache_behavior {
     target_origin_id       = "web-s3"
     viewer_protocol_policy = "redirect-to-https"
@@ -89,6 +133,21 @@ resource "aws_cloudfront_distribution" "web" {
     cached_methods         = ["GET", "HEAD"]
     compress               = true
     cache_policy_id        = "658327ea-f89d-4fab-a63d-7e88639e58f6" # managed: CachingOptimized
+  }
+
+  # Never cached (managed CachingDisabled policy). The custom_error_response
+  # blocks below are distribution-wide, so an API 403/404 would be swapped for
+  # index.html: the handler never returns either (errors are 400/401/500/503),
+  # and a Function URL 403 means the origin is misconfigured anyway.
+  ordered_cache_behavior {
+    path_pattern             = "/graphql"
+    target_origin_id         = "api-lambda"
+    viewer_protocol_policy   = "https-only"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # managed: CachingDisabled
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.api.id
   }
 
   # The OAC origin returns 403 (not 404) for a missing S3 key, so both codes
