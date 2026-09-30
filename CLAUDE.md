@@ -314,6 +314,19 @@ local setup, and `SCHEMA.md` for the data model.
     fails with the *same* "not found" as a nonexistent id, so ids can't be probed. Token hashes and
     the client id are never exposed — the redirect host is what identifies a client to a viewer.
 
+- **MCP interface (`api/src/mcp/`): `POST /mcp`, stateless JSON-RPC, tools that only ever run GraphQL.**
+  A hand-rolled Streamable-HTTP dispatcher (no `rmcp`: its session machinery has to be switched off
+  to suit Lambda, and our bearer check is an async DB call that must precede its dispatch anyway).
+  Auth is `oauth::verify_access_token` only (`mtoa_`, audience `<api base>/mcp`); a missing or bad
+  token gets a 401 with the RFC 9728 `WWW-Authenticate` challenge. **No tool touches the database.**
+  Each runs a fixed GraphQL document through `mcp::tool::ToolContext::run` with the caller's own
+  `AuthInfo`, so every existing guard applies unchanged — including the superuser boundary: a
+  superuser without a membership sees no instance, ticket or invoice through MCP either. A tool can
+  narrow what its caller could do over GraphQL, never widen it. A family of tools is one module
+  exposing `catalogue()` and `dispatch()`; register it in `mcp::tool_catalogue`/`dispatch_tool`.
+  Every tool's description must say plainly if it sends customer email. `whoami` (memberships with
+  role and instance kind) is the first tool; call it first to learn which instances apply.
+
 - **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
   every `.await`.** The process environment is global and tests run in parallel, so a test that
   sets a var, releases its lock, and only then awaits leaves a window for another test to change

@@ -32,6 +32,20 @@ Configuration: `OAUTH_CLIENT_ID_SECRET` (signs client ids; registration answers 
 `API_BASE_URL` (the OAuth issuer — **required behind CloudFront**, which doesn't forward `Host`)
 and `APP_BASE_URL` (where the consent page lives). `local/local.env` sets all three for local dev.
 
+## MCP interface
+
+`POST /mcp` (`api/src/mcp/`) is a Model Context Protocol server (Streamable HTTP, stateless, plain
+JSON) so an AI client can work in Toolbox as a signed-in member. It is authenticated only by the
+OAuth `mtoa_` access tokens above, and every tool runs a fixed GraphQL document as that member, so
+it has exactly their permissions and no more. `GET`/`DELETE /mcp` answer `405`;
+`/.well-known/oauth-protected-resource[/mcp]` (RFC 9728) points clients at the authorization server.
+
+Tools: `whoami` — the caller's identity and every instance they belong to, with role and kind.
+
+Connecting a client (e.g. Claude Code): `claude mcp add --transport http toolbox https://<web_domain>/mcp`,
+then approve the request on the consent page. Locally, run `make dev-local` and use
+`http://localhost:8000/mcp`. Integration tests: `cargo test --test mcp_dynamodb_local`.
+
 ### Connected AI apps (list + revoke)
 
 Once a member has approved a client, `me { oauthGrants }` lists their authorized grants: client
