@@ -15,6 +15,7 @@ pub mod mockdb;
 pub mod mockmail;
 pub mod mockstorage;
 pub mod nonce;
+pub mod oauth;
 pub mod outbound;
 pub mod request_metrics;
 pub mod s3storage;

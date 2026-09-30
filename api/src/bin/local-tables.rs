@@ -188,6 +188,13 @@ const TABLES: &[Table] = &[
         ttl: None,
     },
     Table {
+        name: "oauth_grant",
+        hash: "id",
+        attrs: &[Attr("id", S), Attr("user_id", S)],
+        gsis: &[all("user_id-index", "user_id", None)],
+        ttl: Some("expires_at"),
+    },
+    Table {
         name: "api_token",
         hash: "id",
         attrs: &[Attr("id", S), Attr("instance_id", S)],

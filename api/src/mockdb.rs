@@ -205,6 +205,32 @@ impl db::Handler for Handler {
         Self::unsupported()
     }
 
+    // ── oauth_grant ───────────────────────────────────────────────────────
+
+    async fn create_oauth_grant(&self, _grant: &db::OAuthGrant) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    async fn get_oauth_grant(&self, _id: &str) -> db::Result<Option<db::OAuthGrant>> {
+        Self::unsupported()
+    }
+
+    async fn update_oauth_grant(
+        &self,
+        _id: &str,
+        _change: db::OAuthGrantUpdateShape,
+    ) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    async fn delete_oauth_grant(&self, _id: &str) -> db::Result<()> {
+        Self::unsupported()
+    }
+
+    async fn list_oauth_grants_by_user(&self, _user_id: &str) -> db::Result<Vec<db::OAuthGrant>> {
+        Self::unsupported()
+    }
+
     // ── api_token ─────────────────────────────────────────────────────────
 
     async fn create_api_token(

@@ -150,6 +150,7 @@ fn member_auth(user_id: &str, instance_id: &str) -> AuthInfo {
         }],
         is_superuser: false,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -159,6 +160,7 @@ fn outsider_auth(user_id: &str) -> AuthInfo {
         memberships: vec![],
         is_superuser: false,
         token_id: None,
+        grant_id: None,
     }
 }
 
@@ -168,6 +170,7 @@ fn superuser_auth(user_id: &str) -> AuthInfo {
         memberships: vec![],
         is_superuser: true,
         token_id: None,
+        grant_id: None,
     }
 }
 

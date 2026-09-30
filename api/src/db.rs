@@ -173,6 +173,55 @@ pub enum UserTokenUpdateShape {
     TouchLastUsed,
 }
 
+/// One authorized OAuth client for a user (the MCP interface). Holds both the
+/// current access and refresh token hashes — a grant is the unit of revocation, so
+/// rotating either token rewrites the same row rather than creating a new one.
+/// `expires_at` is the absolute cap (also the DynamoDB TTL attribute):
+/// `refresh_expires_at` slides forward on every rotation but never past it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OAuthGrant {
+    pub id: String,
+    pub user_id: String,
+    pub client_id: String,
+    pub client_name: String,
+    pub redirect_uri: String,
+    /// The audience (RFC 8707 `resource`) this grant's tokens are bound to, e.g.
+    /// `<base>/mcp`. Checked on every use so a token minted for one audience can't
+    /// authenticate against another.
+    pub resource: String,
+    pub scope: String,
+    pub access_token_hash: String,
+    pub access_expires_at: u64,
+    pub refresh_token_hash: String,
+    pub refresh_expires_at: u64,
+    pub expires_at: u64,
+    pub created_at: u64,
+    pub last_used_at: Option<u64>,
+}
+
+impl HasID for OAuthGrant {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OAuthGrantUpdateShape {
+    /// Refresh-token rotation: replace both secrets, sliding `refresh_expires_at`
+    /// forward (capped by the grant's `expires_at` — enforced by the caller in
+    /// `oauth.rs`, not here). Compare-and-swap on `expected_refresh_token_hash`, so
+    /// of two concurrent refreshes with the same token only one wins; the loser gets
+    /// [`Error::NotFound`], the same as a missing grant.
+    Rotate {
+        expected_refresh_token_hash: String,
+        access_token_hash: String,
+        access_expires_at: u64,
+        refresh_token_hash: String,
+        refresh_expires_at: u64,
+    },
+    TouchLastUsed,
+}
+
 /// An instance-scoped integration credential (`mta_{id}.{secret}`) — see
 /// `auth::AuthInfo::ApiToken`'s doc comment for what it authorises (exactly
 /// `submitVerifiedTicket`, for `instance_id`, and nothing else) and
@@ -1478,6 +1527,26 @@ pub trait Handler: Sync {
         change: UserTokenUpdateShape,
     ) -> impl Future<Output = Result<()>> + Send;
     fn delete_user_token(&self, id: &str) -> impl Future<Output = Result<()>> + Send;
+
+    // ── oauth_grant ───────────────────────────────────────────────────────
+    /// Caller supplies the id (and every other field) — unlike
+    /// `create_user_token`, the id is embedded in the tokens `oauth::mint_grant`
+    /// builds, so it must exist before the row does.
+    fn create_oauth_grant(&self, grant: &OAuthGrant) -> impl Future<Output = Result<()>> + Send;
+    /// Strongly consistent `GetItem` — a just-minted token must authenticate on
+    /// its first use, and a just-revoked one must stop working immediately.
+    fn get_oauth_grant(&self, id: &str) -> impl Future<Output = Result<Option<OAuthGrant>>> + Send;
+    fn update_oauth_grant(
+        &self,
+        id: &str,
+        change: OAuthGrantUpdateShape,
+    ) -> impl Future<Output = Result<()>> + Send;
+    fn delete_oauth_grant(&self, id: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Backs the "connected apps" list: every grant a user has authorized.
+    fn list_oauth_grants_by_user(
+        &self,
+        user_id: &str,
+    ) -> impl Future<Output = Result<Vec<OAuthGrant>>> + Send;
 
     // ── api_token ─────────────────────────────────────────────────────────
     /// `id` is supplied by the caller (`auth::issue_api_token`), not

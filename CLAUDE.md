@@ -280,6 +280,17 @@ local setup, and `SCHEMA.md` for the data model.
     TTF for Unicode text and both the crate and the font are pure Rust/no native deps, so the
     renderer builds standalone for `cargo lambda`.
 
+- **OAuth tokens (`mtoa_`/`mtor_`) are for the MCP interface only and never reach GraphQL.**
+  `api/src/oauth.rs` holds one `oauth_grant` row per client a user authorizes (access + refresh
+  token hashes, audience-bound to `<api base>/mcp`). Like `mta_`, the grant id is embedded in
+  the token (`mtoa_{grant_id}.{secret}`) so verification is a strongly consistent `GetItem`.
+  `auth::verify_token` deliberately does **not** accept them — a test pins that — and only
+  `oauth::verify_access_token` (called from the MCP handler) does, resolving to a normal
+  `AuthInfo::User` with `grant_id` set, so an MCP token can't drive the site API outside its own
+  tool set. Dynamic client registration is stateless: a `client_id` is the registration JSON plus an
+  HMAC signed with a key derived from `OAUTH_CLIENT_ID_SECRET` (Toolbox has no JWT secret to reuse);
+  registration is unavailable while that variable is unset.
+
 - **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
   every `.await`.** The process environment is global and tests run in parallel, so a test that
   sets a var, releases its lock, and only then awaits leaves a window for another test to change
