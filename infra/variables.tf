@@ -77,6 +77,18 @@ variable "turnstile_secret_key" {
   sensitive   = true
 }
 
+# Toolbox has no JWTs, so unlike seslogin there is no existing signing secret to
+# derive the OAuth client-id HMAC key from. Any long random string works
+# (`openssl rand -base64 48`); rotating it invalidates every registered client
+# id, which clients simply re-register (existing grants keep working — a grant
+# stores its own client_id and is not re-verified against the key).
+variable "oauth_client_id_secret" {
+  description = "Secret the stateless OAuth (MCP) dynamic-client-registration client ids are signed with (optional — while unset, MCP clients can't register). Generate with `openssl rand -base64 48`."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "github_repo_immutable" {
   description = <<-EOT
     The immutable form of github_repo -- "owner@<owner_id>/name@<repo_id>" --

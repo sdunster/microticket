@@ -11,3 +11,23 @@ Prerequisites: Rust via [rustup](https://rustup.rs) — the exact version is pin
 cargo test
 cargo run --locked --bin export-schema > schema.graphql
 ```
+
+## OAuth authorization server (for the MCP interface)
+
+`api/src/oauth_http.rs` serves an OAuth 2.1 authorization server so an AI client can act as a
+signed-in member, with exactly that member's permissions. All routes sit outside GraphQL and are
+served by both `poem` and the Lambda handler:
+
+| Route | What |
+|---|---|
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata |
+| `POST /oauth/register` | RFC 7591 dynamic client registration — public clients only, nothing stored (the `client_id` is the registration JSON + an HMAC) |
+| `POST /oauth/token` | `authorization_code` (PKCE S256, single-use code) and `refresh_token` (rotation, with reuse detection) grants |
+
+The consent step is the web page at `/app/oauth/authorize`, backed by the GraphQL query
+`oauthAuthorizationRequest` and mutation `approveOauthAuthorization` (both need a signed-in user
+session). Tokens are `mtoa_…`/`mtor_…` and are **not** accepted by `/graphql`.
+
+Configuration: `OAUTH_CLIENT_ID_SECRET` (signs client ids; registration answers `503` without it),
+`API_BASE_URL` (the OAuth issuer — **required behind CloudFront**, which doesn't forward `Host`)
+and `APP_BASE_URL` (where the consent page lives). `local/local.env` sets all three for local dev.

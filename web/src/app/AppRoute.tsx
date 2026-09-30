@@ -5,6 +5,7 @@ import { useCurrentUser } from "../auth/useCurrentUser";
 import { lazyWithReload } from "../lib/lazyWithReload";
 import LoadingIndicator from "../components/LoadingIndicator";
 import AppShell from "./AppShell";
+import OAuthAuthorize from "./OAuthAuthorize";
 import Settings from "./Settings";
 import { TicketListPage } from "./tickets/TicketListPage";
 import { TicketThreadPage } from "./tickets/TicketThreadPage";
@@ -58,6 +59,11 @@ export default function AppRoute() {
   return (
     <AuthenticatedSession>
       <Routes>
+        {/* Deliberately outside AppShell: a one-off consent screen, not part of
+            the app chrome — but still inside AuthenticatedSession, so a
+            logged-out visit shows the login page first and comes right back to
+            this same URL (query string and all) once it succeeds. */}
+        <Route path="oauth/authorize" element={<OAuthAuthorize />} />
         <Route element={<AppShell />}>
           <Route index element={<AppIndexRedirect />} />
           <Route

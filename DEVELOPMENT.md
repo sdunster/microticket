@@ -236,6 +236,7 @@ cp infra/terraform.tfvars.example infra/terraform.tfvars   # gitignored — neve
 | `alert_email` | Subscribed to the operational alert SNS topic (`monitoring.tf`) — verify you can receive at this address before applying, or the SNS subscription sits unconfirmed |
 | `inbound_retention_days` | How long raw inbound MIME is kept in S3 before lifecycle expiry |
 | `turnstile_secret_key` | Optional — leave blank to skip Cloudflare Turnstile verification entirely |
+| `oauth_client_id_secret` | Optional — signs the client ids MCP clients register with (`openssl rand -base64 48`); leave blank and dynamic client registration answers `503`, so no MCP client can connect |
 
 ### 9.4 Import anything that already exists
 

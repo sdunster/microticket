@@ -20,3 +20,7 @@ inbound_retention_days = 30
 
 # Optional — leave blank (or omit) to skip Turnstile verification entirely.
 turnstile_secret_key = ""
+
+# Optional — signs the OAuth client ids MCP clients register with. Leave blank
+# and MCP clients can't register. Generate with: openssl rand -base64 48
+oauth_client_id_secret = ""

@@ -290,6 +290,21 @@ local setup, and `SCHEMA.md` for the data model.
   tool set. Dynamic client registration is stateless: a `client_id` is the registration JSON plus an
   HMAC signed with a key derived from `OAUTH_CLIENT_ID_SECRET` (Toolbox has no JWT secret to reuse);
   registration is unavailable while that variable is unset.
+  - **The HTTP surface** (`api/src/oauth_http.rs`) is framework-agnostic — `(app, key, host, body) →
+    HttpReply` — and wired into both `server.rs` (poem) and `bin/lambda/handler.rs` ahead of GraphQL:
+    `GET /.well-known/oauth-authorization-server`, `POST /oauth/register`, `POST /oauth/token`.
+    The consent page is a **web-app** route (`/app/oauth/authorize`), not an API one, so CloudFront
+    sends `/oauth/*` to the API but must never send `/oauth/authorize` anywhere else — keep it out of
+    that path space. `oauthAuthorizationRequest`/`approveOauthAuthorization` need a real `User`
+    session (`mtu_`), never a `Requester`/`ApiToken`, and an `mtoa_` token can't reach GraphQL, so an
+    MCP client can't approve further grants for itself. An authorization code is single-use: it is
+    deleted from `ephemeral_state` *before* anything else is validated, so a replay fails even with
+    the right PKCE verifier. Presenting an already-rotated refresh token revokes the whole grant
+    (OAuth 2.1 reuse detection).
+  - **`API_BASE_URL` is required in every deployment behind CloudFront** (set in `lambda_api.tf`):
+    CloudFront doesn't forward `Host`, so the `Host`-derived fallback would advertise the Function
+    URL's origin as the issuer and clients would reject it. `APP_BASE_URL` is where the consent
+    page lives.
 
 - **Tests that touch environment variables must serialize on a `tokio::sync::Mutex` held across
   every `.await`.** The process environment is global and tests run in parallel, so a test that
