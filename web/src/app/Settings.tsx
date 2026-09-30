@@ -6,12 +6,14 @@ import RelayErrorBoundary from "../components/RelayErrorBoundary";
 import LoadingIndicator from "../components/LoadingIndicator";
 import { PasskeyList } from "./PasskeyList";
 import { NotificationSettingsSection } from "./NotificationSettingsSection";
+import { ConnectedAppsSection } from "./ConnectedAppsSection";
 
 const settingsQuery = graphql`
   query SettingsQuery @throwOnFieldError {
     me {
       ...PasskeyList_user
       ...NotificationSettingsSection_user
+      ...ConnectedAppsSection_user
     }
   }
 `;
@@ -35,6 +37,14 @@ function SettingsContent() {
         </h2>
         <div className="mt-3">
           <NotificationSettingsSection user={data.me} />
+        </div>
+      </section>
+      <section className="mt-8">
+        <h2 className="text-sm font-semibold tracking-wide text-ink-muted uppercase">
+          Connected AI apps
+        </h2>
+        <div className="mt-3">
+          <ConnectedAppsSection user={data.me} />
         </div>
       </section>
     </div>

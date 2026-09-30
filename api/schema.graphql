@@ -912,6 +912,16 @@ type MutationRoot {
 	"""
 	deletePasskey(id: String!): Boolean!
 	"""
+	Revoke one of the caller's own "connected AI apps". Same ownership-hiding
+	"not found" as [`Self::delete_passkey`]: a grant that doesn't exist and
+	one that belongs to someone else fail identically, so a caller can't
+	probe for other users' grant ids. Deliberately **not** superuser-
+	overridable — a superuser can't list another user's grants either (see
+	`User.oauthGrants`), and disabling a user already stops every credential
+	of theirs, this one included, via `fetch_update_user_auth_info`.
+	"""
+	revokeOauthGrant(id: ID!): Boolean!
+	"""
 	Full-replace an invoicing instance's seller settings/payment footer —
 	`InstanceUpdateShape::SetInvoicingSettings`. Owner-or-superuser, the
 	same posture as `addInboundAddress`/`createApiToken`: this is
@@ -1101,6 +1111,26 @@ unauthenticated — the host it will redirect back to.
 type OauthAuthorizationRequest {
 	clientName: String!
 	redirectHost: String!
+}
+
+type OauthGrant {
+	id: ID!
+	clientName: String!
+	"""
+	Host the client's tokens redirect back to. Shown alongside the
+	(unauthenticated, self-claimed) client name, same as on the consent
+	screen.
+	"""
+	redirectHost: String!
+	scope: String!
+	createdAt: Int!
+	lastUsedAt: Int
+	"""
+	When this grant's refresh token stops working if it's never used
+	again. Sliding: it moves out on every refresh, up to the grant's
+	absolute cap (not exposed — a grant in active use never approaches it).
+	"""
+	refreshExpiresAt: Int!
 }
 
 """
@@ -1507,6 +1537,16 @@ type User {
 	guard exists to prevent.
 	"""
 	passkeys: [PasskeyInfo!]!
+	"""
+	The caller's own "connected AI apps" (OAuth grants), newest first.
+	**Self only**, exactly like [`Self::passkeys`] and for the same reason:
+	`adminUser` lets a superuser look up any user's record, and which AI
+	clients someone has authorized is theirs to see — `FORBIDDEN`, not an
+	empty list, for anyone but the user themselves (superusers included).
+	Filters out anything already past its TTL, since DynamoDB's deletion
+	lags real expiry.
+	"""
+	oauthGrants: [OauthGrant!]!
 	"""
 	Every (non-deleted) instance this user belongs to, and their role in
 	each — the instance switcher's data source, and also what the admin
