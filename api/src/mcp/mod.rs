@@ -27,6 +27,7 @@
 //! invalid tokens get a 401 carrying `WWW-Authenticate` pointing at the
 //! protected-resource metadata (RFC 9728), per the MCP authorization spec.
 
+pub mod tickets;
 pub mod tool;
 pub mod whoami;
 
@@ -137,7 +138,9 @@ const INSTRUCTIONS: &str = "Toolbox is a multi-tenant support-ticket and invoici
     Every tool acts with the authenticated caller's own permissions: a member sees only the \
     instances they belong to, and a superuser gets admin functions but no implicit access to \
     any instance's tickets or invoices. Call `whoami` first to learn who you are acting as \
-    and which instances (and kinds of instance) you can work in.";
+    and which instances (and kinds of instance) you can work in. Ticket tools apply to SUPPORT \
+    instances only. `reply_to_ticket` and closing or reopening a ticket send email to the \
+    customer and cannot be unsent; internal notes and assignment do not.";
 
 // ── Tool registry ───────────────────────────────────────────────────────────
 
@@ -145,7 +148,9 @@ const INSTRUCTIONS: &str = "Toolbox is a multi-tenant support-ticket and invoici
 /// values) rather than cached — `tools/list` is not a hot path, and this keeps
 /// each schema next to the tool it describes.
 fn tool_catalogue() -> Vec<Value> {
-    whoami::catalogue()
+    let mut tools = whoami::catalogue();
+    tools.extend(tickets::catalogue());
+    tools
 }
 
 async fn dispatch_tool<A>(ctx: &ToolContext<'_, A>, name: &str, arguments: &Value) -> ToolOutcome
@@ -153,6 +158,9 @@ where
     A: App + HasDb + HasMail + HasStorage + Send + Sync + 'static,
 {
     if let Some(outcome) = whoami::dispatch(ctx, name, arguments).await {
+        return outcome;
+    }
+    if let Some(outcome) = tickets::dispatch(ctx, name, arguments).await {
         return outcome;
     }
     ToolOutcome::error(format!("Unknown tool \"{name}\""))
