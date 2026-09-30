@@ -27,6 +27,7 @@
 //! invalid tokens get a 401 carrying `WWW-Authenticate` pointing at the
 //! protected-resource metadata (RFC 9728), per the MCP authorization spec.
 
+pub mod invoicing;
 pub mod tickets;
 pub mod tool;
 pub mod whoami;
@@ -140,7 +141,9 @@ const INSTRUCTIONS: &str = "Toolbox is a multi-tenant support-ticket and invoici
     any instance's tickets or invoices. Call `whoami` first to learn who you are acting as \
     and which instances (and kinds of instance) you can work in. Ticket tools apply to SUPPORT \
     instances only. `reply_to_ticket` and closing or reopening a ticket send email to the \
-    customer and cannot be unsent; internal notes and assignment do not.";
+    customer and cannot be unsent; internal notes and assignment do not. Invoicing tools apply \
+    to INVOICING instances only and send no email, but `finalize_invoice` is irreversible: only \
+    call it when the user has explicitly asked to finalize that specific invoice.";
 
 // ── Tool registry ───────────────────────────────────────────────────────────
 
@@ -150,6 +153,7 @@ const INSTRUCTIONS: &str = "Toolbox is a multi-tenant support-ticket and invoici
 fn tool_catalogue() -> Vec<Value> {
     let mut tools = whoami::catalogue();
     tools.extend(tickets::catalogue());
+    tools.extend(invoicing::catalogue());
     tools
 }
 
@@ -161,6 +165,9 @@ where
         return outcome;
     }
     if let Some(outcome) = tickets::dispatch(ctx, name, arguments).await {
+        return outcome;
+    }
+    if let Some(outcome) = invoicing::dispatch(ctx, name, arguments).await {
         return outcome;
     }
     ToolOutcome::error(format!("Unknown tool \"{name}\""))
