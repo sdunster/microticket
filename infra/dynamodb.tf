@@ -48,8 +48,11 @@ resource "aws_dynamodb_table" "instance" {
   # instance id. KEYS_ONLY: the caller always follows up with a GetItem for the
   # full instance record, so projecting more here would just be wasted storage.
   global_secondary_index {
-    name            = "slug-index"
-    hash_key        = "slug"
+    name = "slug-index"
+    key_schema {
+      attribute_name = "slug"
+      key_type       = "HASH"
+    }
     projection_type = "KEYS_ONLY"
   }
 }
@@ -86,8 +89,11 @@ resource "aws_dynamodb_table" "inbound_address" {
   # the per-item storage cost of projecting everything is negligible next to
   # avoiding an N-way BatchGetItem.
   global_secondary_index {
-    name            = "instance_id-index"
-    hash_key        = "instance_id"
+    name = "instance_id-index"
+    key_schema {
+      attribute_name = "instance_id"
+      key_type       = "HASH"
+    }
     projection_type = "ALL"
   }
 }
@@ -119,8 +125,11 @@ resource "aws_dynamodb_table" "user" {
   # instance.slug-index — the login path only needs the id to drive the next
   # GetItem.
   global_secondary_index {
-    name            = "email-index"
-    hash_key        = "email"
+    name = "email-index"
+    key_schema {
+      attribute_name = "email"
+      key_type       = "HASH"
+    }
     projection_type = "KEYS_ONLY"
   }
 }
@@ -154,16 +163,22 @@ resource "aws_dynamodb_table" "membership" {
   # Instance settings page: list every member (and their role) of an instance.
   # ALL avoids an N-way BatchGetItem to render the member list.
   global_secondary_index {
-    name            = "instance_id-index"
-    hash_key        = "instance_id"
+    name = "instance_id-index"
+    key_schema {
+      attribute_name = "instance_id"
+      key_type       = "HASH"
+    }
     projection_type = "ALL"
   }
   # "me" query / instance switcher: list every instance a user belongs to, with
   # their role in each. ALL for the same reason as instance_id-index above — a
   # user typically belongs to a handful of instances at most.
   global_secondary_index {
-    name            = "user_id-index"
-    hash_key        = "user_id"
+    name = "user_id-index"
+    key_schema {
+      attribute_name = "user_id"
+      key_type       = "HASH"
+    }
     projection_type = "ALL"
   }
 }
@@ -227,23 +242,41 @@ resource "aws_dynamodb_table" "ticket" {
 
   # Open/Closed list pages, split by status, newest activity first.
   global_secondary_index {
-    name            = "instance_status-last_activity_at-index"
-    hash_key        = "instance_status"
-    range_key       = "last_activity_at"
+    name = "instance_status-last_activity_at-index"
+    key_schema {
+      attribute_name = "instance_status"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "last_activity_at"
+      key_type       = "RANGE"
+    }
     projection_type = "ALL"
   }
   # All list page (every non-deleted ticket for the instance).
   global_secondary_index {
-    name            = "instance_visible-last_activity_at-index"
-    hash_key        = "instance_visible"
-    range_key       = "last_activity_at"
+    name = "instance_visible-last_activity_at-index"
+    key_schema {
+      attribute_name = "instance_visible"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "last_activity_at"
+      key_type       = "RANGE"
+    }
     projection_type = "ALL"
   }
   # "Assigned to me" filter.
   global_secondary_index {
-    name            = "instance_assignee-last_activity_at-index"
-    hash_key        = "instance_assignee"
-    range_key       = "last_activity_at"
+    name = "instance_assignee-last_activity_at-index"
+    key_schema {
+      attribute_name = "instance_assignee"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "last_activity_at"
+      key_type       = "RANGE"
+    }
     projection_type = "ALL"
   }
   # ALL projection on the three listing GSIs above: every ticket list page in
@@ -257,8 +290,11 @@ resource "aws_dynamodb_table" "ticket" {
   # GetItem on the resolved id anyway, to get a strongly consistent read
   # before appending a message and bumping last_activity_at.
   global_secondary_index {
-    name            = "instance_number-index"
-    hash_key        = "instance_number"
+    name = "instance_number-index"
+    key_schema {
+      attribute_name = "instance_number"
+      key_type       = "HASH"
+    }
     projection_type = "KEYS_ONLY"
   }
 }
@@ -298,9 +334,15 @@ resource "aws_dynamodb_table" "ticket_message" {
   # ticket's message count is small enough that projecting everything beats an
   # N-way GetItem per page render.
   global_secondary_index {
-    name            = "ticket_id-created_at-index"
-    hash_key        = "ticket_id"
-    range_key       = "created_at"
+    name = "ticket_id-created_at-index"
+    key_schema {
+      attribute_name = "ticket_id"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "created_at"
+      key_type       = "RANGE"
+    }
     projection_type = "ALL"
   }
   # Inbound-mail threading: resolve an In-Reply-To/References header back to
@@ -308,8 +350,11 @@ resource "aws_dynamodb_table" "ticket_message" {
   # id resolution step; the caller reads the resolved ticket_message (and its
   # parent ticket) with a separate strongly consistent GetItem.
   global_secondary_index {
-    name            = "rfc_message_id-index"
-    hash_key        = "rfc_message_id"
+    name = "rfc_message_id-index"
+    key_schema {
+      attribute_name = "rfc_message_id"
+      key_type       = "HASH"
+    }
     projection_type = "KEYS_ONLY"
   }
 }
@@ -381,8 +426,11 @@ resource "aws_dynamodb_table" "user_token" {
   # KEYS_ONLY: the resolved id drives a follow-up GetItem for the rest of the
   # token record (user_id, expiry).
   global_secondary_index {
-    name            = "token_hash-index"
-    hash_key        = "token_hash"
+    name = "token_hash-index"
+    key_schema {
+      attribute_name = "token_hash"
+      key_type       = "HASH"
+    }
     projection_type = "KEYS_ONLY"
   }
 }
@@ -418,8 +466,11 @@ resource "aws_dynamodb_table" "oauth_grant" {
   # Backs the "connected apps" list (a user's own grants). ALL: low-cardinality
   # and every field is rendered directly from the list.
   global_secondary_index {
-    name            = "user_id-index"
-    hash_key        = "user_id"
+    name = "user_id-index"
+    key_schema {
+      attribute_name = "user_id"
+      key_type       = "HASH"
+    }
     projection_type = "ALL"
   }
 
@@ -460,8 +511,11 @@ resource "aws_dynamodb_table" "api_token" {
   # reasoning as membership's instance_id-index: low-cardinality, low-traffic,
   # and every field is rendered directly from the list.
   global_secondary_index {
-    name            = "instance_id-index"
-    hash_key        = "instance_id"
+    name = "instance_id-index"
+    key_schema {
+      attribute_name = "instance_id"
+      key_type       = "HASH"
+    }
     projection_type = "ALL"
   }
 }
@@ -496,8 +550,11 @@ resource "aws_dynamodb_table" "project" {
   # cardinality (an instance's clients/jobs, not a user-generated table), and
   # every field is rendered directly from the list.
   global_secondary_index {
-    name            = "instance_id-index"
-    hash_key        = "instance_id"
+    name = "instance_id-index"
+    key_schema {
+      attribute_name = "instance_id"
+      key_type       = "HASH"
+    }
     projection_type = "ALL"
   }
 }
@@ -540,18 +597,30 @@ resource "aws_dynamodb_table" "billable_item" {
   # the list, and the unbilled/billed filter (`invoice_id` presence) runs as
   # a FilterExpression over the projected rows.
   global_secondary_index {
-    name            = "instance_id-date-index"
-    hash_key        = "instance_id"
-    range_key       = "date"
+    name = "instance_id-date-index"
+    key_schema {
+      attribute_name = "instance_id"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "date"
+      key_type       = "RANGE"
+    }
     projection_type = "ALL"
   }
 
   # One project's items — the project page's list, and (next) the pool an
   # invoice is drawn from. ALL for the same reason.
   global_secondary_index {
-    name            = "project_id-date-index"
-    hash_key        = "project_id"
-    range_key       = "date"
+    name = "project_id-date-index"
+    key_schema {
+      attribute_name = "project_id"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "date"
+      key_type       = "RANGE"
+    }
     projection_type = "ALL"
   }
 }
@@ -597,18 +666,30 @@ resource "aws_dynamodb_table" "invoice" {
   # number, total, project) is projected, and the DRAFT/UNPAID/PAID filter
   # runs as a FilterExpression over the projected rows.
   global_secondary_index {
-    name            = "instance_id-created_at-index"
-    hash_key        = "instance_id"
-    range_key       = "created_at"
+    name = "instance_id-created_at-index"
+    key_schema {
+      attribute_name = "instance_id"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "created_at"
+      key_type       = "RANGE"
+    }
     projection_type = "ALL"
   }
 
   # One project's invoices — the project page's list. ALL for the same
   # reason.
   global_secondary_index {
-    name            = "project_id-created_at-index"
-    hash_key        = "project_id"
-    range_key       = "created_at"
+    name = "project_id-created_at-index"
+    key_schema {
+      attribute_name = "project_id"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "created_at"
+      key_type       = "RANGE"
+    }
     projection_type = "ALL"
   }
 }
@@ -639,8 +720,11 @@ resource "aws_dynamodb_table" "webauthn_credential" {
   # passkey list/the 10-passkeys-per-user cap. ALL: both call sites need the
   # full serialized credential, not just its id.
   global_secondary_index {
-    name            = "user_id-index"
-    hash_key        = "user_id"
+    name = "user_id-index"
+    key_schema {
+      attribute_name = "user_id"
+      key_type       = "HASH"
+    }
     projection_type = "ALL"
   }
 }
